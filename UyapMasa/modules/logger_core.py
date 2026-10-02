@@ -101,8 +101,9 @@ HAZIR_SITELER = [
     ("Themis (Turkcell)", "https://themis-ist.turkcell.com.tr/"),
 ]
 
+# "session": Themis oturumu çerezde değil her isteğin gövdesinde (userContext.sessionId) gider.
 _HASSAS_ANAHTAR = re.compile(
-    r"pass|parola|[şs]ifre|pwd|otp|secret|token|captcha|credential", re.I)
+    r"pass|parola|[şs]ifre|pwd|otp|secret|token|captcha|credential|session", re.I)
 
 
 def hedef_dogrula(hedef):
