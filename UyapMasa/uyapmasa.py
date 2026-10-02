@@ -1598,7 +1598,10 @@ def _veritabani_hazirla():
         if kok not in sys.path:
             sys.path.insert(0, kok)
         import db_baslat
-        db_baslat.ensure_db()
+        if db_baslat.ensure_db():
+            # Günde bir pg_dump yedeği (bugün alınmadıysa), açılışı bekletmeden.
+            import db_yedek
+            db_yedek.gunluk_yedek_arkaplanda()
     except Exception as e:
         print(f"⚠️ Veritabanı hazırlanamadı (sorgular canlı UYAP'a düşecek): {e}")
 

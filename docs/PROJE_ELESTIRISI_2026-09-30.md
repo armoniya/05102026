@@ -139,6 +139,10 @@ Adım 1'inden hemen sonra (git + yedek kurulunca) yapılmalı.
    ikilileriyle; Windows Görev Zamanlayıcı ya da uygulama açılışında günde bir kez. Geri yükleme adımı
    belgelenip bir kez denenir.
 
+> **Adım 1 TAMAM (02.10.2026):** (1) yerel git deposu, ilk commit b8f1431. Uzak depo yok (kullanıcı kararı).
+> TCKN'ler temizlendi; Logger TCKN'yi çalıştırırken soruyor. (2) `db_yedek.py`: açılışta günde bir yedek,
+> 14 adet saklanıyor. Ayrı DB'ye geri yükleme denendi, satır sayıları aynı çıktı. Ayrıntı: `docs/DB_YEDEK.md`.
+
 ### Adım 2 — Kesinleşmenin doğruluğu ve görünürlüğü
 1. Kesinleşme kurallarını `dosya_core`'dan saf bir modüle taşı (ör. `kesinlesme_kurallari.py`: DB/ağ yok,
    girdi = borçlu + tebligat listesi + dosya durumu + tatiller + takip türü). `dosya_core` yalnız çağırır.
