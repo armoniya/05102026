@@ -1,0 +1,58 @@
+[
+  {
+    "key": "htiyati_Haciz",
+    "label": "İhtiyati Haciz",
+    "core": "htiyati_Haciz",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 24
+  },
+  {
+    "key": "Mts_evirme",
+    "label": "Mts çevirme",
+    "core": "Mts_evirme",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 18
+  },
+  {
+    "key": "Vekalet_Sunma",
+    "label": "Vekalet Sunma",
+    "core": "Vekalet_Sunma",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 12
+  },
+  {
+    "key": "baro_pulu_makbuzu_indiren",
+    "label": "Baro Pulu Makbuzu İndir",
+    "core": "baro_pulu_makbuzu_indiren",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 11
+  },
+  {
+    "key": "barkod_sorgu",
+    "label": "Kapalı Tebligat Barkod Sorgu (PTT)",
+    "core": "barkod_sorgu",
+    "grup": "Üretilen Modüller",
+    "endpoint": "api.ptt.gov.tr/api/ShipmentTracking",
+    "adim_sayisi": 0
+  },
+  {
+    "key": "XML_TAK_P_A_ILI_2807",
+    "label": "XML TAKİP AÇILIŞ 2807",
+    "core": "XML_TAK_P_A_ILI_2807",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 11
+  },
+  {
+    "key": "akis_21_2_Talep",
+    "label": "21/2 Talep",
+    "core": "akis_21_2_Talep",
+    "grup": "Üretilen Modüller",
+    "endpoint": "(oturum akışı)",
+    "adim_sayisi": 27
+  }
+]
