@@ -92,13 +92,26 @@ def dosya_kunyesi_kaydet(rec, yargi_turu=None):
     # OTURUMA GÖRE DEĞİŞTİĞİ için onunla upsert edilirse aynı dosya yeni id ile
     # gelince "duplicate key ... uq_dosya_kunye" hatası verir. Bu yüzden DOĞAL
     # ANAHTARLA upsert edip dosya_id'yi (ve diğer alanları) güncelliyoruz.
-    dosya, created = Dosya.objects.update_or_create(
-        birim=birim,
-        yil=yil,
-        sira_no=sira,
-        tur_kod=tur_kod,
-        defaults=dosya_defaults,
-    )
+    # update_or_create ile AYNI sorgu sayısı (select_for_update + save), ama
+    # eski durum_kod elde kalır: Açık→Kapalı GEÇİŞİNDE işlem durumu Pasif'e
+    # düşer (2026-10-02). Yalnız geçişte — kapalı dosyayı kullanıcı elle
+    # Aktif'e aldıysa sonraki senkronlar onu yeniden ezmez.
+    anahtar = {"birim": birim, "yil": yil, "sira_no": sira, "tur_kod": tur_kod}
+    try:
+        dosya = Dosya.objects.select_for_update().get(**anahtar)
+        eski_durum_kod, created = dosya.durum_kod, False
+    except Dosya.DoesNotExist:
+        dosya, eski_durum_kod, created = Dosya(**anahtar), None, True
+    for alan, deger in dosya_defaults.items():
+        setattr(dosya, alan, deger)
+    guncel_alanlar = list(dosya_defaults) + ["son_senkron"]
+    if (dosya.durum_kod == Dosya.Durum.KAPALI and eski_durum_kod != Dosya.Durum.KAPALI
+            and dosya.islem_durumu != Dosya.IslemDurumu.PASIF):
+        dosya.islem_durumu_ata(Dosya.IslemDurumu.PASIF,
+                               "UYAP'ta dosya kapandı (otomatik)", kaydet=False)
+        guncel_alanlar += ["islem_durumu", "islem_durumu_notu",
+                           "islem_durumu_tarihi", "bekleme_bitis_tarihi"]
+    dosya.save(update_fields=None if created else guncel_alanlar)
     return dosya, created
 
 

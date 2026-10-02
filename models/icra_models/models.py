@@ -15,6 +15,7 @@ Bu, ayrı bir 'Alacaklı→Borçlu→Dosya' FK zinciri yerine TEK 'Taraf' tablos
 modeller şimdiden hazır.
 """
 from django.db import models
+from django.utils import timezone
 
 
 class YargiTuru(models.IntegerChoices):
@@ -267,6 +268,23 @@ class Dosya(models.Model):
 
     taraflar = models.ManyToManyField(Taraf, through="DosyaTaraf", related_name="dosyalar")
 
+    # Büronun KENDİ iş işareti (2026-10-02 kullanıcı isteği) — UYAP'tan GELMEZ,
+    # senkron `dosya_defaults`'a hiç yazmaz. Tek otomatik kural: dosya UYAP'ta
+    # Açık→Kapalı'ya geçtiği anda Pasif'e düşer (ingest.dosya_kunyesi_kaydet);
+    # sonrasında elle Aktif'e alınırsa her senkronda yeniden ezilmez. Toplu
+    # turlar bu alana göre ŞİMDİLİK filtrelemez (kullanıcı kararı: yalnız model).
+    class IslemDurumu(models.TextChoices):
+        AKTIF = "aktif", "Aktif - işlem yapılabilir"
+        PASIF = "pasif", "Pasif - işlem yapma"
+        BEKLEMEDE = "beklemede", "Beklemede"
+
+    islem_durumu = models.CharField("İşlem Durumu", max_length=12, choices=IslemDurumu.choices,
+                                    default=IslemDurumu.AKTIF, db_index=True)
+    islem_durumu_notu = models.TextField("İşlem Durumu Notu / Gerekçe", blank=True, default="")
+    islem_durumu_tarihi = models.DateTimeField("İşlem Durumu Değişiklik Tarihi", null=True, blank=True)
+    # Yalnız Beklemede'de anlamlı; başka duruma geçince temizlenir.
+    bekleme_bitis_tarihi = models.DateField("Bekleme Bitiş Tarihi", null=True, blank=True)
+
     son_senkron = models.DateTimeField(auto_now=True)
     olusturulma = models.DateTimeField(auto_now_add=True)
 
@@ -281,6 +299,19 @@ class Dosya(models.Model):
 
     def __str__(self):
         return f"{self.birim.ad} {self.yil}/{self.sira_no} ({self.get_tur_kod_display()})"
+
+    def islem_durumu_ata(self, durum, notu="", bekleme_bitis=None, kaydet=True):
+        """İşlem durumunu değiştirir; tarih şimdi olur, bekleme bitişi yalnız
+        Beklemede'de tutulur. kaydet=True ise yalnız bu dört alan yazılır
+        (künye alanlarına dokunulmaz)."""
+        self.islem_durumu =self.IslemDurumu(durum)
+        self.islem_durumu_notu = notu or ""
+        self.islem_durumu_tarihi = timezone.now()
+        self.bekleme_bitis_tarihi = (bekleme_bitis if self.islem_durumu == self.IslemDurumu.BEKLEMEDE
+                                     else None)
+        if kaydet:
+            self.save(update_fields=["islem_durumu", "islem_durumu_notu",
+                                     "islem_durumu_tarihi", "bekleme_bitis_tarihi"])
 
 
 class DosyaTaraf(models.Model):

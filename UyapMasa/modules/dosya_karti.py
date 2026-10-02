@@ -13,10 +13,11 @@ Akış (kullanıcı kararı, 2026-09-24): kart önce YEREL VERİTABANINDAN açı
 kaydedilir ve içerik aynı pencerede yeniden çizilir.
 """
 
+import datetime
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import simpledialog, ttk
 
 from theme import C, RoundButton
 from . import dosya_core
@@ -73,6 +74,17 @@ def kunye_db_den(rec, log_fn=None):
         "dosyaTur": dosya.tur or "",
         "dosyaDurum": dosya.durum or "",
         "acilisTarihi": dosya.acilis_tarihi,
+        **_islem_durumu_alanlari(dosya),
+    }
+
+
+def _islem_durumu_alanlari(dosya):
+    return {
+        "islemDurumuKod": dosya.islem_durumu,
+        "islemDurumu": dosya.get_islem_durumu_display(),
+        "islemDurumuNotu": dosya.islem_durumu_notu,
+        "islemDurumuTarihi": dosya.islem_durumu_tarihi,
+        "beklemeBitisTarihi": dosya.bekleme_bitis_tarihi,
     }
 
 
@@ -110,7 +122,13 @@ def _ozet_sekmesi(app, parent, rec, ham, aile):
         ("Dosya Türü", rec.get("dosyaTur", "")),
         ("Durum", rec.get("dosyaDurum", "")),
         ("Açılış Tarihi", _tarih_metni(rec.get("acilisTarihi") or rec.get("dosyaAcilisTarihi"))),
+        ("İşlem Durumu", rec.get("islemDurumu", "")),
+        ("Durum Değişikliği", _tarih_metni(rec.get("islemDurumuTarihi"))),
     ]
+    if rec.get("islemDurumuKod") == "beklemede":
+        alanlar.append(("Bekleme Bitişi", _tarih_metni(rec.get("beklemeBitisTarihi"))))
+    if rec.get("islemDurumuNotu"):
+        alanlar.append(("Durum Notu", rec.get("islemDurumuNotu")))
     if aile == "icra":
         alanlar += [
             ("Takibin Türü", ham.get("takibinTuru_metin") or ham.get("takibinTuru", "")),
@@ -213,21 +231,84 @@ def ac(app, rec, log_fn=None, liste_yenile_fn=None, bitti_fn=None):
 
     def hazir(veri):
         try:
-            _pencere(app, kart_rec, veri[0], veri[1], oku, liste_yenile_fn)
+            _pencere(app, kart_rec, veri[0], veri[1], oku, liste_yenile_fn, log_fn)
         finally:
             if bitti_fn:
                 bitti_fn()
     _arka_planda(app, lambda: oku(False), hazir)
 
 
-def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn):
+def _tarih_coz(metin):
+    """'GG.AA.YYYY' → date; boşsa None; geçersizse ValueError."""
+    metin = (metin or "").strip()
+    if not metin:
+        return None
+    return datetime.datetime.strptime(metin, "%d.%m.%Y").date()
+
+
+def _bekleme_penceresi(app, top, rec, durum_kaydet):
+    """Beklemeye Al / Beklemeyi Düzenle: bitiş tarihi + not. Dosya zaten
+    Beklemede ise alanlar dolu gelir ve "Beklemeyi Bitir" düğmesi çıkar
+    (Aktif'e döner)."""
+    beklemede = rec.get("islemDurumuKod") == "beklemede"
+    dlg = tk.Toplevel(top)
+    dlg.title("Beklemeyi Düzenle" if beklemede else "Beklemeye Al")
+    dlg.configure(bg=C.CARD)
+    dlg.resizable(False, False)
+    dlg.transient(top)
+
+    tk.Label(dlg, text="Bekleme bitiş tarihi (GG.AA.YYYY — boş bırakılabilir)", bg=C.CARD,
+             fg=C.SAGE_DK, font=app.f_small, anchor="w").pack(anchor="w", padx=18, pady=(16, 4))
+    tarih_e = tk.Entry(dlg, font=app.f_body, width=14)
+    tarih_e.pack(anchor="w", padx=18)
+    tk.Label(dlg, text="Not / gerekçe", bg=C.CARD, fg=C.SAGE_DK, font=app.f_small,
+             anchor="w").pack(anchor="w", padx=18, pady=(12, 4))
+    not_t = tk.Text(dlg, font=app.f_body, width=48, height=4, wrap="word")
+    not_t.pack(fill="x", padx=18)
+    if beklemede:
+        tarih_e.insert(0, _tarih_metni(rec.get("beklemeBitisTarihi")))
+        not_t.insert("1.0", rec.get("islemDurumuNotu") or "")
+    hata = tk.Label(dlg, text="", bg=C.CARD, fg=C.CLAY, font=app.f_small, anchor="w")
+    hata.pack(anchor="w", padx=18, pady=(6, 0))
+
+    def kaydet():
+        try:
+            bitis = _tarih_coz(tarih_e.get())
+        except ValueError:
+            hata.config(text="Tarih GG.AA.YYYY biçiminde olmalı (ör. 15.11.2026).")
+            return
+        notu = not_t.get("1.0", "end").strip()   # destroy'dan ÖNCE oku
+        dlg.destroy()
+        durum_kaydet("beklemede", notu, bitis)
+
+    def bitir():
+        dlg.destroy()
+        durum_kaydet("aktif", "Bekleme bitirildi")
+
+    alt = tk.Frame(dlg, bg=C.CARD)
+    alt.pack(fill="x", padx=18, pady=(12, 16))
+    RoundButton(alt, "Kaydet", command=kaydet, kind="primary",
+                font=app.f_nav_b, height=34).pack(side="right")
+    RoundButton(alt, "İptal", command=dlg.destroy, kind="ghost",
+                font=app.f_nav_b, height=34).pack(side="right", padx=(0, 8))
+    if beklemede:
+        RoundButton(alt, "Beklemeyi Bitir (Aktife Al)", command=bitir, kind="ghost",
+                    font=app.f_nav_b, height=34).pack(side="left")
+
+    dlg.update_idletasks()
+    dlg.geometry(f"+{top.winfo_rootx() + 60}+{top.winfo_rooty() + 80}")
+    dlg.grab_set()
+    tarih_e.focus_set()
+
+
+def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None):
     global _pencere_sayaci
     _stil_hazirla(app)
     baslik = f"Dosya Bilgileri — {rec.get('dosyaNo', '') or ''}".rstrip(" —")
     top = tk.Toplevel(app)
     top.title(baslik)
     top.configure(bg=C.CARD)
-    top.geometry("760x560")
+    top.geometry("880x560")   # alt çubukta 4 düğme
     top.minsize(620, 420)
     top.resizable(True, True)
     # BİLEREK: transient/grab_set YOK — pencere bağımsız, ana pencereyi ya da
@@ -247,12 +328,55 @@ def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn):
     canli_btn = RoundButton(alt, "Canlı Veriyi Getir (UYAP)", command=lambda: canli_getir(),
                             kind="ghost", font=app.f_nav_b, height=36)
     canli_btn.pack(side="right", padx=(0, 8))
+    # Pasife Çevir ↔ Aktife Al (2026-10-02) — yalnız yerel DB, UYAP'a gitmez.
+    pasif_btn = RoundButton(alt, "Pasife Çevir", command=lambda: pasif_degistir(),
+                            kind="ghost", font=app.f_nav_b, height=36)
+    pasif_btn.pack(side="right", padx=(0, 8))
+    bekleme_btn = RoundButton(alt, "Beklemeye Al", command=lambda: _bekleme_penceresi(
+                                  app, top, rec, durum_kaydet),
+                              kind="ghost", font=app.f_nav_b, height=36)
+    bekleme_btn.pack(side="right", padx=(0, 8))
     durum.pack(side="left", fill="x", expand=True)
 
     icerik = tk.Frame(top, bg=C.CARD)
     icerik.pack(fill="both", expand=True)
+    son_cizim = {}
+
+    def pasif_btn_tazele():
+        kod = rec.get("islemDurumuKod")
+        pasif_btn.set_text("Aktife Al" if kod == "pasif" else "Pasife Çevir")
+        bekleme_btn.set_text("Beklemeyi Düzenle" if kod == "beklemede" else "Beklemeye Al")
+
+    def pasif_degistir():
+        yeni = "aktif" if rec.get("islemDurumuKod") == "pasif" else "pasif"
+        notu = simpledialog.askstring(
+            "Pasife Çevir" if yeni == "pasif" else "Aktife Al",
+            "Gerekçe / not (boş bırakılabilir):", parent=top)
+        if notu is None:   # İptal
+            return
+        durum_kaydet(yeni, notu.strip())
+
+    def durum_kaydet(yeni, notu="", bekleme_bitis=None):
+        pasif_btn.set_state("disabled")
+        bekleme_btn.set_state("disabled")
+        _arka_planda(top, lambda: dosya_core.islem_durumu_degistir(
+            rec, yeni, notu, bekleme_bitis, log_fn=log_fn), pasif_degisti)
+
+    def pasif_degisti(dosya):
+        if not top.winfo_exists():
+            return
+        pasif_btn.set_state("normal")
+        bekleme_btn.set_state("normal")
+        if dosya is None:
+            durum.config(text="⚠️ İşlem durumu kaydedilemedi — dosya yerel veritabanında bulunamadı.")
+            return
+        rec.update(_islem_durumu_alanlari(dosya))
+        pasif_btn_tazele()
+        ciz(**son_cizim)
+        durum.config(text=f"İşlem durumu: {rec['islemDurumu']}")
 
     def ciz(sonuc, barkodlar, canli):
+        son_cizim.update(sonuc=sonuc, barkodlar=barkodlar, canli=canli)
         for w in icerik.winfo_children():
             w.destroy()
         ham, aile, kaydedildi, hata, taraflar = sonuc
@@ -301,10 +425,12 @@ def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn):
             return
         sonuc_c, barkodlar_c = veri
         canli_btn.set_state("normal")
+        pasif_btn_tazele()
         ciz(sonuc_c, barkodlar_c, canli=True)
         if sonuc_c[2] and liste_yenile_fn:   # kaydedildi → liste yeni veriyi göstersin
             liste_yenile_fn()
 
+    pasif_btn_tazele()
     ciz(sonuc, barkodlar or [], canli=False)
 
     top.update_idletasks()

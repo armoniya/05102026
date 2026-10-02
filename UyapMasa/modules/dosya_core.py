@@ -1411,6 +1411,18 @@ def _dosya_rec_ten_bul(rec, log):
         return None
 
 
+def islem_durumu_degistir(rec, durum, notu="", bekleme_bitis=None, log_fn=None):
+    """Dosya kartındaki elle değişiklik (Aktif/Pasif/Beklemede) — yalnız
+    yerel DB, UYAP'a gitmez. Başarılıysa güncel `Dosya`, değilse None."""
+    log = log_fn or (lambda m: None)
+    dosya = _dosya_rec_ten_bul(rec, log)
+    if dosya is None:
+        return None
+    dosya.islem_durumu_ata(durum, notu, bekleme_bitis)
+    log(f"✓ {dosya.dosya_no}: işlem durumu → {dosya.get_islem_durumu_display()}")
+    return dosya
+
+
 def dosya_detay_goster_ve_kaydet(rec, log_fn=None, istek_sarici=None):
     """Tek giriş noktası (UI'ların çağıracağı): ham arama kaydından (`rec` —
     `search_phrase_detayli.ajx` satırı, TAZE 'dosyaId' içermeli) ayrıntı VE
