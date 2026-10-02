@@ -625,7 +625,7 @@ def _e_teblig_mazbatasi_coz(govde_metni, log_fn=None):
 
 def _e_teblig_haritasini_olustur(motor, dosya_id, evraklar, log):
     """[2026-09-24'ten beri ÇAĞRILMIYOR — kullanıcı kararı: "okundu" bilgisine
-    girilmez, tebliğ tarihi = evrak tarihi + 5 gün (bkz. e_teblig_teblig_tarihi).
+    girilmez, tebliğ tarihi = evrak tarihi (bkz. e_teblig_teblig_tarihi).
     Mazbata çözümü gerekirse diye bırakıldı.] Dosyadaki TÜM 'Kapalı E-Tebliğ Mazbatası' evraklarını indirir, her
     birinin barkodunu (aynı Code-39 font yöntemiyle, bkz. `barkod_bul` —
     bu mazbatalarda da 'Taahhütlü No' alanı aynı fontla basılıyor) ve
@@ -820,28 +820,25 @@ def _ptt_sonuclandi(durum):
 def _e_teblig_sonuclandi(durum, tarih):
     """Elektronik tebligatın tebliğ tarihi DB'de var mı? (varsa sonuç KESİN —
     bir daha hiçbir şey indirilmez). 2026-09-24 kullanıcı kararı: "okundu"
-    bilgisine hiç girilmez, tebliğ tarihi = evrak tarihi + 5 gün (bkz.
-    `e_teblig_teblig_tarihi`); eski kayıtlarda mazbatadan okunmuş tarih de geçerli."""
+    bilgisine hiç girilmez, tebliğ tarihi = evrak tarihi (bkz.
+    `e_teblig_teblig_tarihi`)."""
     d = dosya_core.tr_lower(durum or "")
     return bool(tarih) and d.startswith("e-tebligat:")
 
 
 # 2026-09-24 kullanıcı kararı: "e-tebligatta okundu bilgisine girme hiç; tebliğ
-# tarihi yeterli, tebliğden itibaren 5 gün okuma süresi var." DB'deki 11.444
-# e-tebligatta mazbatadaki "okundu sayıldı" tarihi 11.440'ında evrak tarihinden
-# TAM 5 gün sonra (4'ünde 6 gün — hesaba ertesi gün düşmüş). Bu yüzden Kapalı
-# E-Tebliğ Mazbatası artık İNDİRİLMEZ; tebliğ tarihi evrak tarihinden hesaplanır.
-E_TEBLIG_OKUMA_SURESI_GUN = 5
-E_TEBLIG_DURUM_METNI = "E-Tebligat: tebliğ edilmiş sayılır (evrak tarihi + 5 gün)"
+# tarihi yeterli, tebliğden itibaren 5 gün okuma süresi var." Kapalı E-Tebliğ
+# Mazbatası İNDİRİLMEZ. 2026-10-02 kullanıcı düzeltmesi: tebliğ tarihi EVRAK
+# TARİHİDİR (28.09 tebliğ → 03.10 yazmak yanlış); 5 gün yalnız sürenin başlangıcını
+# öteler — bkz. dosya_core.sure_baslangici.
+E_TEBLIG_OKUMA_SURESI_GUN = dosya_core.E_TEBLIG_OKUMA_SURESI_GUN
+E_TEBLIG_DURUM_METNI = "E-Tebligat: tebliğ edildi (süre 5 gün sonra başlar)"
 
 
 def e_teblig_teblig_tarihi(evrak_tarihi):
-    """'GG/AA/YYYY' evrak tarihine 5 gün ekler; çözülemezse ""."""
-    import datetime as _dt
+    """E-tebligatın tebliğ tarihi = evrak tarihi ('GG/AA/YYYY'); çözülemezse ""."""
     t = dosya_core._teblig_tarihini_coz(evrak_tarihi)
-    if not t:
-        return ""
-    return (t + _dt.timedelta(days=E_TEBLIG_OKUMA_SURESI_GUN)).strftime("%d/%m/%Y")
+    return t.strftime("%d/%m/%Y") if t else ""
 
 
 def _ptt_adimi(barkod, log, ptt_sorgusu):
@@ -1300,7 +1297,7 @@ def _dosya_isle(motor, birim_adi, dosya_no, log, _ekle, db, rec_bilinen=None, pt
                         ozet, tarih, ptt_veri = bilinen.ptt_durumu, bilinen.son_islem_tarihi, None
                         log("  ♻️ E-tebligat tebliğ tarihi kayıtlı — hiçbir şey indirilmedi.")
                     elif bilinen.elektronik_tebligat:
-                        # 2026-09-24: mazbata İNDİRİLMEZ — tebliğ = evrak tarihi + 5 gün.
+                        # 2026-09-24: mazbata İNDİRİLMEZ — tebliğ = evrak tarihi (süre +5 günden).
                         tarih = e_teblig_teblig_tarihi(evrak.get("onaylandigiTarih") or bilinen.evrak_tarihi)
                         ozet = E_TEBLIG_DURUM_METNI if tarih else "Elektronik Tebligat (evrak tarihi yok)"
                         ptt_veri = None
@@ -1388,7 +1385,7 @@ def _dosya_isle(motor, birim_adi, dosya_no, log, _ekle, db, rec_bilinen=None, pt
                 if ELEKTRONIK_ANAHTAR in aciklama:
                     # e-Tebligat PTT'ye çıkmaz. 2026-09-24 kullanıcı kararı:
                     # Kapalı E-Tebliğ Mazbatası ("okundu") İNDİRİLMEZ — tebliğ
-                    # tarihi = evrak tarihi + 5 gün (bkz. e_teblig_teblig_tarihi).
+                    # tarihi = evrak tarihi (bkz. e_teblig_teblig_tarihi).
                     tarih = e_teblig_teblig_tarihi(evrak.get("onaylandigiTarih"))
                     ozet = E_TEBLIG_DURUM_METNI if tarih else "Elektronik Tebligat (evrak tarihi yok)"
                     log(f"  ✅ {ozet}" + (f" ({tarih})" if tarih else ""))

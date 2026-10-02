@@ -2171,26 +2171,36 @@ def _teblig_tarihini_coz(deger):
         return None
 
 
+# E-tebligatta tebliğ tarihi = evrak tarihi (`son_islem_tarihi`'nde o yazılır);
+# 5 günlük okuma süresi yalnız SÜRENİN BAŞLANGICINI öteler (kullanıcı, 2026-10-02:
+# "süre beş gün sonra başlıyor ama tebliğ tarihini 5 gün sonrasına yazman doğru değil").
+E_TEBLIG_OKUMA_SURESI_GUN = 5
+
+
+def sure_baslangici(barkod_kaydi):
+    """Kesinleşme süresinin hesaplandığı tebliğ günü: fizikide tebliğ tarihi,
+    e-tebligatta tebliğ (evrak) tarihi + 5 gün. Tarih yoksa None."""
+    t = _teblig_tarihini_coz(barkod_kaydi.son_islem_tarihi)
+    if t and barkod_kaydi.elektronik_tebligat:
+        t += datetime.timedelta(days=E_TEBLIG_OKUMA_SURESI_GUN)
+    return t
+
+
 def _tebligat_gerceklesti_mi(barkod_kaydi):
     """Bu TebligatBarkod satırı GERÇEKTEN teslim/okundu-sayılmış mı —
     "Dağıtımda"/"İade" gibi ara durumlarda kesinleşme süresi BAŞLAMAZ.
-    Elektronik tebligatta `son_islem_tarihi` yalnız Kapalı E-Tebliğ Mazbatası
-    çözüldüğünde dolar (bkz. barkod_sorgu._e_teblig_haritasini_olustur) — bu
-    yüzden dolu olması yeterlidir. Fiziki PTT'de `ptt_durumu` metninde
-    "teslim edildi" aranır (canlı doğrulanan tek kesin terim, bkz.
-    barkod_sorgu._ptt_durum_ve_tarih)."""
+    Fiziki PTT'de `ptt_durumu` metninde "teslim edildi" aranır (canlı
+    doğrulanan tek kesin terim, bkz. barkod_sorgu._ptt_durum_ve_tarih)."""
     if barkod_kaydi.elektronik_tebligat:
-        # 2026-09-24: tebliğ tarihi artık evrak tarihi + 5 gün olarak ÖNCEDEN
-        # yazılıyor (bkz. barkod_sorgu.e_teblig_teblig_tarihi) — o gün gelmeden
-        # tebliğ gerçekleşmiş sayılmaz.
-        t = _teblig_tarihini_coz(barkod_kaydi.son_islem_tarihi)
+        # 5 günlük okuma süresi dolmadan tebliğ gerçekleşmiş sayılmaz.
+        t = sure_baslangici(barkod_kaydi)
         return bool(t) and t <= datetime.date.today()
     return "teslim edildi" in tr_lower(barkod_kaydi.ptt_durumu or "")
 
 
 def _mazbatasi_dosyaya_dondu_mu(k):
     """Bu ödeme emri tebligatının KENDİ mazbatası icra dosyasına dönmüş mü?
-    Elektronik tebligatta ayrı bir dönüş beklenmez (tebliğ = evrak + 5 gün,
+    Elektronik tebligatta ayrı bir dönüş beklenmez (tebliğ = evrak tarihi,
     mazbata indirilmiyor — bkz. barkod_sorgu.e_teblig_teblig_tarihi). Fizikide
     yalnız bu barkoda ait kanıt sayılır: açıklamasında bu barkod geçen mazbata
     ya da UYAP'ın evrak açıklamasına eklediği "- Tebliğ Edildi". Barkodsuz
@@ -2229,7 +2239,7 @@ def _borclu_kesinlesme_hesapla(dt, odeme_emirleri, tatiller, bugun, DosyaTarafCl
     for k in odeme_emirleri:
         if not _tebligat_gerceklesti_mi(k) or _mazbata_sonucu(k.evrak_aciklama) == "edilemedi":
             continue
-        t = _teblig_tarihini_coz(k.son_islem_tarihi)
+        t = sure_baslangici(k)
         if not t:
             continue
         if teblig_tarihi is None or t > teblig_tarihi:
