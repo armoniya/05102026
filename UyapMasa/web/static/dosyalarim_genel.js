@@ -411,6 +411,7 @@
       var satir = "  " + (b.evrakTarihi || "—") + " — " + (b.tebligatTuru || "Tür belirsiz") +
         " — Barkod: " + (b.barkod || "—") + " — Durum: " + (b.pttDurumu || "—");
       if (b.sonIslemTarihi) satir += " (" + b.sonIslemTarihi + ")";
+      if (b.teslimSekli) satir += " — " + b.teslimSekli;
       satir += " — Tebliğ Mazbatası: " + (b.tebligMazbatasiVar || "—");
       if (b.kapaliTebligMazbatasiVar === "Var") satir += ", Kapalı Mazbata: Var";
       s.push(satir);

@@ -1288,10 +1288,7 @@ def _taraflar_kesinlesme_bilgisi_ekle(dosya, taraflar):
     for t in taraflar:
         dt = borclular.get(tr_lower(t.get("adi", "")))
         t["kesinlesmeDurumu"] = kesinlesme_metni(dt) if dt else ""
-        teb = dt.get_tebligat_durumu_display() if dt and dt.tebligat_durumu else ""
-        if teb and dt.tebligat_durum_tarihi:
-            teb += f" ({dt.tebligat_durum_tarihi:%d.%m.%Y})"
-        t["tebligatDurumu"] = teb
+        t["tebligatDurumu"] = tebligat_metni(dt) if dt else ""
     return taraflar
 
 
@@ -1636,13 +1633,13 @@ class _YalinBag:
     """Liste okuması için `DosyaTaraf`ın hafif eşi — listelerin kullandığı alanlar
     ve `get_*_display()` metotları aynı sonucu verir."""
     __slots__ = ("pk", "rol", "sira", "taraf", "kesinlesme_durumu", "kesinlesme_tarihi", "tebligat_durumu",
-                 "tebligat_durum_tarihi", "vekiller")
+                 "tebligat_durum_tarihi", "tebligat_sekli", "vekiller")
     _KES = _TEB = None
 
-    def __init__(self, pk, rol, sira, taraf, kes, kes_tarih, teb, teb_tarih):
+    def __init__(self, pk, rol, sira, taraf, kes, kes_tarih, teb, teb_tarih, teb_sekli=""):
         self.pk, self.rol, self.sira, self.taraf = pk, rol, sira, taraf
         self.kesinlesme_durumu, self.kesinlesme_tarihi = kes, kes_tarih
-        self.tebligat_durumu, self.tebligat_durum_tarihi = teb, teb_tarih
+        self.tebligat_durumu, self.tebligat_durum_tarihi, self.tebligat_sekli = teb, teb_tarih, teb_sekli
         self.vekiller = _YalinVekiller(pk)
 
     def get_kesinlesme_durumu_display(self):
@@ -1667,12 +1664,12 @@ def _yalin_taraf_baglari(dosya_qs):
     satirlar = (DosyaTaraf.objects.filter(dosya_id__in=dosya_qs.order_by().values("id"))
                 .order_by("dosya_id", "sira", "id")
                 .values_list("dosya_id", "id", "rol", "sira", "kesinlesme_durumu", "kesinlesme_tarihi",
-                             "tebligat_durumu", "tebligat_durum_tarihi", "taraf_id", "taraf__tur", "taraf__ad",
-                             "taraf__soyad", "taraf__unvan", "taraf__tckn", "taraf__mersis_no",
-                             "taraf__vergi_no"))
-    for (did, bid, rol, sira, kes, kes_t, teb, teb_t, *taraf) in satirlar:
+                             "tebligat_durumu", "tebligat_durum_tarihi", "tebligat_sekli", "taraf_id",
+                             "taraf__tur", "taraf__ad", "taraf__soyad", "taraf__unvan", "taraf__tckn",
+                             "taraf__mersis_no", "taraf__vergi_no"))
+    for (did, bid, rol, sira, kes, kes_t, teb, teb_t, teb_s, *taraf) in satirlar:
         harita.setdefault(did, []).append(
-            _YalinBag(bid, rol, sira, _YalinTaraf(*taraf), kes, kes_t, teb, teb_t))
+            _YalinBag(bid, rol, sira, _YalinTaraf(*taraf), kes, kes_t, teb, teb_t, teb_s))
     return harita
 
 
@@ -2011,6 +2008,7 @@ def tebligat_barkod_gecmisi_listele(limit=TEBLIGAT_BARKOD_LIMIT, dosya_id=None,
                 "barkod": t.barkod, "tebligatTuru": t.tebligat_turu,
                 "elektronikTebligat": "Evet" if t.elektronik_tebligat else "Hayır",
                 "pttDurumu": t.ptt_durumu, "sonIslemTarihi": t.son_islem_tarihi,
+                "teslimSekli": t.teslim_sekli,
                 "tebligMazbatasiVar": "Var" if t.tebligat_mazbatasi_var else "Yok",
                 "tebligMazbatasiAciklama": t.tebligat_mazbatasi_aciklama,
                 "kapaliTebligMazbatasiVar": "Var" if t.kapali_tebligat_mazbatasi_var else "Yok",
@@ -2279,25 +2277,46 @@ def _borclu_tebligat_hesapla(odeme_emirleri, TebligatDurumu):
       • yoksa evrak tarihi en yeni olan ve bilgi taşıyan: PTT İADE ya da mazbata
         "Tebliğ Edilemedi" → İade; başka bir PTT hareketi ya da günü gelmemiş
         e-tebligat → Dağıtımda;
-      • hiç bilgi yok → ("", None)."""
-    en_yeni = None
+      • hiç bilgi yok → ("", None).
+    Üçüncü değer (2026-10-02): durumu veren tebligatın teslim şekli / iade nedeni
+    (`TebligatBarkod.teslim_sekli`; e-tebligatta "E-tebligat"), yoksa ""."""
+    en_yeni = en_yeni_k = None
     for k in odeme_emirleri:
         if _tebligat_gerceklesti_mi(k):
             t = _teblig_tarihini_coz(k.son_islem_tarihi)
             if t and (en_yeni is None or t > en_yeni):
-                en_yeni = t
+                en_yeni, en_yeni_k = t, k
     if en_yeni:
-        return TebligatDurumu.TEBLIG_EDILDI, en_yeni
+        return TebligatDurumu.TEBLIG_EDILDI, en_yeni, _teslim_sekli(en_yeni_k)
     if any(_mazbata_sonucu(k.evrak_aciklama) == "edildi" for k in odeme_emirleri):
-        return TebligatDurumu.TEBLIG_EDILDI, None
+        return TebligatDurumu.TEBLIG_EDILDI, None, ""
     for k in sorted(odeme_emirleri, key=lambda k: _evrak_tarihi_siralama_anahtari(k.evrak_tarihi),
                     reverse=True):
         ptt = tr_lower(k.ptt_durumu or "")
         if "iade" in ptt or _mazbata_sonucu(k.evrak_aciklama) == "edilemedi":
-            return TebligatDurumu.IADE, _teblig_tarihini_coz(k.son_islem_tarihi)
+            return TebligatDurumu.IADE, _teblig_tarihini_coz(k.son_islem_tarihi), _teslim_sekli(k)
         if k.elektronik_tebligat or (ptt and "kayit yok" not in ptt and "kayıt yok" not in ptt):
-            return TebligatDurumu.DAGITIMDA, None
-    return "", None
+            return TebligatDurumu.DAGITIMDA, None, ""
+    return "", None, ""
+
+
+def _teslim_sekli(k):
+    if k.elektronik_tebligat:
+        return "E-tebligat"
+    return getattr(k, "teslim_sekli", "") or ""
+
+
+def tebligat_metni(b):
+    """"Tebliğ Edildi (12.09.2026) — Muhtara teslim (21. md.)" — borçlu başına
+    (DosyaTaraf ya da _YalinBag); tarih ve teslim şekli/iade nedeni biliniyorsa."""
+    if not b.tebligat_durumu:
+        return ""
+    m = b.get_tebligat_durumu_display()
+    if b.tebligat_durum_tarihi:
+        m += f" ({b.tebligat_durum_tarihi:%d.%m.%Y})"
+    if getattr(b, "tebligat_sekli", ""):
+        m += f" — {b.tebligat_sekli}"
+    return m
 
 
 def kesinlesme_metni(dt):
@@ -2319,10 +2338,8 @@ def borclu_satirlari(baglar):
     for b in baglar:
         if b.rol != "borclu":
             continue
-        teb = b.get_tebligat_durumu_display() if b.tebligat_durumu else ""
-        if teb and b.tebligat_durum_tarihi:
-            teb += f" ({b.tebligat_durum_tarihi:%d.%m.%Y})"
-        out.append({"borclu": str(b.taraf), "kesinlesme_durumu": kesinlesme_metni(b), "tebligat_durumu": teb})
+        out.append({"borclu": str(b.taraf), "kesinlesme_durumu": kesinlesme_metni(b),
+                    "tebligat_durumu": tebligat_metni(b)})
     return out
 
 
@@ -2358,12 +2375,7 @@ def borclu_durum_metinleri(baglar):
         return "; ".join(f"{ad}: {m}" if cok else m for ad, m in parcalar if m)
 
     kes = [(str(b.taraf), kesinlesme_metni(b)) for b in borclular]
-    teb = []
-    for b in borclular:
-        m = b.get_tebligat_durumu_display() if b.tebligat_durumu else ""
-        if m and b.tebligat_durum_tarihi:
-            m += f" ({b.tebligat_durum_tarihi:%d.%m.%Y})"
-        teb.append((str(b.taraf), m))
+    teb = [(str(b.taraf), tebligat_metni(b)) for b in borclular]
     return _birlestir(kes), _birlestir(teb)
 
 
@@ -2691,10 +2703,11 @@ def kesinlesme_durumlarini_guncelle(dosya_obj=None, log_fn=None):
         if (yeni, yeni_tarih) != (dt.kesinlesme_durumu, dt.kesinlesme_tarihi):
             dt.kesinlesme_durumu, dt.kesinlesme_tarihi = yeni, yeni_tarih
             alanlar += ["kesinlesme_durumu", "kesinlesme_tarihi"]
-        teb, teb_tarih = _borclu_tebligat_hesapla(odeme_emirleri.get(dt.pk, []), DosyaTaraf.TebligatDurumu)
-        if (teb, teb_tarih) != (dt.tebligat_durumu, dt.tebligat_durum_tarihi):
-            dt.tebligat_durumu, dt.tebligat_durum_tarihi = teb, teb_tarih
-            alanlar += ["tebligat_durumu", "tebligat_durum_tarihi"]
+        teb, teb_tarih, teb_sekli = _borclu_tebligat_hesapla(odeme_emirleri.get(dt.pk, []),
+                                                             DosyaTaraf.TebligatDurumu)
+        if (teb, teb_tarih, teb_sekli) != (dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli):
+            dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli = teb, teb_tarih, teb_sekli
+            alanlar += ["tebligat_durumu", "tebligat_durum_tarihi", "tebligat_sekli"]
         if alanlar:
             dt.save(update_fields=alanlar)
             guncellenen += 1

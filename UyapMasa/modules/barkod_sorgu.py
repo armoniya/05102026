@@ -943,11 +943,56 @@ def _ptt_durum_ve_tarih(veri):
     return veri.get("errorMessage") or "Bilinmeyen durum", ""
 
 
+# Teslim şekli (2026-10-02 kullanıcı isteği). PTT her hareketin `islem_detay`
+# alanında teslimin kime/nasıl yapıldığını yazıyor; sonunda " / m*" gibi alıcının
+# maskeli baş harfleri olabiliyor (atılır). DB'deki 7.298 ham yanıtta görülen
+# yazılışlar tek biçime çevrilir; tanınmayan metin OLDUĞU GİBİ gösterilir.
+_TESLIM_SEKILLERI = (           # (tr_lower(metin) içinde aranan, gösterilecek)
+    ("21/2", "Muhtara teslim (21/2 – MERNİS adresi)"),
+    ("ihtiyar heyeti", "İhtiyar heyeti/azaya teslim (21. md.)"),
+    ("muhtara", "Muhtara teslim (21. md.)"),
+    ("bizzat", "Muhataba bizzat teslim"),
+    ("ayni konutta yakina", "Aynı konutta yakına teslim"),
+    ("daimi calisana", "İşyerinde daimi çalışana teslim"),
+    ("amirine", "İşyerindeki amirine teslim"),
+    ("kapisina yapistirma", "Kapıya yapıştırma (35. md.)"),
+)
+# Teslim/iade sonucu olmayan ara hareketler (son hareket bunlarsa bir öncekine bakılır).
+_ARA_HAREKETLER = ("gondericisine teslim edildi", "koy dagitimina tabi bekliyor")
+
+
+def _islem_detay_temizle(s):
+    """'21.MAD. GORE MUHTARA TESLiM / m* m*' -> '21.MAD. GORE MUHTARA TESLiM'.
+    Yalnız boşlukla ayrılmış sondaki ' / …' atılır ('21/2. Madde' korunur)."""
+    return re.sub(r"\s+/(\s+.*)?$", "", (s or "").strip()).strip()
+
+
+def ptt_teslim_sekli(veri):
+    """PTT ham yanıtından teslim şekli (TESLİM EDİLDİ) ya da iade nedeni (İADE).
+    Başka durumlarda (dağıtımda, kayıt yok) ya da bilgi yoksa ""."""
+    if not isinstance(veri, dict) or veri.get("_hata"):
+        return ""
+    durum = dosya_core.tr_lower((veri.get("sondurum") or {}).get("son_durum_aciklama") or "")
+    teslim, iade = "teslim edildi" in durum, "iade" in durum
+    if not (teslim or iade):
+        return ""
+    detaylar = [_islem_detay_temizle(h.get("islem_detay")) for h in (veri.get("hareketDongu") or [])
+                if isinstance(h, dict)]
+    detaylar = [d for d in detaylar if d and dosya_core.tr_lower(d) not in _ARA_HAREKETLER]
+    if teslim:
+        for d in reversed(detaylar):
+            k = dosya_core.tr_lower(d)
+            for anahtar, etiket in _TESLIM_SEKILLERI:
+                if anahtar in k:
+                    return etiket
+    return detaylar[-1] if detaylar else ""
+
+
 # Ekrandaki/excel çıktısındaki tablo hep bu sırayla, hep bu kolonlarla
 # gösterilir (satırlar arasında kolon farkı olursa UyapMasa tablosu satırları
 # hizasız gösterir — bu yüzden her satır bu şablondan üretilir).
 _KOLONLAR = ["Birim", "Dosya No", "Evrak Açıklaması", "Tebligat Türü", "Evrak Tarihi", "Barkod",
-             "PTT Durumu", "Son İşlem Tarihi", "Tebliğ Mazbatası",
+             "PTT Durumu", "Son İşlem Tarihi", "Teslim Şekli / İade Nedeni", "Tebliğ Mazbatası",
              "Kapalı Tebliğ Mazbatası", "Yeniden Tebliğ Talebi", "Durum", "Ham Yanıt"]
 
 
@@ -1070,6 +1115,8 @@ def _barkodu_veritabanina_kaydet(db, dosya_obj, evrak, log, **degerler):
         # yine kaydedilir.
         degerler = {k: v for k, v in degerler.items()
                     if k not in ("ptt_durumu", "son_islem_tarihi", "ham_yanit")}
+    elif isinstance(ham, dict):
+        degerler["teslim_sekli"] = ptt_teslim_sekli(ham)
     try:
         db["TebligatBarkod"].objects.update_or_create(
             dosya=dosya_obj, birim_evrak_no=int(birim_evrak_no),
@@ -1316,7 +1363,8 @@ def _dosya_isle(motor, birim_adi, dosya_no, log, _ekle, db, rec_bilinen=None, pt
                             ozet, tarih = bilinen.ptt_durumu or "", bilinen.son_islem_tarihi or ""
                     _ekle(_satir_olustur(
                         temel_evrak, Barkod=barkod, **{"Tebliğ Mazbatası": _mazbata_bul(barkod)[1] or "Yok"},
-                        **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih, "Tebligat Türü": tebligat_turu},
+                        **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih, "Tebligat Türü": tebligat_turu,
+                           "Teslim Şekli / İade Nedeni": ptt_teslim_sekli(ptt_veri) or bilinen.teslim_sekli},
                         Durum=_durum_metni(ptt_veri, "✅ Sorgulandı") + " (barkod önbellekten)",
                         **{"Ham Yanıt": _ham_yanit_metni(ptt_veri)}),
                         "basarili")
@@ -1415,7 +1463,9 @@ def _dosya_isle(motor, birim_adi, dosya_no, log, _ekle, db, rec_bilinen=None, pt
                     ptt_veri, ozet, tarih = _ptt_adimi(barkod, log, ptt_sorgusu)
                 _ekle(_satir_olustur(
                     temel_evrak, Barkod=barkod, **{"Tebliğ Mazbatası": _mazbata_bul(barkod)[1] or "Yok"},
-                    **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih, "Tebligat Türü": tebligat_turu},
+                    **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih, "Tebligat Türü": tebligat_turu,
+                       "Teslim Şekli / İade Nedeni": ptt_teslim_sekli(ptt_veri)
+                       or (bilinen.teslim_sekli if bilinen else "")},
                     Durum=_durum_metni(ptt_veri, "✅ Sorgulandı"),
                     **{"Ham Yanıt": _ham_yanit_metni(ptt_veri)}), "basarili")
                 _barkodu_veritabanina_kaydet(
@@ -1492,7 +1542,8 @@ def _yalniz_ptt_dosya_isle(birim_adi, dosya_no, log, _ekle, db, bekle_fn=None):
                 + ", sorgulanmadı.")
             _ekle(_satir_olustur(temel_evrak, Barkod=tb.barkod,
                                  **{"PTT Durumu": tb.ptt_durumu,
-                                    "Son İşlem Tarihi": tb.son_islem_tarihi or ""},
+                                    "Son İşlem Tarihi": tb.son_islem_tarihi or "",
+                                    "Teslim Şekli / İade Nedeni": tb.teslim_sekli},
                                  Durum=_durum_metni(_PTT_SONUCLANMIS, "")), "atlanan")
             continue
         if PTT_TUR_FILTRESI and tb.tebligat_turu not in PTT_TUR_FILTRESI:
@@ -1508,7 +1559,8 @@ def _yalniz_ptt_dosya_isle(birim_adi, dosya_no, log, _ekle, db, bekle_fn=None):
             if not bekle_fn(kalan):
                 return
         _ekle(_satir_olustur(temel_evrak, Barkod=tb.barkod,
-                             **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih},
+                             **{"PTT Durumu": ozet, "Son İşlem Tarihi": tarih,
+                                "Teslim Şekli / İade Nedeni": ptt_teslim_sekli(ptt_veri) or tb.teslim_sekli},
                              Durum=_durum_metni(ptt_veri, "✅ PTT sorgulandı"),
                              **{"Ham Yanıt": _ham_yanit_metni(ptt_veri)}), "basarili")
         _barkodu_veritabanina_kaydet(

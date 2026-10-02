@@ -161,6 +161,7 @@ def _barkod_sekmesi(parent, barkodlar):
     cols = [("evrakTarihi", "Evrak Tarihi", 90), ("tebligatTuru", "Tebligat Türü", 170),
             ("barkod", "Barkod", 110), ("evrakAciklama", "Evrak Açıklaması", 220),
             ("pttDurumu", "PTT Durumu", 160), ("sonIslemTarihi", "Son İşlem Tarihi", 100),
+            ("teslimSekli", "Teslim Şekli / İade Nedeni", 200),
             ("tebligMazbatasiVar", "Tebliğ Mazbatası", 100),
             ("kapaliTebligMazbatasiVar", "Kapalı Mazbata", 100),
             ("sorguZamani", "Sorgu Zamanı", 120)]

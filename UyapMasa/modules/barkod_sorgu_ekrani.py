@@ -156,6 +156,7 @@ class BarkodSorguEkrani:
         ("tebligatTuru", "Tebligat Türü", 160),
         ("pttDurumu", "Tebliğ / Son Durum", 180),
         ("sonIslemTarihi", "Tebliğ/İade Tarihi", 110),
+        ("teslimSekli", "Teslim Şekli / İade Nedeni", 220),
         ("tebligMazbatasiVar", "Mazbata Döndü mü", 110),
         ("yenidenTebligTalebi", "Yeniden Tebliğ Talebi", 130),
     ]
@@ -171,6 +172,7 @@ class BarkodSorguEkrani:
         ("elektronikTebligat", "Elektronik mi", 90),
         ("pttDurumu", "PTT Durumu", 200),
         ("sonIslemTarihi", "Son İşlem Tarihi", 110),
+        ("teslimSekli", "Teslim Şekli / İade Nedeni", 220),
         ("tebligMazbatasiVar", "Tebliğ Mazbatası", 100),
         ("kapaliTebligMazbatasiVar", "Kapalı Mazbata", 100),
         ("yenidenTebligTalebi", "Yeniden Tebliğ Talebi", 130),
@@ -667,7 +669,7 @@ class BarkodSorguEkrani:
         threading.Thread(target=bg, daemon=True).start()
 
     # Dosya satırına barkod başına eklenen sütunlar (KOLONLAR'daki barkod alanları).
-    _BARKOD_ALANLARI = ("barkod", "tebligatTuru", "pttDurumu", "sonIslemTarihi",
+    _BARKOD_ALANLARI = ("barkod", "tebligatTuru", "pttDurumu", "sonIslemTarihi", "teslimSekli",
                         "tebligMazbatasiVar", "yenidenTebligTalebi")
 
     def _barkod_satirlarina_ac(self, kayitlar):

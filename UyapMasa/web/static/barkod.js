@@ -33,7 +33,8 @@
   var GECMIS_KOLONLAR = [
     ["birimAdi", "İcra Dairesi"], ["dosyaNo", "Dosya No"], ["barkod", "Barkod"],
     ["elektronikTebligat", "Elektronik mi"], ["pttDurumu", "PTT Durumu"],
-    ["sonIslemTarihi", "Son İşlem Tarihi"], ["tebligMazbatasiVar", "Tebliğ Mazbatası"],
+    ["sonIslemTarihi", "Son İşlem Tarihi"], ["teslimSekli", "Teslim Şekli / İade Nedeni"],
+    ["tebligMazbatasiVar", "Tebliğ Mazbatası"],
     ["kapaliTebligMazbatasiVar", "Kapalı Mazbata"], ["sorguZamani", "Sorgu Zamanı"]
   ];
 

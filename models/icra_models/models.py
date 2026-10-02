@@ -397,6 +397,8 @@ class DosyaTaraf(models.Model):
     tebligat_durumu = models.CharField("Tebliğ Durumu", max_length=30,
                                         choices=TebligatDurumu.choices, blank=True)
     tebligat_durum_tarihi = models.DateField("Tebliğ Durumu Tarihi", null=True, blank=True)
+    # Tebliğ durumunu veren tebligatın teslim şekli / iade nedeni (TebligatBarkod.teslim_sekli).
+    tebligat_sekli = models.CharField("Teslim Şekli / İade Nedeni", max_length=150, blank=True, default="")
 
     # Kesinleşme hesabının (bkz. kesinlesme_core.py) girdisi — UYAP'ta itiraz
     # tespiti için canlı doğrulanmış bir evrak-türü eşlemesi YOK (kullanıcı
@@ -842,6 +844,10 @@ class TebligatBarkod(models.Model):
     ptt_durumu = models.CharField("PTT Durumu", max_length=255, blank=True)
     son_islem_tarihi = models.CharField("Son İşlem Tarihi", max_length=40, blank=True)
     ham_yanit = models.JSONField("PTT Ham Yanıt", null=True, blank=True)
+    # PTT hareketlerindeki "işlem detayı"ndan (bkz. barkod_sorgu.ptt_teslim_sekli):
+    # teslimde kime/nasıl (muhtara 21. md., bizzat, aynı konutta yakına, kapıya
+    # yapıştırma 35. md. …), iadede iade nedeni (Tanınmıyor, adres değişmiş …).
+    teslim_sekli = models.CharField("Teslim Şekli / İade Nedeni", max_length=150, blank=True, default="")
 
     # 'Mazbata' = tebliğ mazbatası (fiziki dönüş belgesi) dosyaya dönmüş mü —
     # bkz. barkod_sorgu.py TEBLIG_MAZBATASI_TUR/KAPALI_TEBLIG_MAZBATASI_TUR;
