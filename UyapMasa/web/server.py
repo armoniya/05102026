@@ -1800,11 +1800,14 @@ def logger_status(since_log):
     return snap
 
 
-def logger_start():
+def logger_start(data=None):
     eng = _logger_engine()
     if eng is None:
         return {"ok": False, "msg": _logger_err or "Logger hazır değil."}
-    return {"ok": True, "started": eng.start()}
+    try:
+        return {"ok": True, "started": eng.start((data or {}).get("hedef"))}
+    except ValueError as e:
+        return {"ok": False, "msg": str(e)}
 
 
 def logger_stop():
@@ -2705,7 +2708,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"ok": False, "msg": "oturum yok"})
                 return
             if path == "/api/logger/start":
-                self._json(200, logger_start())
+                self._json(200, logger_start(self._body()))
             elif path == "/api/logger/stop":
                 self._json(200, logger_stop())
             elif path == "/api/logger/clear-records":

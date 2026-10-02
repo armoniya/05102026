@@ -39,7 +39,7 @@
 
   // ── kontroller ──
   $("lg-baslat").addEventListener("click", function () {
-    post("api/logger/start", {}).then(function (d) {
+    post("api/logger/start", { hedef: $("lg-hedef").value }).then(function (d) {
       if (!d.ok) { log("[HATA] " + (d.msg || "başlatılamadı")); return; }
       running = true; setControls();
     });
@@ -50,6 +50,7 @@
   });
   function setControls() {
     $("lg-baslat").disabled = running;
+    $("lg-hedef").disabled = running;
     $("lg-durdur").disabled = !running;
   }
 

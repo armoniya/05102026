@@ -79,14 +79,124 @@ def registry_ekle(kayit):
 
 _GIZLI_BASLIKLAR = {"cookie", "set-cookie", "authorization", "proxy-authorization",
                     "x-uyap-local-token", "x-csrf-token", "x-xsrf-token"}
+# Başka sitelerin kendi adlarıyla taşıdığı oturum başlıkları (ör. "x-auth-token", "sessionid").
+_GIZLI_BASLIK_PARCALARI = ("token", "auth", "session", "csrf", "xsrf", "api-key", "apikey")
 
 
 def _basliklari_maskele(basliklar):
     """Başlık sözlüğündeki oturum/yetki değerlerini '***' ile değiştirir."""
     if not isinstance(basliklar, dict):
         return basliklar
-    return {k: ("***" if str(k).lower() in _GIZLI_BASLIKLAR else v)
+    return {k: ("***" if str(k).lower() in _GIZLI_BASLIKLAR
+                or any(p in str(k).lower() for p in _GIZLI_BASLIK_PARCALARI) else v)
             for k, v in basliklar.items()}
+
+
+# ─────────────────────── UYAP dışı site kaydı (ör. Themis) ───────────────────────
+# Logger'ın tarayıcısı UYAP yerine başka bir siteyi de açabilir. O sitede kullanıcı
+# kendi şifresiyle giriş yaptığı için: ayrı Chrome profili, yalnız XHR/fetch trafiği,
+# şifre/jeton alanları diske yazılmadan maskelenir. Modül üretimi şimdilik yalnız UYAP.
+HAZIR_SITELER = [
+    ("UYAP", ""),
+    ("Themis (Turkcell)", "https://themis-ist.turkcell.com.tr/"),
+]
+
+_HASSAS_ANAHTAR = re.compile(
+    r"pass|parola|[şs]ifre|pwd|otp|secret|token|captcha|credential", re.I)
+
+
+def hedef_dogrula(hedef):
+    """Kayıt hedefini normalleştirir: UYAP için "" döner, başka site için https adresi.
+    Geçersizse ValueError."""
+    s = (hedef or "").strip()
+    if not s or s.lower() == "uyap":
+        return ""
+    for etiket, url in HAZIR_SITELER:
+        if s == etiket:
+            return url
+    if "://" not in s:
+        s = "https://" + s
+    p = urllib.parse.urlparse(s)
+    try:
+        p.port                      # "javascript:alert(1)" gibi girdiler burada düşer
+    except ValueError:
+        p = None
+    if (p is None or p.scheme != "https"
+            or not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}", p.hostname or "")):
+        raise ValueError("Kayıt adresi https:// ile başlayan bir site adresi olmalı.")
+    return s
+
+
+def _ana_alan(host):
+    """themis-ist.turkcell.com.tr -> turkcell.com.tr (aynı kurumun API alt alanları da kayda girsin)."""
+    parcalar = (host or "").lower().split(".")
+    if len(parcalar) >= 3 and parcalar[-1] == "tr" and parcalar[-2] in (
+            "com", "gov", "org", "net", "edu", "bel", "k12", "av", "gen", "web"):
+        return ".".join(parcalar[-3:])
+    return ".".join(parcalar[-2:])
+
+
+def _profil_dizini(hedef):
+    """UYAP kaydı eski profili kullanır; her harici site kendi profilini (oturum çerezleri
+    birbirine karışmasın)."""
+    if not hedef:
+        return PROFILE_DIR
+    host = urllib.parse.urlparse(hedef).hostname or "site"
+    return os.path.join(LOGGER_DIR, "chrome_profile_" + re.sub(r"[^a-z0-9.-]", "_", host.lower()))
+
+
+def _hassas_maskele_obj(o):
+    if isinstance(o, dict):
+        return {k: ("***" if _HASSAS_ANAHTAR.search(str(k)) and v not in (None, "")
+                    else _hassas_maskele_obj(v)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_hassas_maskele_obj(x) for x in o]
+    return o
+
+
+def _hassas_maskele_metin(s):
+    """İstek/yanıt gövdesindeki şifre/jeton değerlerini maskeler (JSON, form ya da
+    multipart özeti). Çözülemeyen metin olduğu gibi döner."""
+    if not isinstance(s, str) or not s.strip():
+        return s
+    t = s.strip()
+    if t[:1] in "{[":
+        try:
+            return json.dumps(_hassas_maskele_obj(json.loads(t)), ensure_ascii=False)
+        except Exception:
+            pass
+    if t.startswith("<MULTIPART"):
+        return re.sub(r"(ALAN '([^']*)' = )(?!DOSYA)(.*)",
+                      lambda m: m.group(1) + "'***'" if _HASSAS_ANAHTAR.search(m.group(2))
+                      else m.group(0), s)
+    if "=" in t and "\n" not in t:
+        try:
+            pairs = urllib.parse.parse_qsl(t, keep_blank_values=True, strict_parsing=True)
+            if any(_HASSAS_ANAHTAR.search(k) for k, _ in pairs):
+                return urllib.parse.urlencode(
+                    [(k, "***" if _HASSAS_ANAHTAR.search(k) else v) for k, v in pairs])
+        except Exception:
+            pass
+    return s
+
+
+def uyap_disi_siteler(kayitlar):
+    """Kayıtlardaki UYAP dışı sitelerin adları (modül üreteci bunları reddeder)."""
+    siteler = set()
+    for k in kayitlar or []:
+        host = (urllib.parse.urlparse(k.get("url") or "").hostname or "").lower()
+        if host and host not in ("127.0.0.1", "localhost") and not host.endswith("uyap.gov.tr"):
+            siteler.add(host)
+    return sorted(siteler)
+
+
+def _yalniz_uyap(kayitlar):
+    disari = uyap_disi_siteler(kayitlar)
+    if disari:
+        raise ValueError(
+            "Bu kayıtlarda UYAP dışı site var (" + ", ".join(disari) + "). Modül üretimi "
+            "şimdilik yalnız UYAP kayıtları için; o site kayıtları inceleme amaçlıdır. "
+            "UYAP modülü üretecekseniz önce 'Kayıtları Sıfırla' deyip UYAP'ı kaydedin.")
 
 
 class SessionLogger:
@@ -123,6 +233,7 @@ class SessionLogger:
         self._ag_response_handler = None
         self._last_click = None          # {"time","locator","metin"}
         self._tiklama_pencere_sn = 8.0   # tıklamadan sonra kaç sn'lik trafik o tıklamaya bağlansın
+        self._hedef = ""                 # "" = UYAP; aksi halde kaydedilen harici sitenin adresi
 
         # Önceki oturumların kayıtlarını diskten geri yükle (varsa)
         self._kayit_yukle()
@@ -243,9 +354,16 @@ class SessionLogger:
         return LOGGER_DIR
 
     # ─────────────────────────── başlat / durdur ───────────────────────────
-    def start(self):
+    @property
+    def hedef(self):
+        return self._hedef
+
+    def start(self, hedef=None):
+        """hedef: None/""/"UYAP" → UYAP (ofis bağlantısı); başka site için https adresi.
+        Geçersiz adreste ValueError."""
         if self._running:
             return False
+        self._hedef = hedef_dogrula(hedef)
         self._stop = False
         self._running = True
         self._status = "Tarayıcı açılıyor…"
@@ -344,6 +462,10 @@ class SessionLogger:
         kayit = dict(kayit)
         kayit["istek_headers"] = _basliklari_maskele(kayit.get("istek_headers"))
         kayit["yanit_headers"] = _basliklari_maskele(kayit.get("yanit_headers"))
+        if self._hedef:
+            # Harici sitede giriş kullanıcının kendi şifresiyle: şifre/jeton diske yazılmaz.
+            kayit["istek_payload"] = _hassas_maskele_metin(kayit.get("istek_payload"))
+            kayit["yanit"] = _hassas_maskele_metin(kayit.get("yanit"))
 
         # --- yapılandırılmış kayıt (Endpoint İnceleme için; metne çevirmeden) ---
         try:
@@ -351,6 +473,7 @@ class SessionLogger:
             endpoint = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or url
             rec = {
                 "zaman": kayit.get("zaman", ""),
+                "site": urllib.parse.urlparse(url).hostname or "",
                 "endpoint": endpoint,
                 "url": url,
                 "method": kayit.get("method", ""),
@@ -426,7 +549,22 @@ class SessionLogger:
             "heartbeat", "ping", "keepalive",
         )
 
-        def _ilgili(url):
+        harici_alan = _ana_alan(urllib.parse.urlparse(self._hedef).hostname) if self._hedef else ""
+
+        def _ilgili(url, req=None):
+            if harici_alan:
+                # Harici sitede yalnız o kurumun XHR/fetch çağrıları (şablon .html'leri,
+                # analitik, üçüncü taraf betikler kayda girmez).
+                host = (urllib.parse.urlparse(url).hostname or "").lower()
+                if not (host == harici_alan or host.endswith("." + harici_alan)):
+                    return False
+                if url.split("?")[0].lower().endswith((".html", ".htm")):
+                    return False        # AngularJS ekran şablonları — veri değil
+                try:
+                    if req is not None and req.resource_type not in ("xhr", "fetch"):
+                        return False
+                except Exception:
+                    pass
             path = url.split("?")[0].lower()
             if any(path.endswith(e) for e in (
                     ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
@@ -442,7 +580,7 @@ class SessionLogger:
             try:
                 req = response.request
                 url = response.url
-                if not _ilgili(url):
+                if not _ilgili(url, req):
                     return
 
                 # TIKLAMA KAPISI: yalnızca bir tıklamadan hemen sonra gelen trafik
@@ -530,7 +668,10 @@ class SessionLogger:
                         f"  • ALAN '{a.get('ad')}' = DOSYA filename='{a.get('filename')}' "
                         f"tip={a.get('contentType')} ({a.get('boyut')} bayt)")
                 else:
-                    satirlar.append(f"  • ALAN '{a.get('ad')}' = {a.get('deger')!r}")
+                    deger = a.get("deger")
+                    if self._hedef and _HASSAS_ANAHTAR.search(str(a.get("ad") or "")):
+                        deger = "***"
+                    satirlar.append(f"  • ALAN '{a.get('ad')}' = {deger!r}")
             blok = "\n".join(satirlar) + "\n"
             self._log(blok)
             try:
@@ -608,7 +749,7 @@ class SessionLogger:
                 pass
 
             self.context = self.playwright.chromium.launch_persistent_context(
-                user_data_dir=PROFILE_DIR,
+                user_data_dir=_profil_dizini(self._hedef),
                 headless=False,
                 channel="chrome",
                 accept_downloads=True,
@@ -641,31 +782,11 @@ class SessionLogger:
             self.context.add_init_script(_UPLOAD_LOGGER_JS)
             self.context.on("download", self._handle_download)
 
-            # UYAPMASA bağlantısı: kendi login'i yok; ofis proxy'sinin /giris'ine git
-            self._log(f"🔑 UyapMasa bağlantısı kullanılacak: {self.base_url}/giris "
-                      "(UYAP Bağlantısı / Paylaş-Al açık olmalı)")
             self.page.on("dialog", lambda d: d.accept())
-            # Proxy düz /giris'i tarayıcıya artık açmıyor (güvenlik taraması bulgu 4.1): tek
-            # kullanımlık güvenli giriş bağlantısı alınır; alınamazsa düz adrese düşülür.
-            giris_url = f"{self.base_url}/giris"
-            try:
-                from urllib.parse import urlparse
-                from uyap_core.yerel_giris import tarayici_giris_url
-                giris_url = tarayici_giris_url(urlparse(self.base_url).port or 8800)
-            except Exception:
-                pass
-            try:
-                self.page.goto(giris_url)
-                self.page.wait_for_load_state("networkidle")
-                self._log("✅ Oturum yüklendi! Tarayıcıyı normal kullanın; tıklama ve ağ trafiği kaydediliyor.")
-            except Exception as e:
-                self._log(f"❌ Oturum yüklenemedi: {e}")
-                self._log("UyapMasa'da 'UYAP Bağlantısı' açık ve Paylaş/Al aktif mi? "
-                          "Varsayılan UYAP sayfasına geçiliyor…")
-                try:
-                    self.page.goto("https://avukat.uyap.gov.tr/")
-                except Exception:
-                    pass
+            if self._hedef:
+                self._harici_ac()
+            else:
+                self._uyap_ac()
 
             self._status = "Kaydediyor"
             self._log("📂 Çıktılar: " + LOGGER_DIR)
@@ -700,6 +821,48 @@ class SessionLogger:
             self._running = False
             self._status = "Durduruldu"
             self._log("👋 Oturum kaydı sonlandı.")
+
+    def _harici_ac(self):
+        """UYAP dışı site: kullanıcı kendisi giriş yapar; şifre kaydedilmez."""
+        self._log(f"🌐 Harici site kaydı: {self._hedef}")
+        self._log("🔑 Siteye kendi kullanıcı adı/şifrenizle giriş yapın. Şifre, jeton ve "
+                  "oturum çerezleri günlüğe yazılmaz (*** ile maskelenir).")
+        self._log("ℹ️ Yalnız sitenin kendi veri çağrıları (XHR/fetch) kaydedilir. "
+                  "Bu kayıtlar inceleme içindir; modül üretimi şimdilik yalnız UYAP'ta.")
+        if self._records:
+            self._log("ℹ️ Endpoint İnceleme'de önceki kayıtlar da duruyor; karışmasın "
+                      "isterseniz 'Kayıtları Sıfırla'.")
+        try:
+            self.page.goto(self._hedef)
+            self._log("✅ Sayfa açıldı; tıklamalar ve sitenin çağrıları kaydediliyor.")
+        except Exception as e:
+            self._log(f"❌ Sayfa açılamadı: {e}")
+
+    def _uyap_ac(self):
+        # UYAPMASA bağlantısı: kendi login'i yok; ofis proxy'sinin /giris'ine git
+        self._log(f"🔑 UyapMasa bağlantısı kullanılacak: {self.base_url}/giris "
+                  "(UYAP Bağlantısı / Paylaş-Al açık olmalı)")
+        # Proxy düz /giris'i tarayıcıya artık açmıyor (güvenlik taraması bulgu 4.1): tek
+        # kullanımlık güvenli giriş bağlantısı alınır; alınamazsa düz adrese düşülür.
+        giris_url = f"{self.base_url}/giris"
+        try:
+            from urllib.parse import urlparse
+            from uyap_core.yerel_giris import tarayici_giris_url
+            giris_url = tarayici_giris_url(urlparse(self.base_url).port or 8800)
+        except Exception:
+            pass
+        try:
+            self.page.goto(giris_url)
+            self.page.wait_for_load_state("networkidle")
+            self._log("✅ Oturum yüklendi! Tarayıcıyı normal kullanın; tıklama ve ağ trafiği kaydediliyor.")
+        except Exception as e:
+            self._log(f"❌ Oturum yüklenemedi: {e}")
+            self._log("UyapMasa'da 'UYAP Bağlantısı' açık ve Paylaş/Al aktif mi? "
+                      "Varsayılan UYAP sayfasına geçiliyor…")
+            try:
+                self.page.goto("https://avukat.uyap.gov.tr/")
+            except Exception:
+                pass
 
 
 # ═══════════════════════════ MODÜL TASLAĞI ÜRETECİ ═══════════════════════════
@@ -844,6 +1007,7 @@ def modul_taslagi_uret(endpoint, kayitlar, kovalar, param_adlari=None,
     kolonlar     : [(yanit_alani, "Ekran Başlığı"), ...]  (response → modül ekranı;
                    sıralı; boşsa yanıttan otomatik tüm alanlar gösterilir)
     """
+    _yalniz_uyap(kayitlar)
     param_adlari = param_adlari or {}
     hedef_dir = hedef_dir or os.path.dirname(os.path.abspath(__file__))
     temsili = _temsili_payload(kayitlar)
@@ -1106,6 +1270,7 @@ def oturum_akisi_uret(kayitlar, dosya_adi, hedef_dir=None):
     `calistir(girdi, log_fn)` adımları sırayla _post eder; ⛓️ alanlar önceki
     adımın yanıtından beslenir. İlk adımın skaler alanları arayüz parametresi olur.
     Döner: {key,label,core,gui,...} (modul_taslagi_uret ile aynı sözleşme)."""
+    _yalniz_uyap(kayitlar)
     hedef_dir = hedef_dir or os.path.dirname(os.path.abspath(__file__))
     # Anlamlı adımlar: payload'ı çözülmüş ya da bir yanıtı olanlar
     adimlar = [k for k in kayitlar
@@ -1408,6 +1573,9 @@ _CLICK_LOGGER_JS = r"""
         if (!recorded) { try { if (window.parent && typeof window.parent.recordClick === 'function') { window.parent.recordClick(clickData); recorded = true; } } catch (e) {} }
     }
     window.addEventListener('mousedown', (e) => { if (e.button !== 0) return; handleElementClick(e.target); }, true);
+    // Enter ile tetiklenen aramalar (ör. arama kutusunda Enter) da bir "tıklama" sayılır;
+    // yoksa ardından gelen ağ çağrısı tıklama kapısına takılıp kaydedilmezdi. Değer okunmaz.
+    window.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleElementClick(e.target); }, true);
     setInterval(() => {
         const iframes = document.querySelectorAll('iframe');
         iframes.forEach(iframe => {
@@ -1416,6 +1584,7 @@ _CLICK_LOGGER_JS = r"""
                 if (doc && !doc._hasClickLogger) {
                     doc._hasClickLogger = true;
                     doc.addEventListener('mousedown', (e) => { if (e.button !== 0) return; handleElementClick(e.target); }, true);
+                    doc.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleElementClick(e.target); }, true);
                 }
             } catch (e) {}
         });

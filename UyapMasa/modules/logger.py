@@ -95,13 +95,22 @@ class LoggerEkrani:
         tk.Label(wrap,
                  text="Tarayıcı, UyapMasa'nın açtığı UYAP bağlantısına bağlanır (ayrı giriş "
                       "gerekmez). UYAP'ı normal kullandıkça tüm tıklamalar ve ağ trafiği "
-                      "kaydedilir — endpoint çözümlemesi ve modül üretimi için.",
+                      "kaydedilir — endpoint çözümlemesi ve modül üretimi için. "
+                      "Site kutusundan Themis gibi başka bir site seçilirse oraya kendiniz "
+                      "giriş yaparsınız; şifre/jeton kaydedilmez, kayıtlar yalnız inceleme içindir.",
                  bg=C.BG, fg=C.INK_SOFT, font=self.app.f_sub,
                  wraplength=820, justify="left").pack(anchor="w", pady=(6, 16))
 
         # ── araç çubuğu ──
         bar = tk.Frame(wrap, bg=C.BG)
         bar.pack(fill="x")
+        tk.Label(bar, text="Site:", bg=C.BG, fg=C.INK_SOFT,
+                 font=self.app.f_nav_b).pack(side="left", padx=(0, 6))
+        # Hazır seçenek ya da elle https adresi (UYAP dışı siteler yalnız kayıt/inceleme).
+        self.hedef_cb = ttk.Combobox(bar, width=34, font=self.app.f_body,
+                                     values=[e for e, _u in logger_core.HAZIR_SITELER])
+        self.hedef_cb.set(logger_core.HAZIR_SITELER[0][0])
+        self.hedef_cb.pack(side="left", padx=(0, 10), ipady=4)
         self.baslat_btn = self._btn(bar, "Başlat", self.baslat, "primary")
         self.baslat_btn.pack(side="left", ipadx=4)
         self.durdur_btn = self._btn(bar, "Durdur", self.durdur, "ghost")
@@ -221,7 +230,12 @@ class LoggerEkrani:
     def baslat(self):
         if self.engine.running:
             return
-        if self.engine.start():
+        try:
+            basladi = self.engine.start(self.hedef_cb.get())
+        except ValueError as e:
+            messagebox.showerror("Site adresi", str(e))
+            return
+        if basladi:
             self._set_running(True)
 
     def durdur(self):
@@ -242,6 +256,7 @@ class LoggerEkrani:
     def _set_running(self, running):
         self._running_ui = running
         self.baslat_btn.set_state("disabled" if running else "normal")
+        self.hedef_cb.config(state="disabled" if running else "normal")
         self.durdur_btn.set_state("normal" if running else "disabled")
 
     # ─────────────────────────── Endpoint İnceleme ───────────────────────────
