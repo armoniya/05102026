@@ -776,7 +776,10 @@ def _tebligat_turunu_belirle(aciklama, pdf_govde_metni=None):
             # tr_lower uzunluğu korur → aynı aralık özgün metinde okunaklı hâli verir.
             ham = pdf_govde_metni[zarf_icerigi_m.start(1):zarf_icerigi_m.end(1)]
             ham = re.sub(r"\s+", " ", ham).strip(" .,:;\"'()[]")
-            if 2 < len(ham) <= 80:
+            # PDF metni bazen aynı ifadeyi art arda tekrarlıyor ("Satış İlanı
+            # Satış İlanı …", 2026-10-03) → tek kopyaya indir.
+            ham = re.sub(r"^(.+?)(?: \1)+$", r"\1", ham)
+            if 2 < len(ham) <= 120:   # TebligatBarkod.tebligat_turu max_length
                 # 2026-09-25: kullanıcı bu yazılışı "Tür Eşleştir"de bir türe
                 # bağladıysa o tür; yoksa ham metin kalır ve pencerede sorulur.
                 return tur_eslestirme.eslestir(ham) or ham

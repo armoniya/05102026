@@ -870,7 +870,10 @@ class TebligatBarkod(models.Model):
     # Kıymet Takdiri Raporu / Bilirkişi Raporu / ...) — bkz.
     # barkod_sorgu._tebligat_turunu_belirle. CANLI toplu veriyle
     # doğrulanmadı, anahtar kelimeler kullanıcı örneklerinden çıkarıldı.
-    tebligat_turu = models.CharField("Tebligat Türü", max_length=60, blank=True)
+    # 2026-10-03: 60 → 120 — zarf içeriğinden gelen ham türler (ör. "İİK. 150/c
+    # Satışa Arz Şerhi Tesis Talebi Takibin Dayanagi Belge") 60'ı aşıp kaydı
+    # düşürüyordu; tür boş kalınca PDF her turda yeniden indiriliyordu.
+    tebligat_turu = models.CharField("Tebligat Türü", max_length=120, blank=True)
 
     ptt_durumu = models.CharField("PTT Durumu", max_length=255, blank=True)
     son_islem_tarihi = models.CharField("Son İşlem Tarihi", max_length=40, blank=True)
