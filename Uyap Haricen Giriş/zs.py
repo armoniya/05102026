@@ -67,6 +67,7 @@ class _Ctx:
     file_key = None
     storage_desc = ""
     notifier = None
+    setup_error = None      # hiç kullanıcı yokken giriş sayfasında gösterilecek kurulum sorunu
 
 
 C = _Ctx()
@@ -358,6 +359,14 @@ button:hover{background:var(--accent2)}
 
 
 def _login_page(msg=None, status=200):
+    if not msg and C.setup_error and C.store is not None:
+        try:
+            if C.store.user_count() == 0:
+                msg = C.setup_error
+            else:
+                C.setup_error = None
+        except Exception:
+            pass
     note = f"<div class='msg'>{html.escape(msg)}</div>" if msg else ""
     body = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='color-scheme' content='light dark'>
@@ -909,17 +918,21 @@ async def _safe_storage_delete(key):
 # ── kurulum ──────────────────────────────────────────────────────────────────────────
 def _bootstrap_admin():
     user = (os.environ.get("ZS_ADMIN_USER") or "").strip()
-    pw = os.environ.get("ZS_ADMIN_PASSWORD") or ""
+    pw = (os.environ.get("ZS_ADMIN_PASSWORD") or "").strip()  # yapıştırırken kalan boşluklar girişi bozmasın
+    C.setup_error = None
     if C.store.user_count() > 0:
         return
     if not (user and pw):
-        print("[!] İş Takip (/zs): hiç kullanıcı yok. ZS_ADMIN_USER + ZS_ADMIN_PASSWORD ile ilk yöneticiyi açın.")
+        C.setup_error = "Henüz yönetici hesabı yok: sunucuda ZS_ADMIN_USER ve ZS_ADMIN_PASSWORD ayarlanmalı."
+        print(f"[!] İş Takip (/zs): {C.setup_error}")
         return
     try:
         C.store.create_user(user, user, pw, "admin")
-        print(f"[+] İş Takip (/zs): ilk yönetici oluşturuldu ({user}).")
+        print(f"[+] İş Takip (/zs): ilk yönetici oluşturuldu ({user.lower()}).")
     except ZsError as e:
-        print(f"[!] İş Takip (/zs): ilk yönetici oluşturulamadı: {e}")
+        # Değerler değil, yalnız kural ihlali gösterilir (ör. "Parola en az bir özel işaret içermeli").
+        C.setup_error = f"İlk yönetici hesabı oluşturulamadı: {e} (ZS_ADMIN_USER / ZS_ADMIN_PASSWORD'ü düzeltip servisi yeniden başlatın.)"
+        print(f"[!] İş Takip (/zs): {C.setup_error}")
 
 
 def register(app, session_secret, guard, client_ip, store=None):
