@@ -80,3 +80,9 @@ Uyap Haricen Giriş/araclar/
 **/tarayici_profili/
 **/hata_goruntuleri/
 *_PTT_Sonuc_*.xlsx
+
+# /zs İş Takip yerel geliştirme belgeleri (şifreli ama yine de repoya girmez)
+zs_files/
+**/zs_files/
+zs_vapid.key
+**/zs_vapid.key

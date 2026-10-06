@@ -24,6 +24,7 @@ function isVendorRoute(p) {
     p === "/indir" || p.startsWith("/indir/") ||
     p === "/satin-al" || p.startsWith("/satin-al/") ||
     p === "/owner" || p.startsWith("/owner/") ||
+    p === "/zs" || p.startsWith("/zs/") ||  // İş Takip: kendi uygulaması, tünele girmez
     p === "/robots.txt" || p === "/sitemap.xml" ||
     p.startsWith("/odeme/") ||
     p.startsWith("/api/")

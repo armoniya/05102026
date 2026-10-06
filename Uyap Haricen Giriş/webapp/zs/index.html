@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<link rel="manifest" href="/zs/manifest.webmanifest">
+<link rel="icon" href="/zs/static/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/zs/static/apple-touch-icon.png">
+<meta name="theme-color" content="#4f46e5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="İş Takip">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>İş Takip</title>
+<link rel="stylesheet" href="/zs/static/zs.css">
+<script src="/zs/static/zs.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo" id="logo"></div>
+      <div><div class="brand-name">İş Takip</div><div class="brand-sub">cokluuyap</div></div>
+    </div>
+    <nav id="tabs" class="nav" aria-label="Görünümler"></nav>
+    <div class="side-foot">
+      <div class="me" id="me"></div>
+      <div class="foot-btns">
+        <button type="button" class="btn-ghost sm" id="btn-notify">Bildirimler</button>
+        <button type="button" class="btn-ghost sm" id="btn-pw">Parolam</button>
+        <button type="button" class="btn-ghost sm" id="btn-theme" title="Tema"></button>
+        <form method="post" action="/zs/logout"><button type="submit" class="btn-ghost sm">Çıkış</button></form>
+      </div>
+      <div class="keys"><kbd>N</kbd> yeni iş · <kbd>/</kbd> ara · <kbd>↑</kbd><kbd>↓</kbd> gez · <kbd>Esc</kbd> kapat</div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="page-head" id="head"></header>
+    <div class="layout" id="layout">
+      <section id="list" class="list"></section>
+      <aside id="detail" class="detail" hidden></aside>
+    </div>
+  </main>
+</div>
+<div id="toast" class="toast" hidden></div>
+<dialog id="dlg" class="dlg"></dialog>
+</body>
+</html>

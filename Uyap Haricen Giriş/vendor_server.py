@@ -384,7 +384,7 @@ async def _security_mw(request, handler):
     if getattr(resp, "prepared", False):
         return resp  # ör. WebSocket: başlıklar zaten gönderildi, dokunma
     # Özel/oturumlu sayfalar arama motorlarına kapalı (SEO planı — CANLIYA_HAZIRLIK.md Faz 6).
-    if request.path.startswith(("/ofis", "/admin", "/owner", "/reset", "/satin-al/sonuc", "/giris")):
+    if request.path.startswith(("/ofis", "/admin", "/owner", "/reset", "/satin-al/sonuc", "/giris", "/zs")):
         resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
     # Server başlığı aiohttp/Python sürümünü sızdırmasın (ZAP aktif tarama, 2026-10-01).
     resp.headers["Server"] = "cokluuyap"
@@ -2362,6 +2362,10 @@ def make_app(args):
     app.router.add_post("/satin-al", satin_al_post)
     app.router.add_get("/satin-al/sonuc", cred_claim_get)
     app.router.add_post("/odeme/webhook", odeme_webhook)
+
+    # İş Takip (/zs): ayrı kullanıcılı yapılacak iş listesi + onay + şifreli belge (zs.py).
+    import zs
+    zs.register(app, session_secret=SESSION_SECRET, guard=GUARD, client_ip=_client_ip)
 
     # Oda anahtarlarını düzensiz (rastgele) aralıklarla otomatik döndüren arka plan görevi.
     app.on_startup.append(_start_rotation)
