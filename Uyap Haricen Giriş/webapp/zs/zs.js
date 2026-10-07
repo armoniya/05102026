@@ -375,6 +375,32 @@ function openComposer() {
   const i = document.querySelector(".composer input"); if (i) { i.focus(); i.scrollIntoView({ block: "center" }); }
 }
 
+// Yeni iş formundaki belge seçimi: dosyalar iş oluşturulana kadar tarayıcıda bekler.
+function composerFiles() {
+  const picked = [];
+  const inp = h("input", { type: "file", multiple: true, accept: FILE_ACCEPT });
+  const list = h("div", { class: "files" });
+  const draw = () => list.replaceChildren(...picked.map((f, i) => h("div", { class: "file" }, fileTag(f.name),
+    h("div", { class: "grow" }, h("div", { class: "fn", title: f.name }, f.name), h("div", { class: "small muted" }, sizeTxt(f.size))),
+    h("button", { type: "button", class: "btn-icon", title: "Çıkar", onclick: () => { picked.splice(i, 1); draw(); } }, icon("x")))));
+  const add = (fl) => {
+    for (const f of fl) {
+      if (f.size > S.maxMb * 1048576) { toast(`${f.name}: ${S.maxMb} MB sınırını aşıyor.`); continue; }
+      if (!picked.some((p) => p.name === f.name && p.size === f.size)) picked.push(f);
+    }
+    inp.value = ""; draw();
+  };
+  inp.addEventListener("change", () => add(inp.files));
+  const drop = h("div", { class: "drop" }, h("div", { class: "ic" }, icon("upload")),
+    h("div", { class: "grow" }, h("div", { style: "font-weight:600" }, "Belge ekle (isteğe bağlı)"),
+      h("div", { class: "small muted" }, `İş oluşturulunca yüklenir · PDF, UDF, Word, Excel, görsel, ZIP · dosya başına en fazla ${S.maxMb} MB`)),
+    h("button", { type: "button", class: "btn-ghost sm", onclick: () => inp.click() }, "Dosya seç"), inp);
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); add(e.dataTransfer.files); });
+  return { el: h("div", { class: "composer-files" }, drop, list), list: () => picked.slice() };
+}
+
 function composerCard() {
   const title = h("input", { placeholder: "Ne yapılacak?", maxlength: 300, style: "width:100%" });
   const sel = peopleSelect(S.me.id), due = dueField(null), prio = prioSelect(1);
@@ -389,6 +415,7 @@ function composerCard() {
     if (extraRow) extraRow.hidden = priv.checked;
   };
   priv.addEventListener("change", sync); sync();
+  const files = S.uploads ? composerFiles() : null;
   const close = () => { S.composer = false; renderList(); };
   const add = act(async () => {
     if (!title.value.trim()) { title.focus(); return; }
@@ -396,7 +423,13 @@ function composerCard() {
       private: priv.checked, priority: Number(prio.value) };
     if (extra && !priv.checked) { body.assignees = extra.ids(); body.approvers = appr.ids(); }
     const d = await api("POST", "/zs/api/tasks", body);
-    S.selId = d.task.id; S.composer = false; S.f = "aktif"; toast("İş oluşturuldu.", true); await refresh();
+    S.selId = d.task.id; S.composer = false; S.f = "aktif";
+    // İş açıldı; belgeler ayrı istekte yüklenir. Biri başarısız olursa iş kalır, belge işin detayından eklenebilir.
+    const picked = files ? files.list() : [], failed = [];
+    for (const f of picked) { try { await uploadFile(d.task.id, f); } catch (e) { failed.push(`${f.name}: ${e.message}`); } }
+    if (failed.length) toast(`İş oluşturuldu ama ${failed.length} belge yüklenemedi — ${failed.join(" · ")}`);
+    else toast(picked.length ? `İş oluşturuldu, ${picked.length} belge yüklendi.` : "İş oluşturuldu.", true);
+    await refresh();
   });
   // Başlıkta Enter sonraki alana geçer (yanlışlıkla eksik iş açılmasın); Ctrl+Enter her yerden oluşturur.
   title.addEventListener("keydown", (e) => {
@@ -405,7 +438,7 @@ function composerCard() {
   const card = h("div", { class: "card composer" }, h("h3", {}, "Yeni iş"), title,
     h("div", { class: "more" }, h("div", { class: "form-grid" },
       isAdmin() ? h("label", {}, "Atanan kişi", sel) : null,
-      h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio)), extraRow, desc,
+      h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio)), extraRow, desc, files ? files.el : null,
       h("label", { class: "check" }, priv, h("span", {}, h("b", {}, "Özel iş"),
         h("span", { class: "muted" }, isAdmin() ? " — yalnız ben göreyim; onaya gönderilmez, bitince “Tamamla” derim. Sonra görünür yapabilir ya da devredebilirim."
           : " — yöneticiler dahil yalnız ben göreyim; onaya gönderilmez, bitince “Tamamla” derim. İstediğimde görünür yapabilirim."))),
@@ -691,18 +724,24 @@ const FTYPE = { pdf: ["PDF", "#dc2626"], udf: ["UDF", "#7c3aed"], doc: ["DOC", "
   xls: ["XLS", "#16a34a"], xlsx: ["XLS", "#16a34a"], jpg: ["JPG", "#0891b2"], jpeg: ["JPG", "#0891b2"],
   png: ["PNG", "#0891b2"], tif: ["TIF", "#0891b2"], tiff: ["TIF", "#0891b2"], zip: ["ZIP", "#a16207"] };
 
+const FILE_ACCEPT = ".pdf,.udf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.zip";
+const uploadFile = (taskId, f) => { const fd = new FormData(); fd.append("file", f); return api("POST", `/zs/api/tasks/${taskId}/files`, fd, true); };
+function fileTag(filename) {
+  const ext = (filename.split(".").pop() || "").toLowerCase(), [lab, col] = FTYPE[ext] || ["DOS", "#64748b"];
+  return h("span", { class: "ftype", style: `background:${col}` }, lab);
+}
+
 function fileContent(t) {
   const lk = !isAdmin() && locked(t);
   const kids = [];
   if (!S.uploads) kids.push(h("div", { class: "warnbox" }, icon("alert"), "Belge yükleme bu sunucuda henüz açık değil."));
   else if (lk) kids.push(h("div", { class: "lock" }, icon("lock"), "Onaydaki/onaylanmış işe belge eklenemez."));
   else {
-    const inp = h("input", { type: "file", accept: ".pdf,.udf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.zip" });
+    const inp = h("input", { type: "file", accept: FILE_ACCEPT });
     const upload = async (f) => {
       if (!f) return;
       if (f.size > S.maxMb * 1048576) { toast(`Dosya ${S.maxMb} MB sınırını aşıyor.`); return; }
-      const fd = new FormData(); fd.append("file", f);
-      try { await api("POST", `/zs/api/tasks/${t.id}/files`, fd, true); toast("Belge yüklendi (şifreli saklanıyor).", true); await refresh(); }
+      try { await uploadFile(t.id, f); toast("Belge yüklendi (şifreli saklanıyor).", true); await refresh(); }
       catch (e) { toast(e.message); }
     };
     inp.addEventListener("change", () => upload(inp.files[0]));
@@ -716,9 +755,8 @@ function fileContent(t) {
     kids.push(drop);
   }
   if (t.files.length) kids.push(h("div", { class: "files" }, t.files.map((f) => {
-    const ext = (f.filename.split(".").pop() || "").toLowerCase(), [lab, col] = FTYPE[ext] || ["DOS", "#64748b"];
     const canDel = isAdmin() || (f.uploader_id === S.me.id && !lk);
-    return h("div", { class: "file" }, h("span", { class: "ftype", style: `background:${col}` }, lab),
+    return h("div", { class: "file" }, fileTag(f.filename),
       h("div", { class: "grow" }, h("a", { class: "fn", href: `/zs/api/files/${f.id}`, title: f.filename }, f.filename),
         h("div", { class: "small muted" }, `${sizeTxt(f.size)} · ${name(f.uploader_id)} · ${fmtShort(f.created_at)}`)),
       canDel ? confirmBtn("", async () => { await api("DELETE", `/zs/api/files/${f.id}`); await refresh(); }, "btn-icon", "trash") : null);
