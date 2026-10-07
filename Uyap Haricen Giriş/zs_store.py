@@ -104,6 +104,16 @@ _SCHEMA = [
         user_id BIGINT PRIMARY KEY, chat_id BIGINT NOT NULL, tg_name TEXT, linked_at BIGINT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS zs_tg_codes (
         code TEXT PRIMARY KEY, user_id BIGINT NOT NULL, expires_at BIGINT NOT NULL)""",
+    # Hatırlatıcılar: remind_at gelince user_id'ye bildirim; sent_at dolunca bir daha gönderilmez.
+    # task_id boşsa işten bağımsız hatırlatıcı (title kendi başlığı). task_id = ana iş; alt işe kurulduysa
+    # sub_id = alt işin kimliği.
+    """CREATE TABLE IF NOT EXISTS zs_reminders (
+        id {pk}, task_id BIGINT, sub_id BIGINT, user_id BIGINT NOT NULL, created_by BIGINT NOT NULL,
+        remind_at BIGINT NOT NULL, note TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+        sent_at BIGINT, created_at BIGINT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS zs_reminders_user ON zs_reminders(user_id)",
+    "CREATE INDEX IF NOT EXISTS zs_reminders_task ON zs_reminders(task_id)",
+    "CREATE INDEX IF NOT EXISTS zs_reminders_due ON zs_reminders(sent_at, remind_at)",
 ]
 
 # Gizlenebilen türler: (zs_transfers bayrağı, kesim sütunu)
@@ -203,14 +213,18 @@ class ZsStore:
             # Sonradan eklenen sütunlar (eski tablolara).
             added = (("is_private", "INTEGER NOT NULL DEFAULT 0"), ("priority", "INTEGER NOT NULL DEFAULT 1"),
                      ("submitted_at", "BIGINT"))
+            rem_added = (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''"))
             if self._pg:
                 for col, typ in added:
                     cur.execute(f"ALTER TABLE zs_tasks ADD COLUMN IF NOT EXISTS {col} {typ}")
+                for col, typ in rem_added:
+                    cur.execute(f"ALTER TABLE zs_reminders ADD COLUMN IF NOT EXISTS {col} {typ}")
             else:
-                cols = [r[1] for r in cur.execute("PRAGMA table_info(zs_tasks)").fetchall()]
-                for col, typ in added:
-                    if col not in cols:
-                        cur.execute(f"ALTER TABLE zs_tasks ADD COLUMN {col} {typ}")
+                for table, cols_added in (("zs_tasks", added), ("zs_reminders", rem_added)):
+                    cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+                    for col, typ in cols_added:
+                        if col not in cols:
+                            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         self._run(fn)
 
     # ── kullanıcılar ─────────────────────────────────────────────────────────────────
@@ -437,6 +451,8 @@ class ZsStore:
                                    "ORDER BY id", ids).fetchall()
             pend = {r[0] for r in self._q(cur, f"SELECT task_id FROM zs_extensions WHERE task_id IN ({marks}) "
                                                 "AND status = 'bekliyor'", ids).fetchall()}
+            rem = dict(self._q(cur, f"SELECT task_id, MIN(remind_at) FROM zs_reminders WHERE user_id = ? AND sent_at IS NULL "
+                                    f"AND task_id IN ({marks}) GROUP BY task_id", [uid] + ids).fetchall())
             by_parent = {}
             for s_ in subs:
                 if s_["id"] > cuts.get(s_["parent_id"], nocut)["task"]:
@@ -450,6 +466,7 @@ class ZsStore:
                 r["assignees"] = [r["assignee_id"]] if r["assignee_id"] else []
                 r["approvers"] = []
                 r["ext_pending"] = r["id"] in pend
+                r["reminder_at"] = rem.get(r["id"])
             idx = {r["id"]: r for r in roots}
             for tid, muid, role in members:
                 key = "assignees" if role == "assignee" else "approvers"
@@ -763,6 +780,7 @@ class ZsStore:
             if not t:
                 raise ZsError("İş bulunamadı.")
             if t["parent_id"]:
+                self._q(cur, "DELETE FROM zs_reminders WHERE sub_id = ?", (task_id,))
                 self._q(cur, "DELETE FROM zs_tasks WHERE id = ?", (task_id,))
                 self._event(cur, t["parent_id"], actor["id"], "subtask_deleted", title=t["title"])
                 return []
@@ -771,7 +789,7 @@ class ZsStore:
             for q in ("DELETE FROM zs_files WHERE task_id = ?", "DELETE FROM zs_notes WHERE task_id = ?",
                       "DELETE FROM zs_transfers WHERE task_id = ?", "DELETE FROM zs_seen WHERE task_id = ?",
                       "DELETE FROM zs_members WHERE task_id = ?", "DELETE FROM zs_extensions WHERE task_id = ?",
-                      "DELETE FROM zs_tasks WHERE parent_id = ?", "DELETE FROM zs_tasks WHERE id = ?"):
+                      "DELETE FROM zs_reminders WHERE task_id = ?", "DELETE FROM zs_tasks WHERE parent_id = ?", "DELETE FROM zs_tasks WHERE id = ?"):
                 self._q(cur, q, (task_id,))
             # Silme izi kalsın: olaylar silinmez, task_id'si silinmiş işe işaret eder.
             self._event(cur, task_id, actor["id"], "deleted", title=t["title"])
@@ -1106,6 +1124,88 @@ class ZsStore:
             self._q(cur, "DELETE FROM zs_files WHERE id = ?", (file_id,))
             self._event(cur, f["task_id"], actor["id"], "file_deleted", filename=f["filename"])
             return f["storage_key"]
+        return self._run(fn)
+
+    # ── hatırlatıcılar ───────────────────────────────────────────────────────────────
+    # task_id dolu → işe bağlı (iş başlığıyla gider); boş → işten bağımsız (kendi title'ı ile).
+    def add_reminder(self, actor, task_id, user_id, remind_at, note="", title="", sub_id=None):
+        now = _now()
+        if not remind_at or remind_at < now - 60:
+            raise ZsError("Hatırlatma zamanı geçmişte olamaz.")
+        if remind_at > now + 2 * 366 * 86400:
+            raise ZsError("Hatırlatma en fazla iki yıl sonrasına kurulabilir.")
+        title = (title or "").strip()[:300]
+        if task_id is None and not title:
+            raise ZsError("Hatırlatıcıya bir başlık yazın.")
+
+        def fn(cur):
+            if task_id is None:
+                n = self._q(cur, "SELECT COUNT(*) FROM zs_reminders WHERE task_id IS NULL AND user_id = ? AND sent_at IS NULL",
+                            (user_id,)).fetchone()[0]
+                if n >= 200:
+                    raise ZsError("Bu kişinin en fazla 200 bekleyen bağımsız hatırlatıcısı olabilir.")
+            else:
+                n = self._q(cur, "SELECT COUNT(*) FROM zs_reminders WHERE task_id = ? AND user_id = ? AND sent_at IS NULL",
+                            (task_id, user_id)).fetchone()[0]
+                if n >= 20:
+                    raise ZsError("Bu işte bu kişiye en fazla 20 bekleyen hatırlatıcı kurulabilir.")
+            rid = self._insert(cur, "INSERT INTO zs_reminders (task_id, sub_id, user_id, created_by, remind_at, note, title, "
+                                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                               (task_id, sub_id, user_id, actor["id"], int(remind_at), (note or "").strip()[:500], title, now))
+            return self._one(self._q(cur, "SELECT * FROM zs_reminders WHERE id = ?", (rid,)))
+        return self._run(fn)
+
+    def list_reminders(self, task_id, viewer):
+        """Yönetici işin tüm hatırlatıcılarını; diğerleri kendine kurulan ya da kendi kurduklarını görür."""
+        sql = ("SELECT r.*, s.title AS sub_title FROM zs_reminders r LEFT JOIN zs_tasks s ON s.id = r.sub_id "
+               "WHERE r.task_id = ?")
+        args = (task_id,)
+        if viewer["role"] != "admin":
+            sql += " AND (r.user_id = ? OR r.created_by = ?)"
+            args = (task_id, viewer["id"], viewer["id"])
+        return self._run(lambda cur: self._rows(self._q(cur, sql + " ORDER BY r.remind_at, r.id", args)))
+
+    def list_my_reminders(self, viewer, since):
+        """Bana kurulan + benim kurduğum tüm hatırlatıcılar (işe bağlı ve bağımsız); gönderilmişler 'since'den beri.
+        İş/alt iş başlıkları eklenir. Görünürlük denetimi çağıranda."""
+        return self._run(lambda cur: self._rows(self._q(
+            cur, "SELECT r.*, t.title AS task_title, t.is_private AS task_private, s.title AS sub_title "
+                 "FROM zs_reminders r LEFT JOIN zs_tasks t ON t.id = r.task_id LEFT JOIN zs_tasks s ON s.id = r.sub_id "
+                 "WHERE (r.user_id = ? OR r.created_by = ?) AND (r.sent_at IS NULL OR r.remind_at >= ?) "
+                 "ORDER BY r.remind_at, r.id", (viewer["id"], viewer["id"], since))))
+
+    def list_free_reminders(self, viewer, since):
+        """İşten bağımsız hatırlatıcılar: kişiye kurulan ya da kişinin kurduğu; gönderilmişler 'since'den beri."""
+        return self._run(lambda cur: self._rows(self._q(
+            cur, "SELECT * FROM zs_reminders WHERE task_id IS NULL AND (user_id = ? OR created_by = ?) "
+                 "AND (sent_at IS NULL OR remind_at >= ?) ORDER BY remind_at, id", (viewer["id"], viewer["id"], since))))
+
+    def get_reminder(self, rid):
+        return self._run(lambda cur: self._one(self._q(cur, "SELECT * FROM zs_reminders WHERE id = ?", (rid,))))
+
+    def delete_reminder(self, rid):
+        self._run(lambda cur: self._q(cur, "DELETE FROM zs_reminders WHERE id = ?", (rid,)))
+
+    def claim_due_reminders(self, now=None, limit=100):
+        """Zamanı gelmiş, gönderilmemiş hatırlatıcıları 'gönderildi' işaretleyip döndürür. İşaretleme
+        satır satır koşullu yapılır; iki süreç aynı anda çalışsa da her hatırlatıcı bir kez gider."""
+        now = now or _now()
+
+        def fn(cur):
+            rows = self._rows(self._q(cur, "SELECT r.*, t.title AS task_title, t.due_at, t.status, s.title AS sub_title "
+                                           "FROM zs_reminders r LEFT JOIN zs_tasks t ON t.id = r.task_id "
+                                           "LEFT JOIN zs_tasks s ON s.id = r.sub_id "
+                                           "WHERE r.sent_at IS NULL AND r.remind_at <= ? ORDER BY r.remind_at LIMIT ?",
+                                      (now, limit)))
+            out = []
+            for r in rows:
+                cur.execute(self._sql("UPDATE zs_reminders SET sent_at = ? WHERE id = ? AND sent_at IS NULL"),
+                            (now, r["id"]))
+                # İşe bağlıyken iş silinmişse gönderilmez (iş silinince satırları da silinir; yarış durumu için).
+                if cur.rowcount == 1 and (r["task_id"] is None or r["task_title"] is not None):
+                    out.append(r)
+            names = {r[0]: r[1] for r in self._q(cur, "SELECT id, display_name FROM zs_users WHERE active = 1").fetchall()}
+            return [dict(r, user_active=r["user_id"] in names, by_name=names.get(r["created_by"], "")) for r in out]
         return self._run(fn)
 
 

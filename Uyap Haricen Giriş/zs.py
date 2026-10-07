@@ -132,6 +132,9 @@ _ACTIONS = {
     ("POST", "/zs/api/tasks/{id}/ek-sure"): "ek_sure_iste",
     ("POST", "/zs/api/ek-sure/{id}/karar"): "ek_sure_karar",
     ("POST", "/zs/api/tasks/{id}/notes"): "not_ekle",
+    ("POST", "/zs/api/tasks/{id}/hatirlatici"): "hatirlatici_kur",
+    ("POST", "/zs/api/hatirlatici"): "hatirlatici_kur_bagimsiz",
+    ("DELETE", "/zs/api/hatirlatici/{id}"): "hatirlatici_sil",
     ("POST", "/zs/api/tasks/{id}/files"): "belge_yukle",
     ("DELETE", "/zs/api/files/{id}"): "belge_sil",
     ("GET", "/zs/api/files/{id}"): "belge_indir",
@@ -189,6 +192,8 @@ async def _before(request, method, route):
             return await _db(C.store.snapshot_task, tid, method == "DELETE")
         if route.startswith("/zs/api/files/{id}"):
             return await _db(C.store.snapshot_file, tid)
+        if route.startswith("/zs/api/hatirlatici/{id}"):
+            return await _db(C.store.get_reminder, tid)
         if route.startswith("/zs/api/ek-sure/{id}"):
             return await _db(C.store.snapshot_extension, tid)
         if route.startswith("/zs/api/users/{id}"):
@@ -426,6 +431,10 @@ async def logout_post(request):
 def _see_other(location):
     # raise HTTPSeeOther yerine düz yanıt: güvenlik middleware'i (Secure çerez, CSP) atlanmasın.
     return web.Response(status=303, headers={"Location": location, "Cache-Control": "no-store"})
+
+
+async def _slash_redirect(_request):
+    return _see_other("/zs")
 
 
 def _static(name, ctype, binary=False, headers=None):
@@ -683,6 +692,98 @@ async def api_note_create(request, user):
     t, root = await _visible_task(user, int(request.match_info["id"]))
     n = await _db(C.store.add_note, user, root["id"], d.get("body"), _opt_int(d.get("note_at")))
     return _json({"ok": True, "note": n})
+
+
+# ── API: hatırlatıcılar ──────────────────────────────────────────────────────────────
+# Kurallar (kime kurulabilir):
+#   işten bağımsız      → kullanıcı kendine; yönetici herkese. Kişiseldir: yalnız alıcı ve kuran görür/siler.
+#   ana iş              → kullanıcı kendine; yönetici işi görebilen herkese (atadığı kişiler dahil).
+#   alt iş              → işi görebilen herkes, işi görebilen herkese.
+# Silme: kuran ya da alıcı; işe bağlı olanları yönetici de silebilir.
+def _reminder_public(r):
+    out = {k: r.get(k) for k in ("id", "task_id", "sub_id", "user_id", "created_by", "remind_at", "note", "title",
+                                 "sent_at", "created_at")}
+    for k in ("task_title", "sub_title", "task_private"):
+        if k in r:
+            out[k] = r[k]
+    return out
+
+
+async def _create_reminder(user, task_id, d):
+    target = _opt_int(d.get("user_id")) or user["id"]
+    other = None
+    if target != user["id"]:
+        other = await _db(C.store.get_user, target)
+        if not other or not other["active"]:
+            raise ZsError("Kişi bulunamadı.")
+    when, note = _opt_int(d.get("remind_at")), d.get("note") or ""
+    if task_id is None:
+        if other and user["role"] != "admin":
+            raise ZsError("İşe bağlı olmayan hatırlatıcıyı yalnız kendinize kurabilirsiniz.")
+        return await _db(C.store.add_reminder, user, None, target, when, note, d.get("title") or "")
+    t, root = await _visible_task(user, task_id)
+    sub = t if t["id"] != root["id"] else None
+    if other:
+        if not sub and user["role"] != "admin":
+            raise ZsError("Bu işte yalnız kendinize hatırlatıcı kurabilirsiniz (alt işlerde herkese kurulabilir).")
+        if not await _db(C.store.visible_to, root, other):
+            raise ZsError("Bu kişi işi göremiyor; ona hatırlatıcı kurulamaz.")
+    return await _db(C.store.add_reminder, user, root["id"], target, when, note, "", sub["id"] if sub else None)
+
+
+@_api()
+async def api_reminder_list(request, user):
+    t, root = await _visible_task(user, int(request.match_info["id"]))
+    rows = await _db(C.store.list_reminders, root["id"], user)
+    return _json({"ok": True, "reminders": [_reminder_public(r) for r in rows]})
+
+
+@_api()
+async def api_reminder_create(request, user):
+    r = await _create_reminder(user, int(request.match_info["id"]), await _body(request))
+    return _json({"ok": True, "reminder": _reminder_public(r)})
+
+
+@_api()
+async def api_free_reminder_list(request, user):
+    rows = await _db(C.store.list_free_reminders, user, int(time.time()) - 60 * 86400)
+    return _json({"ok": True, "reminders": [_reminder_public(r) for r in rows]})
+
+
+@_api()
+async def api_free_reminder_create(request, user):
+    """Genel "Hatırlatıcı kur": task_id verilirse o işe/alt işe bağlanır, verilmezse bağımsızdır."""
+    d = await _body(request)
+    r = await _create_reminder(user, _opt_int(d.get("task_id")), d)
+    return _json({"ok": True, "reminder": _reminder_public(r)})
+
+
+@_api()
+async def api_my_reminders(request, user):
+    """Hatırlatıcılar ekranı: bana kurulanlar + benim kurduklarım (işe bağlı ve bağımsız). Gönderilmişler
+    son 60 gün. İşe bağlı olanlar yalnız iş hâlâ görünürse listelenir."""
+    rows = await _db(C.store.list_my_reminders, user, int(time.time()) - 60 * 86400)
+    seen = {}
+    out = []
+    for r in rows:
+        if r["task_id"] is not None:
+            if r["task_id"] not in seen:
+                root = await _db(C.store.get_task, r["task_id"])
+                seen[r["task_id"]] = bool(root) and await _db(C.store.visible_to, root, user)
+            if not seen[r["task_id"]]:
+                continue
+        out.append(_reminder_public(r))
+    return _json({"ok": True, "reminders": out})
+
+
+@_api()
+async def api_reminder_delete(request, user):
+    r = await _db(C.store.get_reminder, int(request.match_info["id"]))
+    admin_ok = user["role"] == "admin" and r and r["task_id"] is not None
+    if not r or (not admin_ok and user["id"] not in (r["user_id"], r["created_by"])):
+        raise ZsError("Hatırlatıcı bulunamadı.")
+    await _db(C.store.delete_reminder, r["id"])
+    return _json({"ok": True})
 
 
 # ── API: raporlar ────────────────────────────────────────────────────────────────────
@@ -961,6 +1062,8 @@ def register(app, session_secret, guard, client_ip, store=None):
 
     r = app.router
     r.add_get("/zs", page_get)
+    # Sonda eğik çizgiyle yazılan/paylaşılan adres 404 vermesin.
+    r.add_get("/zs/", _slash_redirect)
     r.add_post("/zs/login", login_post)
     r.add_post("/zs/logout", logout_post)
     r.add_get("/zs/static/zs.js", _static("zs.js", "application/javascript"))
@@ -996,6 +1099,12 @@ def register(app, session_secret, guard, client_ip, store=None):
     r.add_post("/zs/api/tasks/{id:\\d+}/ek-sure", api_extension_request)
     r.add_post("/zs/api/ek-sure/{id:\\d+}/karar", api_extension_decide)
     r.add_post("/zs/api/tasks/{id:\\d+}/notes", api_note_create)
+    r.add_get("/zs/api/tasks/{id:\\d+}/hatirlatici", api_reminder_list)
+    r.add_post("/zs/api/tasks/{id:\\d+}/hatirlatici", api_reminder_create)
+    r.add_get("/zs/api/hatirlatici", api_free_reminder_list)
+    r.add_get("/zs/api/hatirlaticilar", api_my_reminders)
+    r.add_post("/zs/api/hatirlatici", api_free_reminder_create)
+    r.add_delete("/zs/api/hatirlatici/{id:\\d+}", api_reminder_delete)
     r.add_post("/zs/api/tasks/{id:\\d+}/files", api_file_upload)
     r.add_get("/zs/api/rapor", api_report)
     r.add_get("/zs/api/rapor/etkinlik", api_activity)

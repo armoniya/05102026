@@ -16,6 +16,10 @@ Kurallar (işlemi yapan kişiye bildirim gitmez; özel işler bildirim üretmez)
   ek süre istendi              → onay yetkilileri (yoksa yöneticiler)
   ek süre kabul / ret          → isteyen
   devredildi                   → devralan
+  hatırlatıcı (zamanı gelince)  → hatırlatıcının alıcısı (kendine kurduysa da gider)
+
+Hatırlatıcılar: REMIND_EVERY saniyede bir zamanı gelenler alınır (zs_reminders.sent_at koşullu
+işaretlenir → her biri bir kez gider). Sunucu kapalıyken zamanı geçenler açılışta gönderilir.
 
 Telegram ayarları (ortam değişkenleri):
   ZS_TELEGRAM_TOKEN   BotFather'dan alınan bot jetonu (yoksa Telegram kapalı)
@@ -37,6 +41,7 @@ import zs_push
 
 TR = _dt.timezone(_dt.timedelta(hours=3))
 TG_API = "https://api.telegram.org"
+REMIND_EVERY = 30
 
 
 def _fmt(ts):
@@ -90,6 +95,26 @@ def build_messages(events, admins, names):
     return out
 
 
+def reminder_message(r, now=None):
+    """Hatırlatıcı satırından bildirim metni. Saf fonksiyon."""
+    now = now or time.time()
+    late = now - r["remind_at"] > 10 * 60
+    # İşe bağlıysa işin başlığı, bağımsızsa hatırlatıcının kendi başlığı.
+    head = r["title"] if not r.get("task_id") else \
+        (f"{r['task_title']} › {r['sub_title']}" if r.get("sub_title") else r["task_title"])
+    lines = [head]
+    if r.get("note"):
+        lines.append(r["note"])
+    if r.get("due_at"):
+        lines.append(f"Son tarih: {_fmt(r['due_at'])}")
+    if r["created_by"] != r["user_id"] and r.get("by_name"):
+        lines.append(f"Hatırlatan: {r['by_name']}")
+    if late:
+        lines.append(f"(Gecikmeli — kurulan saat: {_fmt(r['remind_at'])})")
+    body = "\n".join(lines)
+    return {"title": "Hatırlatma", "body": body, "task_id": r["task_id"], "tag": f"hat-{r['id']}"}
+
+
 class Notifier:
     def __init__(self, store):
         self.store = store
@@ -117,6 +142,7 @@ class Notifier:
         return self.session
 
     async def start(self, _app=None):
+        self._spawn(self._remind_loop())
         if not self.tg_token:
             return
         try:
@@ -209,6 +235,28 @@ class Notifier:
             await asyncio.to_thread(self.store.push_result, sub["id"], False)
             if (sub.get("fails") or 0) >= 20:
                 await asyncio.to_thread(self.store.push_remove, sub["endpoint"])
+
+    # ── hatırlatıcılar ──
+    async def remind_tick(self, now=None):
+        """Zamanı gelen hatırlatıcıları gönderir; gönderilen sayısını döndürür."""
+        rows = await asyncio.to_thread(self.store.claim_due_reminders, now)
+        n = 0
+        for r in rows:
+            if not r["user_active"]:
+                continue
+            await self.deliver(r["user_id"], reminder_message(r, now))
+            n += 1
+        return n
+
+    async def _remind_loop(self):
+        while True:
+            try:
+                await self.remind_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[!] zs hatırlatıcı turu: {e}")
+            await asyncio.sleep(REMIND_EVERY)
 
     # ── Telegram ──
     async def _tg(self, method, **params):

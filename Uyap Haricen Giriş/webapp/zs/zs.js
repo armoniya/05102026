@@ -2,7 +2,7 @@
 "use strict";
 
 const S = { me: null, people: {}, peopleList: [], uploads: false, maxMb: 25,
-  view: "benim", tasks: [], mine: [], onayList: null, selId: null, detail: null, expanded: new Set(),
+  view: "takvim", tasks: [], mine: [], onayList: null, selId: null, detail: null, expanded: new Set(),
   q: "", f: "aktif", sort: "tarih", composer: false, tab: "zaman", rejectFor: null, order: [] };
 
 // "Onay bekliyor" her yerde aynı ad: etiket, süzgeç, menü.
@@ -15,6 +15,8 @@ const EVENTS = { created: "oluşturdu", assigned: "atadı", edited: "düzenledi"
   completed: "işi tamamladı" };
 // [uzun ad, kısa ad (telefon), ikon, sayfa başlığı, alt başlık]
 const VIEWS = {
+  takvim: ["Takvim", "Takvim", "cal", "Takvim", ""],
+  hatirlatici: ["Hatırlatıcılar", "Hatırlat", "bell", "Hatırlatıcılar", "Size kurulan ve sizin kurduğunuz hatırlatmalar — işe bağlı ya da bağımsız"],
   benim: ["Benim işlerim", "İşlerim", "inbox", "Benim işlerim", "Size atanan işler ve alt işler"],
   ozel: ["Özel işlerim", "Özel", "lock", "Özel işlerim", "Yalnız sizin görebildiğiniz işler — onaya gönderilmez, bitince “Tamamla”"],
   onay: ["Onay bekleyenler", "Onay", "shield", "Onay bekleyenler", "Kontrol edip onaylamanız gereken işler"],
@@ -48,7 +50,7 @@ const ICONS = {
   plus: "M12 5v14|M5 12h14",
   search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z|m21 21-4.3-4.3",
   x: "M18 6 6 18|m6 6 12 12",
-  up: "m18 15-6-6-6 6", down: "m6 9 6 6 6-6", left: "m15 18-6-6 6-6",
+  up: "m18 15-6-6-6 6", down: "m6 9 6 6 6-6", left: "m15 18-6-6 6-6", right: "m9 18 6-6-6-6",
   edit: "M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z",
   trash: "M3 6h18|M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6|M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
   upload: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4|m17 8-5-5-5 5|M12 3v12",
@@ -247,7 +249,9 @@ function go(view, selId) { if (view === "rapor" && S.rep) S.rep.data = null; S.v
 function renderTabs() {
   const mineActive = S.mine.filter((t) => !isDone(t));
   const counts = { benim: mineActive.length, ozel: mineActive.filter((t) => t.is_private).length,
-    onay: isAdmin() ? (S.onayList || []).length : S.mine.filter((t) => t.status === "onayda").length };
+    onay: isAdmin() ? (S.onayList || []).length : S.mine.filter((t) => t.status === "onayda").length,
+    takvim: mineActive.filter(isToday).length,
+    hatirlatici: (S.myRems || []).filter((r) => !r.sent_at && r.user_id === S.me.id && r.remind_at < dayStart(1)).length };
   const late = mineActive.some(isLate);
   const item = (k) => {
     const [long, short, ic] = VIEWS[k];
@@ -257,7 +261,7 @@ function renderTabs() {
       k === "benim" && late ? h("span", { class: "dot", title: "Geciken işiniz var" }) : null,
       n ? h("span", { class: "cnt" + (k === "onay" && isAdmin() ? " warn" : "") }, n) : null);
   };
-  const kids = [h("div", { class: "nav-h" }, "İşler"), item("benim"), item("ozel"), item("onay")];
+  const kids = [h("div", { class: "nav-h" }, "İşler"), item("takvim"), item("hatirlatici"), item("benim"), item("ozel"), item("onay")];
   if (isAdmin()) kids.push(item("tumu"), h("div", { class: "nav-h" }, "Yönetim"), item("rapor"), item("kullanicilar"));
   else kids.push(item("rapor"));
   $("tabs").replaceChildren(...kids);
@@ -270,16 +274,24 @@ function baseTasks() {
 function renderHead() {
   const v = VIEWS[S.view];
   const title = v[3];
-  const sub = S.view === "onay" && !isAdmin() ? "Gönderdiğiniz, onay yetkilisinin kararını bekleyen işler"
+  const sub = S.view === "takvim" ? (isAdmin() ? "Ekibin işleri gün, hafta ve ay olarak — biten silik, geciken kırmızı" : "Size düşen işler gün, hafta ve ay olarak — biten silik, geciken kırmızı")
+    : S.view === "onay" && !isAdmin() ? "Gönderdiğiniz, onay yetkilisinin kararını bekleyen işler"
     : S.view === "rapor" ? (isAdmin() ? "Kişilerin yaptıkları, iş ve tarih bazında sonuçlar (başkalarının özel işleri hariç)" : "Yaptıklarınız ve işlerinizin sonuçları")
     : v[4];
   const top = h("div", { class: "top" }, h("div", {}, h("h1", {}, title), h("div", { class: "subt" }, sub)));
   if (S.view === "kullanicilar" || S.view === "rapor") { $("head").replaceChildren(top); return; }
   const q = h("input", { type: "search", id: "q", placeholder: "İşlerde ara…  ( / )", value: S.q });
   q.addEventListener("input", () => { S.q = q.value; renderList(); });
+  if (S.view === "takvim") q.placeholder = "Takvimde ara…  ( / )";
+  if (S.view === "hatirlatici") q.placeholder = "Hatırlatıcılarda ara…  ( / )";
   const right = h("div", { class: "row" }, h("label", { class: "search" }, icon("search"), q));
+  const remDay = S.view === "takvim" && S.cal && S.cal.mode === "gun" ? S.cal.at : null;
+  right.append(h("button", { type: "button", class: S.view === "hatirlatici" ? "btn" : "btn-ghost", title: "Hatırlatıcı kur (işi açmadan)",
+    onclick: () => reminderCreateDialog({ day: remDay }) }, icon("bell"), S.view === "hatirlatici" ? "Hatırlatıcı kur" : "Hatırlatıcı"));
+  if (S.view === "hatirlatici") { top.append(right); $("head").replaceChildren(top); return; }
   if (S.view !== "onay") right.append(h("button", { type: "button", class: "btn", onclick: openComposer }, icon("plus"), "Yeni iş"));
   top.append(right);
+  if (S.view === "takvim") { calHead(top); return; }
   if (S.view === "onay") { $("head").replaceChildren(top); return; }
 
   // Tek süzgeç satırı: durumlar + (varsa) gecikme süzgeçleri. Gecikme süzgeci yeniden basılınca kalkar.
@@ -305,16 +317,19 @@ function renderHead() {
 async function refresh() {
   try {
     const admin = isAdmin();
-    const want = { benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", kullanicilar: null, rapor: null }[S.view];
+    const want = { takvim: admin ? "tumu" : "benim", benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", kullanicilar: null, rapor: null, hatirlatici: null }[S.view];
     const [mine, onay, cur] = await Promise.all([
       api("GET", "/zs/api/tasks?filtre=benim"),
       admin ? api("GET", "/zs/api/tasks?filtre=onay") : Promise.resolve(null),
       want && want !== "benim" && !(want === "onay" && admin) ? api("GET", `/zs/api/tasks?filtre=${want}`) : Promise.resolve(null)]);
     S.mine = mine.tasks; S.onayList = onay ? onay.tasks : null;
+    try { S.myRems = (await api("GET", "/zs/api/hatirlaticilar")).reminders; } catch (_) { S.myRems = []; }
+    $("layout").classList.toggle("cal", S.view === "takvim");
     S.tasks = want === "benim" ? S.mine : want === "onay" && admin ? S.onayList : cur ? cur.tasks : [];
     renderTabs(); renderHead();
     if (S.view === "kullanicilar") { closeDetail(); await renderUsers(); return; }
     if (S.view === "rapor") { closeDetail(); await renderReport(); return; }
+    if (S.view === "hatirlatici") { closeDetail(); renderReminders(); return; }
     renderList();
     if (S.selId) await openDetail(S.selId, true); else closeDetail();
   } catch (e) { toast(e.message); }
@@ -349,6 +364,8 @@ function grouped(T) {
 }
 
 function renderList() {
+  if (S.view === "takvim") { renderCalendar(); return; }
+  if (S.view === "hatirlatici") { renderReminders(); return; }
   const kids = [];
   if (S.composer) kids.push(composerCard());
   const T = shownTasks();
@@ -370,7 +387,7 @@ function renderList() {
 }
 
 function openComposer() {
-  if (S.view === "onay" || S.view === "kullanicilar" || S.view === "rapor") { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
+  if (S.view === "onay" || S.view === "kullanicilar" || S.view === "rapor" || S.view === "hatirlatici") { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
   S.composer = true; renderList();
   const i = document.querySelector(".composer input"); if (i) { i.focus(); i.scrollIntoView({ block: "center" }); }
 }
@@ -403,7 +420,7 @@ function composerFiles() {
 
 function composerCard() {
   const title = h("input", { placeholder: "Ne yapılacak?", maxlength: 300, style: "width:100%" });
-  const sel = peopleSelect(S.me.id), due = dueField(null), prio = prioSelect(1);
+  const sel = peopleSelect(S.me.id), due = dueField(S.composerDue || null), prio = prioSelect(1);
   const desc = h("textarea", { placeholder: "Açıklama (isteğe bağlı)", maxlength: 5000 });
   const priv = h("input", { type: "checkbox", checked: S.view === "ozel" });
   const extra = isAdmin() ? peoplePicker("Ek atanan ekle…") : null;
@@ -416,14 +433,14 @@ function composerCard() {
   };
   priv.addEventListener("change", sync); sync();
   const files = S.uploads ? composerFiles() : null;
-  const close = () => { S.composer = false; renderList(); };
+  const close = () => { S.composer = false; S.composerDue = null; renderList(); };
   const add = act(async () => {
     if (!title.value.trim()) { title.focus(); return; }
     const body = { title: title.value, assignee_id: sel.value || null, due_at: due.value(), description: desc.value,
       private: priv.checked, priority: Number(prio.value) };
     if (extra && !priv.checked) { body.assignees = extra.ids(); body.approvers = appr.ids(); }
     const d = await api("POST", "/zs/api/tasks", body);
-    S.selId = d.task.id; S.composer = false; S.f = "aktif";
+    S.selId = d.task.id; S.composer = false; S.composerDue = null; S.f = "aktif";
     // İş açıldı; belgeler ayrı istekte yüklenir. Biri başarısız olursa iş kalır, belge işin detayından eklenebilir.
     const picked = files ? files.list() : [], failed = [];
     for (const f of picked) { try { await uploadFile(d.task.id, f); } catch (e) { failed.push(`${f.name}: ${e.message}`); } }
@@ -519,7 +536,7 @@ function taskCard(t) {
     tabindex: 0, "data-id": t.id, onclick: () => openDetail(t.id) },
     h("div", { class: "row" }, h("span", { class: "t grow", title: t.unseen ? "Son bakışınızdan beri değişti" : null }, t.title),
       privTag(t), prioTag(t), latePill(t), pill(t.status)),
-    h("div", { class: "meta" }, whoMany(assigneesOf(t)), dueChip(t),
+    h("div", { class: "meta" }, whoMany(assigneesOf(t)), dueChip(t), bellTag(t.reminder_at),
       t.ext_pending ? h("span", { class: "extp" }, icon("clock"), "Ek süre talebi") : null,
       subs.length ? h("span", { class: "prog" }, h("span", { class: "b" }, h("i", { style: `width:${Math.round(100 * done / subs.length)}%` })), `${done}/${subs.length}`) : null,
       t.note_count ? h("span", { title: "Not" }, icon("msg"), t.note_count) : null,
@@ -554,7 +571,9 @@ function subRow(s, root, full) {
   const row = h("div", { class: "sub" + (s.status === "tamam" ? " done" : ""), onclick: stop },
     cb, h("span", { class: "st" }, s.title),
     s.assignee_id && s.assignee_id !== root.assignee_id ? avatar(s.assignee_id, "xs") : null,
-    s.due_at ? dueChip(s) : null);
+    s.due_at ? dueChip(s) : null,
+    full ? h("button", { type: "button", class: "btn-icon sub-bell", title: "Bu alt iş için hatırlatıcı kur",
+      onclick: () => reminderCreateDialog({ taskId: s.id }) }, icon("bell")) : null);
   if (full && editable) {
     row.append(h("span", { class: "tools" },
       h("button", { type: "button", class: "btn-icon", title: "Yukarı", onclick: act(async () => {
@@ -645,6 +664,7 @@ function renderDetail() {
         h("dt", {}, assigneesOf(t).length > 1 ? "Atananlar" : "Atanan"), h("dd", {}, peopleList(t, "assignee")),
         t.is_private ? null : [h("dt", {}, "Onaylayan"), h("dd", {}, peopleList(t, "approver"))],
         h("dt", {}, "Son tarih"), h("dd", {}, t.due_at ? dueChip(t) : h("span", { class: "muted" }, "—")),
+        nextReminder(t.id) ? [h("dt", {}, "Hatırlatma"), h("dd", {}, h("button", { type: "button", class: "linkish", onclick: () => reminderDialog() }, bellTag(nextReminder(t.id))))] : null,
         h("dt", {}, "Açan"), h("dd", {}, h("span", { class: "row", style: "gap:6px" }, who(t.created_by, "xs"),
           h("span", { class: "small muted" }, fmtShort(t.created_at))))),
       t.description ? h("div", { class: "desc" }, t.description) : null,
@@ -663,6 +683,7 @@ function detailActions(t) {
     btns.push(h("button", { type: "button", class: "btn-ghost sm", disabled: pending, title: pending ? "Karar bekleyen talebiniz var" : null,
       onclick: () => extensionDialog() }, icon("clock"), "Ek süre iste"));
   }
+  btns.push(h("button", { type: "button", class: "btn-ghost sm", onclick: () => reminderDialog() }, icon("bell"), "Hatırlatıcı"));
   if (admin || own) btns.push(confirmBtn("Sil", async () => {
     await api("DELETE", `/zs/api/tasks/${t.id}`); closeDetail(); toast("İş silindi.", true); await refresh(); }));
   return btns.length ? h("div", { class: "actions" }, btns) : null;
@@ -799,6 +820,201 @@ function memberDialog() {
         dlg.close(); toast("Kişi eklendi.", true); S.tab = "zaman"; await refresh(); }) }, icon("plus"), "Ekle"),
       h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Vazgeç")));
   dlg.showModal();
+}
+
+// ── hatırlatıcı ────────────────────────────────────────────────────────────────────
+// Kurulan saatte Web Push + Telegram (kişinin açtığı kanallar).
+// İşe bağlı: iş detayındaki "Hatırlatıcı" (atanan, kendi açtığı, özel — görebildiği her iş). Kullanıcı kendine,
+// yönetici işi görebilen herkese kurar. İşten bağımsız: takvimdeki "Hatırlatıcı" düğmesi; kişiseldir.
+const nextReminder = (id) => { const r = (S.tasks || []).find((x) => x.id === id) || S.mine.find((x) => x.id === id); return r ? r.reminder_at : null; };
+const bellTag = (ts) => ts ? h("span", { class: "bell-tag", title: `Hatırlatma: ${fmt(ts)}` }, icon("bell"), fmtShort(ts)) : null;
+
+// "Ne zaman?" alanı: hazır seçenekler + tarih/saat. dueAt varsa son tarihe göre seçenekler de çıkar.
+function remWhen(dueAt, day) {
+  const now = Date.now() / 1000, when = dueField(null);
+  const setTs = (ts) => {
+    const d = new Date(ts * 1000);
+    when.date.value = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+    when.el.querySelector("input[type=time]").value = `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  };
+  const at = (dayOffset, hh, mm = 0) => { const d = new Date(); d.setDate(d.getDate() + dayOffset); d.setHours(hh, mm, 0, 0); return d.getTime() / 1000; };
+  const presets = [["1 saat sonra", Math.ceil((now + 3600) / 300) * 300], ["Bu akşam 17:00", at(0, 17)],
+    ["Yarın 09:00", at(1, 9)], ["Pazartesi 09:00", at((8 - new Date().getDay()) % 7 || 7, 9)]];
+  if (dueAt) presets.push(["Son tarihten 1 gün önce", dueAt - 86400], ["Son tarihten 1 saat önce", dueAt - 3600], ["Son tarihte", dueAt]);
+  const chips = h("div", { class: "rem-presets" }, presets.filter(([, ts]) => ts > now + 30).map(([l, ts]) =>
+    h("button", { type: "button", class: "chip", onclick: (e) => {
+      setTs(ts); chips.querySelectorAll(".chip").forEach((c) => c.classList.remove("on")); e.currentTarget.classList.add("on"); } }, l)));
+  // Takvimde bir güne tıklanarak açıldıysa o gün 09:00 (geçmişse boş bırakılır).
+  if (day) { const d = new Date(day); d.setHours(9, 0, 0, 0); if (d.getTime() / 1000 > now) setTs(d.getTime() / 1000); }
+  return { el: h("div", {}, chips, h("div", { style: "margin-top:8px" }, when.el)), value: () => when.value() };
+}
+const remHint = () => h("div", { class: "small muted", style: "margin-top:10px" }, icon("bell"),
+  " Bildirim, “Bildirimler” menüsünden açtığınız cihazlara ve bağladıysanız Telegram'a gider.");
+function remCheckTs(ts) {
+  if (!ts) { toast("Tarih ve saat seçin."); return false; }
+  if (ts < Date.now() / 1000 - 60) { toast("Geçmiş bir zamana hatırlatıcı kurulamaz."); return false; }
+  return true;
+}
+function remPeopleSelect(ids) {
+  return h("select", {}, S.peopleList.filter((p) => p.active && (!ids || ids.has(p.id))).map((p) =>
+    h("option", { value: p.id, selected: p.id === S.me.id }, p.id === S.me.id ? `${p.display_name} (ben)` : p.display_name)));
+}
+function remRow(r, after) {
+  const sent = !!r.sent_at;
+  const canDel = r.created_by === S.me.id || r.user_id === S.me.id || (isAdmin() && r.task_id);
+  return h("div", { class: "rem" + (sent ? " sent" : "") },
+    h("span", { class: "ic" }, icon(sent ? "check" : "bell")),
+    h("div", { class: "grow" }, h("div", { class: "w" }, fmt(r.remind_at),
+      r.user_id !== S.me.id ? h("span", { class: "muted" }, ` · ${name(r.user_id)}`) : null,
+      h("span", { class: "muted small" }, sent ? " · gönderildi" : " · bekliyor")),
+      r.sub_title ? h("div", { class: "small" }, `↳ ${r.sub_title}`) : null,
+      r.note ? h("div", { class: "small muted" }, r.note) : null),
+    canDel ? h("button", { type: "button", class: "btn-icon", title: sent ? "Kaldır" : "İptal et", onclick: act(async () => {
+      await api("DELETE", `/zs/api/hatirlatici/${r.id}`); toast("Hatırlatıcı kaldırıldı.", true); await refresh(); after(); }) }, icon("x")) : null);
+}
+
+// İşe bağlı hatırlatıcı (iş detayından).
+async function reminderDialog() {
+  const t = S.detail, dlg = $("dlg");
+  let list = [];
+  try { list = (await api("GET", `/zs/api/tasks/${t.id}/hatirlatici`)).reminders; } catch (e) { toast(e.message); return; }
+  const when = remWhen(t.due_at);
+  const note = h("input", { type: "text", maxlength: 500, placeholder: "Not (isteğe bağlı) — ör. “Müvekkili ara”" });
+  // Yönetici: işi görebilenler (atananlar, onay yetkilileri, ben). Özel işte yalnız kendisi.
+  const to = isAdmin() && !t.is_private ? remPeopleSelect(new Set([S.me.id, ...assigneesOf(t), ...(t.approvers || [])])) : null;
+  dlg.replaceChildren(...[h("h3", {}, "Hatırlatıcı"), h("div", { class: "small muted" }, `“${t.title}”`),
+    list.length ? h("div", { class: "rem-list" }, list.map((r) => remRow(r, reminderDialog))) : null,
+    h("div", { class: "lbl" }, "Ne zaman?"), when.el,
+    to ? h("label", { class: "lbl" }, "Kime", to) : null,
+    h("label", { class: "lbl" }, "Not", note), remHint(),
+    h("div", { class: "actions", style: "margin-top:16px" },
+      h("button", { type: "button", class: "btn", onclick: act(async () => {
+        const ts = when.value();
+        if (!remCheckTs(ts)) return;
+        await api("POST", `/zs/api/tasks/${t.id}/hatirlatici`, { remind_at: ts, note: note.value, user_id: to ? Number(to.value) : null });
+        dlg.close(); toast(`Hatırlatıcı kuruldu: ${fmt(ts)}`, true); await refresh(); }) }, icon("bell"), "Kur"),
+      (t.subtasks || []).some((x) => x.status !== "tamam") ? h("button", { type: "button", class: "btn-ghost",
+        onclick: () => reminderCreateDialog({ taskId: t.id }) }, "Alt işe kur…") : null,
+      h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Kapat"))].filter(Boolean));
+  if (!dlg.open) dlg.showModal();
+}
+
+// Genel "Hatırlatıcı kur": işi açmadan. İlgili iş/alt iş isteğe bağlı (boşsa işten bağımsız).
+// o.taskId: önceden seçili iş ya da alt iş; o.day: takvimde seçili gün.
+async function reminderCreateDialog(o = {}) {
+  const dlg = $("dlg"), admin = isAdmin();
+  let roots = [];
+  try { roots = (await api("GET", `/zs/api/tasks?filtre=${admin ? "tumu" : "benim"}`)).tasks.filter((t) => !isDone(t) || t.id === o.taskId); }
+  catch (e) { toast(e.message); return; }
+  // Seçenekler: ana işler ve altında açık alt işleri.
+  const opts = [];
+  for (const t of roots.sort(byDue)) {
+    opts.push({ id: t.id, root: t, sub: null, label: t.title });
+    for (const s of t.subtasks || []) if (s.status !== "tamam" || s.id === o.taskId) opts.push({ id: s.id, root: t, sub: s, label: `↳ ${s.title}` });
+  }
+  const byId = new Map(opts.map((x) => [x.id, x]));
+  const filter = h("input", { type: "search", placeholder: "İş ara…" });
+  const sel = h("select", {});
+  const fill = () => {
+    const q = filter.value.trim().toLocaleLowerCase("tr-TR"), cur = Number(sel.value) || o.taskId || 0;
+    sel.replaceChildren(h("option", { value: "" }, "— İşe bağlı değil —"),
+      ...opts.filter((x) => !q || `${x.root.title} ${x.sub ? x.sub.title : ""}`.toLocaleLowerCase("tr-TR").includes(q) || x.id === cur)
+        .map((x) => h("option", { value: x.id, selected: x.id === cur }, x.label)));
+  };
+  filter.addEventListener("input", fill);
+  fill();
+  const title = h("input", { type: "text", maxlength: 300, placeholder: "Neyi hatırlatalım? — ör. “Bilirkişiyi ara”" });
+  const titleRow = h("label", { class: "lbl" }, "Başlık", title);
+  const whenBox = h("div", {}), toBox = h("div", {});
+  const note = h("input", { type: "text", maxlength: 500, placeholder: "Not (isteğe bağlı) — ör. “Müvekkili ara”" });
+  let when = null, to = null;
+  const sync = () => {
+    const x = byId.get(Number(sel.value));
+    titleRow.hidden = !!x;
+    when = remWhen(x ? (x.sub ? x.sub.due_at : x.root.due_at) : null, o.day);
+    whenBox.replaceChildren(h("div", { class: "lbl" }, "Ne zaman?"), when.el);
+    // Kime: bağımsızda yönetici herkese; ana işte yönetici işi görenlere; alt işte herkes işi görenlere.
+    let ids = null;
+    if (x) {
+      const r = x.root;
+      ids = new Set([S.me.id, r.created_by, ...assigneesOf(r), ...(r.approvers || []), ...(r.subtasks || []).map((s) => s.assignee_id)].filter(Boolean));
+    }
+    const can = x ? (!x.root.is_private && (x.sub || admin)) : admin;
+    to = can ? remPeopleSelect(ids) : null;
+    if (to && x && x.sub && x.sub.assignee_id && ids.has(x.sub.assignee_id)) to.value = String(x.sub.assignee_id);
+    toBox.replaceChildren(...(to ? [h("label", { class: "lbl" }, "Kime", to)] : []));
+  };
+  sel.addEventListener("change", sync);
+  sync();
+  dlg.replaceChildren(h("h3", {}, "Hatırlatıcı kur"),
+    h("div", { class: "lbl" }, "İlgili iş (isteğe bağlı)"), h("div", { class: "rem-task" }, filter, sel),
+    titleRow, whenBox, toBox, h("label", { class: "lbl" }, "Not", note), remHint(),
+    h("div", { class: "actions", style: "margin-top:16px" },
+      h("button", { type: "button", class: "btn", onclick: act(async () => {
+        const taskId = Number(sel.value) || null;
+        if (!taskId && !title.value.trim()) { title.focus(); toast("Başlık yazın ya da bir iş seçin."); return; }
+        const ts = when.value();
+        if (!remCheckTs(ts)) return;
+        await api("POST", "/zs/api/hatirlatici", { task_id: taskId, title: title.value, remind_at: ts, note: note.value,
+          user_id: to ? Number(to.value) : null });
+        dlg.close(); toast(`Hatırlatıcı kuruldu: ${fmt(ts)}`, true); await refresh(); }) }, icon("bell"), "Kur"),
+      h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Vazgeç")));
+  if (!dlg.open) dlg.showModal();
+  (o.taskId ? note : title).focus();
+}
+
+// Takvimdeki bağımsız hatırlatıcıya tıklanınca.
+function freeReminderView(r) {
+  const dlg = $("dlg"), sent = !!r.sent_at;
+  dlg.replaceChildren(...[h("h3", {}, r.title),
+    h("div", { class: "rem-view" }, h("span", { class: "ic" }, icon(sent ? "check" : "bell")),
+      h("div", {}, h("b", {}, fmt(r.remind_at)), h("div", { class: "small muted" }, sent ? "Gönderildi" : "Bekliyor",
+        r.user_id !== S.me.id ? ` · Kime: ${name(r.user_id)}` : "", r.created_by !== S.me.id ? ` · Kuran: ${name(r.created_by)}` : ""))),
+    r.note ? h("div", { class: "desc", style: "margin-top:12px" }, r.note) : null,
+    h("div", { class: "actions", style: "margin-top:16px" },
+      h("button", { type: "button", class: sent ? "btn-ghost" : "btn-danger-soft", onclick: act(async () => {
+        await api("DELETE", `/zs/api/hatirlatici/${r.id}`); dlg.close(); toast("Hatırlatıcı kaldırıldı.", true); await refresh(); }) },
+        icon(sent ? "trash" : "x"), sent ? "Kaldır" : "İptal et"),
+      h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Kapat"))].filter(Boolean));
+  dlg.showModal();
+}
+
+// ── Hatırlatıcılar ekranı (sol menü) ───────────────────────────────────────────────
+const remLabel = (r) => r.task_id ? (r.sub_title ? `${r.task_title} › ${r.sub_title}` : r.task_title) : r.title;
+function renderReminders() {
+  const me = S.me.id, q = S.q.trim().toLocaleLowerCase("tr-TR");
+  const all = (S.myRems || []).filter((r) => !q || `${remLabel(r)} ${r.note || ""} ${name(r.user_id)}`.toLocaleLowerCase("tr-TR").includes(q));
+  const pend = all.filter((r) => !r.sent_at), mine = pend.filter((r) => r.user_id === me), others = pend.filter((r) => r.user_id !== me);
+  const sent = all.filter((r) => r.sent_at).sort((a, b) => b.remind_at - a.remind_at);
+  const t1 = dayStart(1), t2 = dayStart(2), wk = +weekStart(new Date()) / 1000 + 7 * 86400;
+  const groups = [["Bugün", mine.filter((r) => r.remind_at < t1)], ["Yarın", mine.filter((r) => r.remind_at >= t1 && r.remind_at < t2)],
+    ["Bu hafta", mine.filter((r) => r.remind_at >= t2 && r.remind_at < wk)], ["Daha sonra", mine.filter((r) => r.remind_at >= wk)],
+    ["Başkalarına kurduklarım", others], ["Gönderilenler (son 60 gün)", sent]];
+  const row = (r) => {
+    const canDel = r.created_by === me || r.user_id === me || (isAdmin() && r.task_id);
+    const who = r.user_id !== me ? `Kime: ${name(r.user_id)}` : r.created_by !== me ? `Kuran: ${name(r.created_by)}` : "";
+    return h("div", { class: "card rem-row" + (r.sent_at ? " sent" : "") },
+      h("div", { class: "rem-when" }, h("b", {}, FMT_TIME.format(new Date(r.remind_at * 1000))),
+        h("span", {}, new Date(r.remind_at * 1000).toLocaleDateString("tr-TR", { day: "numeric", month: "short", weekday: "short" }))),
+      h("span", { class: "ic" }, icon(r.sent_at ? "check" : "bell")),
+      h("div", { class: "grow" },
+        r.task_id ? h("button", { type: "button", class: "rem-link", title: "İşi aç", onclick: () => openTaskFrom(r.task_id, r.task_private) },
+          r.sub_title ? h("span", { class: "muted" }, `${r.task_title} › `) : null, r.sub_title || r.task_title)
+          : h("b", {}, r.title),
+        r.note ? h("div", { class: "small muted" }, r.note) : null,
+        h("div", { class: "small muted" }, r.task_id ? (r.sub_title ? "Alt işe bağlı" : "İşe bağlı") : "İşten bağımsız", who ? ` · ${who}` : "")),
+      canDel ? confirmBtn("", async () => { await api("DELETE", `/zs/api/hatirlatici/${r.id}`); toast("Hatırlatıcı kaldırıldı.", true); await refresh(); }, "btn-icon", r.sent_at ? "trash" : "x") : null);
+  };
+  const kids = [];
+  for (const [label, arr] of groups) {
+    if (!arr.length) continue;
+    kids.push(h("div", { class: "group-h" + (label === "Bugün" ? " late" : "") }, label, h("span", { class: "n" }, arr.length)));
+    kids.push(...arr.map(row));
+  }
+  if (!kids.length) kids.push(h("div", { class: "card empty" }, h("div", { class: "ic" }, icon("bell")),
+    h("b", {}, q ? "Bu aramada hatırlatıcı yok" : "Hatırlatıcınız yok"),
+    h("button", { type: "button", class: "btn sm", style: "margin-top:10px", onclick: () => reminderCreateDialog() }, icon("bell"), "Hatırlatıcı kur")));
+  $("list").replaceChildren(...kids);
 }
 
 // ── ek süre ────────────────────────────────────────────────────────────────────────
@@ -1489,6 +1705,315 @@ function passwordDialog() {
   dlg.showModal();
 }
 
+// ── takvim (açılış ekranı) ──────────────────────────────────────────────────────────
+// İşler ve tarihli alt işler son tarihlerinin gününe yerleşir. Biten silik, geciken kırmızı.
+// Kullanıcı yalnız kendi işlerini görür; yönetici herkesinkini, kişi süzgeciyle (bir ya da birkaç kişi).
+const CAL_MODES = [["gun", "Gün"], ["hafta", "Hafta"], ["ay", "Ay"]];
+const WD_SHORT = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
+const p2 = (n) => String(n).padStart(2, "0");
+const dkey = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+const dayOf = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const weekStart = (d) => { const x = dayOf(d); return addDays(x, -((x.getDay() + 6) % 7)); };
+const calFmt = (d, o) => d.toLocaleDateString("tr-TR", o);
+
+// Hafta görünümü 5 günlük bir penceredir: açılışta pazartesi–cuma; oklar pencereyi birer gün kaydırır
+// (cumadan sonra cumartesi gelir). Bugün hafta sonuysa pencere bugünle biter.
+const WEEK_DAYS = 5;
+const weekWin = (d) => { const x = dayOf(d), wd = (x.getDay() + 6) % 7; return addDays(x, wd < WEEK_DAYS ? -wd : -(WEEK_DAYS - 1)); };
+
+function calState() {
+  if (!S.cal) {
+    const mode = store.get("zs-cal-mode");
+    let people = [];
+    try { people = JSON.parse(store.get("zs-cal-people") || "[]").filter((id) => S.people[id]); } catch (_) { /* bozuk kayıt */ }
+    S.cal = { mode: CAL_MODES.some(([k]) => k === mode) ? mode : "hafta", at: dayOf(new Date()),
+      wk: weekWin(new Date()), people: new Set(people), strips: new Set() };
+  }
+  return S.cal;
+}
+function calSave() {
+  store.set("zs-cal-mode", S.cal.mode);
+  store.set("zs-cal-people", JSON.stringify([...S.cal.people]));
+}
+
+// Görünür aralık: [başlangıç, bitiş) + ızgarada çizilecek günler.
+function calRange() {
+  const C = calState(), a = C.at;
+  if (C.mode === "gun") return { start: a, end: addDays(a, 1), days: [a] };
+  if (C.mode === "hafta") return { start: C.wk, end: addDays(C.wk, WEEK_DAYS), days: [...Array(WEEK_DAYS)].map((_, i) => addDays(C.wk, i)) };
+  const first = new Date(a.getFullYear(), a.getMonth(), 1), next = new Date(a.getFullYear(), a.getMonth() + 1, 1);
+  const gs = weekStart(first), n = Math.round((weekStart(addDays(next, -1)) - gs) / 864e5) + 7;
+  return { start: first, end: next, days: [...Array(n)].map((_, i) => addDays(gs, i)) };
+}
+function calLabel() {
+  const C = calState(), r = calRange();
+  if (C.mode === "gun") return calFmt(C.at, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  if (C.mode === "ay") return calFmt(C.at, { month: "long", year: "numeric" });
+  const e = addDays(r.end, -1), same = r.start.getMonth() === e.getMonth();
+  return `${calFmt(r.start, same ? { day: "numeric" } : { day: "numeric", month: "long" })} – ${calFmt(e, { day: "numeric", month: "long", year: "numeric" })}`;
+}
+function calMove(dir) {
+  const C = calState();
+  const today = dayOf(new Date());
+  if (dir === 0) { C.at = today; C.wk = weekWin(today); }
+  else if (C.mode === "gun") C.at = addDays(C.at, dir);
+  else if (C.mode === "hafta") {
+    C.wk = addDays(C.wk, dir);
+    C.at = today >= C.wk && today < addDays(C.wk, WEEK_DAYS) ? today : C.wk;
+  }
+  else C.at = new Date(C.at.getFullYear(), C.at.getMonth() + dir, 1);
+  renderHead(); renderCalendar();
+}
+function calSetMode(mode, day) {
+  const C = calState();
+  if (day) C.at = dayOf(day);
+  if (mode === "hafta" && (C.mode !== "hafta" || day)) C.wk = weekWin(C.at);
+  C.mode = mode; calSave(); renderHead(); renderCalendar();
+}
+
+// Takvim kalemleri: ana iş + tarihli alt işler. people = kimin işi (süzgeç ve avatar için).
+function calItems() {
+  const C = calState(), admin = isAdmin(), me = S.me.id, out = [];
+  const q = S.q.trim().toLocaleLowerCase("tr-TR");
+  for (const t of S.tasks) {
+    const rootPeople = assigneesOf(t);
+    if (admin || isMine(t) || isOwnPrivate(t))
+      out.push({ key: `t${t.id}`, rootId: t.id, obj: t, title: t.title, parent: null, people: rootPeople, priv: !!t.is_private });
+    for (const s of t.subtasks || []) {
+      if (!s.due_at) continue;
+      const people = s.assignee_id ? [s.assignee_id] : rootPeople;
+      if (!admin && !people.includes(me)) continue;
+      out.push({ key: `s${s.id}`, rootId: t.id, obj: s, title: s.title, parent: t.title, people, priv: !!t.is_private });
+    }
+  }
+  return out.filter((it) => (!admin || !C.people.size || it.people.some((p) => C.people.has(p)))
+    && (!q || `${it.title} ${it.parent || ""}`.toLocaleLowerCase("tr-TR").includes(q)));
+}
+const itemState = (it) => isDone(it.obj) ? "done" : isLate(it.obj) ? "late" : it.obj.status === "onayda" ? "onayda"
+  : it.obj.status === "devam" ? "devam" : "acik";
+const byTime = (a, b) => (a.obj.due_at || 0) - (b.obj.due_at || 0) || (b.obj.priority ?? 1) - (a.obj.priority ?? 1);
+function calStats(items) {
+  const s = { total: items.length, done: 0, onayda: 0, late: 0 };
+  for (const it of items) { const st = itemState(it); if (st === "done") s.done++; else if (st === "late") s.late++; else if (st === "onayda") s.onayda++; }
+  return s;
+}
+function calProg(done, total, cls) {
+  const pct = total ? Math.round(100 * done / total) : 0;
+  return h("span", { class: "cal-prog" + (cls ? " " + cls : "") + (total && done === total ? " full" : ""), title: `${total} işten ${done} tanesi bitti` },
+    h("span", { class: "b" }, h("i", { style: `width:${pct}%` })), h("span", { class: "n" }, `${done}/${total}`));
+}
+
+// Kutucukta kişi adı: "Ayşe D." (tam ad üzerine gelince). Yönetici her zaman görür; kullanıcı yalnız
+// iş birden çok kişiye atanmışsa (kendi takviminde kendi adı gereksiz).
+const shortName = (id) => {
+  const p = name(id).trim().split(/\s+/);
+  return p.length > 1 ? `${p[0]} ${p[p.length - 1][0].toLocaleUpperCase("tr-TR")}.` : p[0];
+};
+function calWho(people, wide) {
+  if (!people.length) return isAdmin() && !wide ? h("span", { class: "who-ns none" }, "Atanmamış") : null;
+  // Gün görünümünde işler zaten kişi bölümlerinde; ad yalnız ortak işte gerekir.
+  if ((wide || !isAdmin()) && people.length < 2) return null;
+  const MAX = 3, more = people.length - MAX;
+  return h("span", { class: "who-ns", title: people.map(name).join(", ") },
+    people.slice(0, MAX).map((id) => h("span", { class: "who-n" },
+      h("i", { style: `background:${AV_COLORS[id % AV_COLORS.length]}` }), shortName(id))),
+    more > 0 ? h("span", { class: "who-n more" }, `+${more}`) : null);
+}
+
+function calChip(it, opts = {}) {
+  const st = itemState(it), o = it.obj;
+  const tip = [it.parent ? `${it.parent} › ${it.title}` : it.title, st === "done" ? "Bitti" : st === "late" ? "Gecikti" : STATUS[o.status] || "",
+    it.people.map(name).join(", ")].filter(Boolean).join(" · ");
+  return h("button", { type: "button", class: `cal-it st-${st}` + (S.selId === it.rootId ? " sel" : "") + (opts.wide ? " wide" : ""),
+    title: tip, onclick: () => openDetail(it.rootId) },
+    h("span", { class: "tm" }, opts.date ? fmtShort(o.due_at) : o.due_at ? FMT_TIME.format(new Date(o.due_at * 1000)) : "—"),
+    h("span", { class: "tx" },
+      it.parent ? h("span", { class: "par" }, it.parent, " ›") : null,
+      h("span", { class: "tt" }, it.title)),
+    o.priority === 2 && st !== "done" ? h("span", { class: "fl", title: "Acil" }, icon("flag")) : null,
+    it.priv ? h("span", { class: "fl pv", title: "Özel" }, icon("lock")) : null,
+    !it.parent && o.reminder_at && st !== "done" ? h("span", { class: "fl bl", title: `Hatırlatma: ${fmt(o.reminder_at)}` }, icon("bell")) : null,
+    calWho(it.people, opts.wide),
+    opts.wide ? (st === "done" ? h("span", { class: "pill s-onaylandi" }, "Bitti") : st === "late" ? latePill(o) || pill(o.status) : pill(o.status)) : null);
+}
+
+function calComposeOn(day) {
+  const d = new Date(day); d.setHours(18, 0, 0, 0);
+  S.composerDue = Math.floor(d.getTime() / 1000);
+  openComposer();
+}
+
+function renderCalendar() {
+  const C = calState(), r = calRange(), all = calItems(), admin = isAdmin();
+  const byDay = {};
+  for (const it of all) if (it.obj.due_at) (byDay[dkey(new Date(it.obj.due_at * 1000))] ||= []).push(it);
+  for (const k in byDay) byDay[k].sort(byTime);
+  const inRange = all.filter((it) => it.obj.due_at && it.obj.due_at * 1000 >= r.start && it.obj.due_at * 1000 < r.end);
+  // İşten bağımsız hatırlatıcılar: güne yerleşir, iş sayılarına katılmaz.
+  const q = S.q.trim().toLocaleLowerCase("tr-TR"), remByDay = {};
+  for (const x of (S.myRems || []).filter((r) => !r.task_id)) {
+    if (q && !`${x.title} ${x.note || ""}`.toLocaleLowerCase("tr-TR").includes(q)) continue;
+    (remByDay[dkey(new Date(x.remind_at * 1000))] ||= []).push(x);
+  }
+  for (const k in remByDay) remByDay[k].sort((a, b) => a.remind_at - b.remind_at);
+  const kids = [];
+  if (S.composer) kids.push(composerCard());
+  kids.push(calSummary(inRange, admin));
+  const strips = calStrips(all, r);
+  if (strips) kids.push(strips);
+  const body = C.mode === "gun" ? calDayView(byDay[dkey(C.at)] || [], C.at, remByDay[dkey(C.at)] || [])
+    : C.mode === "hafta" ? calWeekView(r, byDay, remByDay) : calMonthView(r, byDay, remByDay);
+  kids.push(body);
+  S.order = [...new Set((C.mode === "gun" ? byDay[dkey(C.at)] || [] : inRange.slice().sort(byTime)).map((it) => it.rootId))];
+  $("list").replaceChildren(...kids);
+}
+
+function calSummary(items, admin) {
+  const C = calState(), s = calStats(items), today = dayOf(new Date());
+  const word = C.mode === "gun" ? (+C.at === +today ? "Bugün" : calFmt(C.at, { day: "numeric", month: "long" }))
+    : C.mode === "hafta" ? (+C.wk === +weekWin(today) ? "Bu hafta" : "Bu aralıkta") : calFmt(C.at, { month: "long" });
+  const kids = [h("div", { class: "cal-sum-main" },
+    h("div", { class: "lbl" }, word),
+    h("div", { class: "big" }, s.total ? `${s.done} / ${s.total}` : "İş yok", s.total ? h("span", { class: "muted" }, " iş bitti") : null),
+    s.total ? calProg(s.done, s.total, "lg") : null,
+    h("div", { class: "facts" },
+      s.total - s.done - s.late ? h("span", {}, h("i", { class: "dot st-acik" }), `${s.total - s.done - s.late} bekliyor`) : null,
+      s.onayda ? h("span", {}, h("i", { class: "dot st-onayda" }), `${s.onayda} onayda`) : null,
+      s.late ? h("span", { class: "bad" }, h("i", { class: "dot st-late" }), `${s.late} gecikmiş`) : null))];
+  // Yönetici: aralıktaki işler kişi kişi (birden çok atananlı iş her kişide sayılır).
+  if (admin) {
+    const per = new Map();
+    for (const it of items) for (const p of it.people) {
+      if (C.people.size && !C.people.has(p)) continue;
+      const e = per.get(p) || { t: 0, d: 0, l: 0 }; e.t++;
+      const st = itemState(it); if (st === "done") e.d++; else if (st === "late") e.l++;
+      per.set(p, e);
+    }
+    if (per.size) kids.push(h("div", { class: "cal-people-sum" }, [...per.entries()]
+      .sort((a, b) => name(a[0]).localeCompare(name(b[0]), "tr")).map(([p, e]) =>
+        h("div", { class: "pp" + (e.l ? " has-late" : "") }, avatar(p, "xs"), h("span", { class: "nm" }, name(p)),
+          calProg(e.d, e.t), e.l ? h("span", { class: "late-n", title: "Gecikmiş" }, `${e.l} gecikmiş`) : null))));
+  }
+  return h("div", { class: "card cal-sum" }, kids);
+}
+
+// Aralığın dışında kalan ama dikkat isteyenler: önceden kalan gecikmişler, tarihsiz açık işler.
+function calStrips(all, r) {
+  const C = calState();
+  const late = all.filter((it) => it.obj.due_at && it.obj.due_at * 1000 < r.start && isLate(it.obj)).sort(byTime);
+  const undated = all.filter((it) => !it.obj.due_at && !isDone(it.obj));
+  if (!late.length && !undated.length) return null;
+  const strip = (key, cls, ic, label, arr, date) => {
+    const d = h("details", { class: `cal-strip ${cls}`, open: C.strips.has(key) },
+      h("summary", {}, icon(ic), label, h("span", { class: "n" }, arr.length)),
+      h("div", { class: "cal-strip-list" }, arr.map((it) => calChip(it, { date }))));
+    d.addEventListener("toggle", () => { d.open ? C.strips.add(key) : C.strips.delete(key); });
+    return d;
+  };
+  return h("div", { class: "cal-strips" },
+    late.length ? strip("late", "late", "alert", "Önceki günlerden kalan gecikmiş işler", late, true) : null,
+    undated.length ? strip("undated", "", "list", "Tarihsiz açık işler", undated, false) : null);
+}
+
+function calDayHead(day, items, opts = {}) {
+  const today = +day === +dayOf(new Date()), s = calStats(items);
+  return h("div", { class: "cal-dh" + (today ? " today" : "") },
+    h("button", { type: "button", class: "cal-dn", title: "Gün görünümü", onclick: () => calSetMode("gun", day) },
+      opts.short ? null : h("span", { class: "wd" }, WD_SHORT[(day.getDay() + 6) % 7]), h("span", { class: "num" }, day.getDate())),
+    s.total ? calProg(s.done, s.total, s.late ? "has-late" : "") : h("span", { class: "grow" }),
+    opts.add === false ? null : h("button", { type: "button", class: "btn-icon cal-add", title: "Bu güne iş ekle", onclick: () => calComposeOn(day) }, icon("plus")));
+}
+
+function calRemChip(x) {
+  const sent = !!x.sent_at;
+  return h("button", { type: "button", class: "cal-rem" + (sent ? " sent" : ""), onclick: () => freeReminderView(x),
+    title: `Hatırlatıcı · ${fmt(x.remind_at)}${sent ? " · gönderildi" : ""}${x.user_id !== S.me.id ? ` · ${name(x.user_id)}` : ""}` },
+    icon("bell"), h("span", { class: "tm" }, FMT_TIME.format(new Date(x.remind_at * 1000))), h("span", { class: "tt" }, x.title),
+    x.user_id !== S.me.id ? h("span", { class: "who-n" }, h("i", { style: `background:${AV_COLORS[x.user_id % AV_COLORS.length]}` }), shortName(x.user_id)) : null);
+}
+
+function calWeekView(r, byDay, remByDay) {
+  const today = dayOf(new Date());
+  return h("div", { class: "cal-week" }, r.days.map((d) => {
+    const items = byDay[dkey(d)] || [], rems = remByDay[dkey(d)] || [];
+    return h("div", { class: "cal-col" + (+d === +today ? " today" : "") + (d.getDay() % 6 === 0 ? " wkend" : "") + (d < today ? " past" : "") },
+      calDayHead(d, items),
+      h("div", { class: "cal-col-body" }, rems.map(calRemChip), items.map((it) => calChip(it)),
+        items.length || rems.length ? null : h("div", { class: "cal-none" }, "—")));
+  }));
+}
+
+function calMonthView(r, byDay, remByDay) {
+  const today = dayOf(new Date()), MAX = 3, m = calState().at.getMonth();
+  return h("div", { class: "cal-month" },
+    h("div", { class: "cal-mh" }, WD_SHORT.map((w) => h("div", {}, w))),
+    h("div", { class: "cal-grid" }, r.days.map((d) => {
+      const items = byDay[dkey(d)] || [], rems = remByDay[dkey(d)] || [];
+      const shownRems = rems.slice(0, MAX), more = items.length + rems.length - MAX;
+      return h("div", { class: "cal-cell" + (d.getMonth() !== m ? " out" : "") + (+d === +today ? " today" : "") + (d.getDay() % 6 === 0 ? " wkend" : "") },
+        calDayHead(d, items, { short: true }),
+        h("div", { class: "cal-cell-body" }, shownRems.map(calRemChip), items.slice(0, MAX - shownRems.length).map((it) => calChip(it)),
+          more > 0 ? h("button", { type: "button", class: "cal-more", onclick: () => calSetMode("gun", d) }, `+${more} daha`) : null),
+        // Telefon: ızgarada kalemler yerine durum noktaları.
+        items.length || rems.length ? h("button", { type: "button", class: "cal-dots", onclick: () => calSetMode("gun", d), "aria-label": `${items.length} iş, ${rems.length} hatırlatıcı` },
+          rems.slice(0, 2).map(() => h("i", { class: "dot st-rem" })), items.slice(0, 6).map((it) => h("i", { class: `dot st-${itemState(it)}` }))) : null);
+    })));
+}
+
+function calDayView(items, day, rems) {
+  const view = calDayTasks(items, day);
+  if (!rems.length) return view;
+  return h("div", {}, h("div", { class: "card cal-rems" }, h("div", { class: "cal-day-ph" }, icon("bell"), h("b", { class: "grow" }, "Hatırlatıcılar"),
+    h("span", { class: "small muted" }, `${rems.length}`)), h("div", { class: "cal-day-list" }, rems.map(calRemChip))), view);
+}
+
+function calDayTasks(items, day) {
+  const admin = isAdmin(), C = calState();
+  const list = (arr) => arr.length ? h("div", { class: "cal-day-list" }, arr.map((it) => calChip(it, { wide: true })))
+    : h("div", { class: "cal-none" }, "Bu gün için iş yok.");
+  const add = h("div", { class: "row" }, h("button", { type: "button", class: "btn-ghost sm", onclick: () => calComposeOn(day) }, icon("plus"), "Bu güne iş ekle"),
+    h("button", { type: "button", class: "btn-ghost sm", onclick: () => reminderCreateDialog({ day }) }, icon("bell"), "Bu güne hatırlatıcı"));
+  if (!admin) return h("div", { class: "card cal-day" }, list(items), h("div", { class: "cal-day-foot" }, add));
+  // Yönetici: kişi kişi bölümler — kim neyi bitirdi, kimde ne kaldı.
+  const groups = new Map();
+  for (const it of items) {
+    const ps = it.people.length ? it.people : [0];
+    for (const p of ps) { if (p && C.people.size && !C.people.has(p)) continue; (groups.get(p) || groups.set(p, []).get(p)).push(it); }
+  }
+  if (!groups.size) return h("div", { class: "card cal-day" }, list([]), h("div", { class: "cal-day-foot" }, add));
+  const order = [...groups.keys()].sort((a, b) => (a === 0) - (b === 0) || name(a).localeCompare(name(b), "tr"));
+  return h("div", { class: "cal-day-people" }, order.map((p) => {
+    const arr = groups.get(p), s = calStats(arr);
+    return h("div", { class: "card cal-day" },
+      h("div", { class: "cal-day-ph" }, p ? avatar(p) : null, h("b", { class: "grow" }, p ? name(p) : "Atanmamış"),
+        s.late ? h("span", { class: "late-n" }, `${s.late} gecikmiş`) : null, calProg(s.done, s.total)),
+      list(arr));
+  }), h("div", { class: "cal-day-foot" }, add));
+}
+
+function calHead(top) {
+  const C = calState(), admin = isAdmin();
+  const seg = h("div", { class: "seg", role: "group", "aria-label": "Görünüm" }, CAL_MODES.map(([k, l]) =>
+    h("button", { type: "button", class: C.mode === k ? "on" : "", "aria-pressed": C.mode === k ? "true" : "false", onclick: () => calSetMode(k) }, l)));
+  const nav = h("div", { class: "cal-nav" },
+    h("button", { type: "button", class: "btn-icon", title: "Önceki (←)", onclick: () => calMove(-1) }, icon("left")),
+    h("button", { type: "button", class: "btn-ghost sm", title: "Bugüne dön (T)", onclick: () => calMove(0) }, "Bugün"),
+    h("button", { type: "button", class: "btn-icon", title: "Sonraki (→)", onclick: () => calMove(1) }, icon("right")),
+    h("span", { class: "cal-label" }, calLabel()));
+  const rows = [top, h("div", { class: "toolbar cal-tools" }, nav, seg)];
+  if (admin) {
+    const people = S.peopleList.filter((p) => p.active || C.people.has(p.id));
+    const toggle = (id) => { id === null ? C.people.clear() : C.people.has(id) ? C.people.delete(id) : C.people.add(id); calSave(); renderHead(); renderCalendar(); };
+    rows.push(h("div", { class: "cal-people", role: "group", "aria-label": "Kişi süzgeci" },
+      h("span", { class: "cal-pl" }, icon("users"), "Kişiler"),
+      h("button", { type: "button", class: "chip" + (C.people.size ? "" : " on"), "aria-pressed": C.people.size ? "false" : "true", onclick: () => toggle(null) }, "Herkes"),
+      people.map((p) => h("button", { type: "button", class: "chip pchip" + (C.people.has(p.id) ? " on" : ""),
+        "aria-pressed": C.people.has(p.id) ? "true" : "false", onclick: () => toggle(p.id) }, avatar(p.id, "xs"), p.display_name))));
+  }
+  $("head").replaceChildren(...rows);
+}
+
 // ── klavye kısayolları ─────────────────────────────────────────────────────────────
 function onKey(e) {
   if ($("dlg").open || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1497,13 +2022,19 @@ function onKey(e) {
   if (e.key === "Escape") {
     if (typing) { e.target.blur(); return; }
     if (S.rejectFor) { S.rejectFor = null; S.detail ? renderDetail() : renderList(); return; }
-    if (S.composer) { S.composer = false; renderList(); return; }
+    if (S.composer) { S.composer = false; S.composerDue = null; renderList(); return; }
     if (S.selId) { closeDetail(); renderList(); }
     return;
   }
   if (typing || S.view === "kullanicilar" || S.view === "rapor") return;
+  if (S.view === "hatirlatici" && e.key !== "/") return;
   if (e.key === "/") { const q = $("q"); if (q) { e.preventDefault(); q.focus(); } return; }
   if (e.key === "n" || e.key === "N") { e.preventDefault(); openComposer(); return; }
+  if (S.view === "takvim") {
+    const k = { ArrowLeft: () => calMove(-1), ArrowRight: () => calMove(1), t: () => calMove(0), T: () => calMove(0),
+      g: () => calSetMode("gun"), h: () => calSetMode("hafta"), a: () => calSetMode("ay") }[e.key];
+    if (k) { e.preventDefault(); k(); return; }
+  }
   if (["ArrowDown", "ArrowUp", "j", "k"].includes(e.key) && S.order.length) {
     e.preventDefault();
     const dir = e.key === "ArrowDown" || e.key === "j" ? 1 : -1;
@@ -1653,7 +2184,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("me").addEventListener("click", () => { if (matchMedia("(max-width:900px)").matches) accountSheet(); });
   document.addEventListener("keydown", onKey);
   try { await loadMe(); } catch (e) { toast(e.message); return; }
-  if (isAdmin()) S.view = "tumu";
   await refresh();
   await openFromLink();
   addEventListener("hashchange", () => openFromLink());

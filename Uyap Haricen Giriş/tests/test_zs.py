@@ -591,6 +591,128 @@ class ZsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await ali.get(path)).status, 200, path)
         self.assertEqual((await ali.get("/zs/sw.js")).headers.get("Service-Worker-Allowed"), "/zs")
 
+    async def test_hatirlatici(self):
+        import time as _t
+        n = zs.C.notifier
+        n.test_sink = []
+        adm = await self.login("yonetici")
+        ali = await self.login("ali")
+        t = (await self.j(await adm.post("/zs/api/tasks", json={"title": "Bilirkişi raporu", "assignee_id": self.ali["id"],
+                                                                "due_at": int(_t.time()) + 3 * 86400}, headers=H)))["task"]
+        soon = int(_t.time()) + 120
+        # Ali kendine kurar; başkasına kuramaz; geçmişe kuramaz.
+        r1 = (await self.j(await ali.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": soon, "note": "Müvekkili ara"}, headers=H)))["reminder"]
+        self.assertEqual(r1["user_id"], self.ali["id"])
+        await self.j(await ali.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": soon, "user_id": self.ayse["id"]}, headers=H), 400)
+        await self.j(await ali.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": int(_t.time()) - 3600}, headers=H), 400)
+        # Yönetici, işi gören Ali'ye kurabilir; işi görmeyen Ayşe'ye kuramaz.
+        r2 = (await self.j(await adm.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": soon + 60, "user_id": self.ali["id"]}, headers=H)))["reminder"]
+        await self.j(await adm.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": soon, "user_id": self.ayse["id"]}, headers=H), 400)
+        # Ayşe işi göremez → hatırlatıcı listesi/kurma yok, başkasınınkini silemez.
+        ayse = await self.login("ayse")
+        await self.j(await ayse.get(f"/zs/api/tasks/{t['id']}/hatirlatici"), 400)
+        await self.j(await ayse.delete(f"/zs/api/hatirlatici/{r1['id']}", headers=H), 400)
+        # Listede en yakın bekleyen hatırlatma görünür.
+        lst = (await self.j(await ali.get("/zs/api/tasks")))["tasks"]
+        self.assertEqual(lst[0]["reminder_at"], soon)
+        self.assertEqual(len((await self.j(await ali.get(f"/zs/api/tasks/{t['id']}/hatirlatici")))["reminders"]), 2)
+        # Zamanı gelmeden gitmez; gelince bir kez gider (ikinci tur boş).
+        await n.drain(); n.test_sink[:] = []
+        self.assertEqual(await n.remind_tick(soon - 10), 0)
+        self.assertEqual(await n.remind_tick(soon + 61), 2)
+        self.assertEqual(await n.remind_tick(soon + 120), 0)
+        msgs = {m["body"].split("\n")[1]: (u, m) for u, m in n.test_sink}
+        self.assertEqual(msgs["Müvekkili ara"][0], self.ali["id"])
+        self.assertEqual(msgs["Müvekkili ara"][1]["title"], "Hatırlatma")
+        self.assertIn("Hatırlatan: Yönetici", [m for _, (_, m) in msgs.items() if "Hatırlatan" in m["body"]][0]["body"])
+        lst = (await self.j(await ali.get("/zs/api/tasks")))["tasks"]
+        self.assertIsNone(lst[0]["reminder_at"])
+        # Alıcı silebilir; iş silinince hatırlatıcılar da gider.
+        await self.j(await ali.delete(f"/zs/api/hatirlatici/{r2['id']}", headers=H))
+        await self.j(await ali.post(f"/zs/api/tasks/{t['id']}/hatirlatici", json={"remind_at": soon + 3600}, headers=H))
+        await self.j(await adm.delete(f"/zs/api/tasks/{t['id']}", headers=H))
+        self.assertEqual(await n.remind_tick(soon + 7200), 0)
+
+    async def test_hatirlatici_ozel_kendi_ve_bagimsiz(self):
+        import time as _t
+        n = zs.C.notifier
+        n.test_sink = []
+        adm = await self.login("yonetici")
+        ali = await self.login("ali")
+        ayse = await self.login("ayse")
+        soon = int(_t.time()) + 120
+        # Ali'nin kendi açtığı iş ve özel işi: ikisine de kendine hatırlatıcı kurabilir.
+        kendi = (await self.j(await ali.post("/zs/api/tasks", json={"title": "Kendi işim"}, headers=H)))["task"]
+        ozel = (await self.j(await ali.post("/zs/api/tasks", json={"title": "Özel işim", "private": True}, headers=H)))["task"]
+        await self.j(await ali.post(f"/zs/api/tasks/{kendi['id']}/hatirlatici", json={"remind_at": soon}, headers=H))
+        await self.j(await ali.post(f"/zs/api/tasks/{ozel['id']}/hatirlatici", json={"remind_at": soon}, headers=H))
+        # Yönetici Ali'nin özel işini göremez → hatırlatıcı da kuramaz/göremez.
+        await self.j(await adm.get(f"/zs/api/tasks/{ozel['id']}/hatirlatici"), 400)
+        # İşten bağımsız: başlık zorunlu; kullanıcı yalnız kendine; yönetici başkasına kurabilir.
+        await self.j(await ali.post("/zs/api/hatirlatici", json={"remind_at": soon}, headers=H), 400)
+        await self.j(await ali.post("/zs/api/hatirlatici", json={"title": "x", "remind_at": soon, "user_id": self.ayse["id"]}, headers=H), 400)
+        b1 = (await self.j(await ali.post("/zs/api/hatirlatici", json={"title": "Bilirkişiyi ara", "remind_at": soon,
+                                                                       "note": "Dosya 2024/11435"}, headers=H)))["reminder"]
+        self.assertIsNone(b1["task_id"])
+        b2 = (await self.j(await adm.post("/zs/api/hatirlatici", json={"title": "Toplantı notlarını gönder", "remind_at": soon + 30,
+                                                                       "user_id": self.ayse["id"]}, headers=H)))["reminder"]
+        # Kişisel: Ali kendininkini görür; Ayşe kendisine kurulanı; yönetici yalnız kurduğunu (Ali'ninkini değil).
+        ids = lambda d: {r["id"] for r in d["reminders"]}
+        self.assertEqual(ids(await self.j(await ali.get("/zs/api/hatirlatici"))), {b1["id"]})
+        self.assertEqual(ids(await self.j(await ayse.get("/zs/api/hatirlatici"))), {b2["id"]})
+        self.assertEqual(ids(await self.j(await adm.get("/zs/api/hatirlatici"))), {b2["id"]})
+        await self.j(await adm.delete(f"/zs/api/hatirlatici/{b1['id']}", headers=H), 400)
+        await self.j(await ayse.delete(f"/zs/api/hatirlatici/{b1['id']}", headers=H), 400)
+        # Zamanı gelince hepsi (2 işe bağlı + 2 bağımsız) bir kez gider; bağımsızda başlık kendi başlığıdır.
+        await n.drain(); n.test_sink[:] = []
+        self.assertEqual(await n.remind_tick(soon + 60), 4)
+        self.assertEqual(await n.remind_tick(soon + 120), 0)
+        first = {(u, m["body"].split("\n")[0]) for u, m in n.test_sink}
+        self.assertEqual(first, {(self.ali["id"], "Kendi işim"), (self.ali["id"], "Özel işim"),
+                                 (self.ali["id"], "Bilirkişiyi ara"), (self.ayse["id"], "Toplantı notlarını gönder")})
+        free = [m for u, m in n.test_sink if m["body"].startswith("Bilirkişiyi ara")][0]
+        self.assertIsNone(free["task_id"])
+        self.assertIn("Dosya 2024/11435", free["body"])
+        # Gönderilen bağımsız hatırlatıcı listede "gönderildi" olarak kalır; alıcı silebilir.
+        lst = (await self.j(await ali.get("/zs/api/hatirlatici")))["reminders"]
+        self.assertTrue(lst[0]["sent_at"])
+        await self.j(await ali.delete(f"/zs/api/hatirlatici/{b1['id']}", headers=H))
+
+    async def test_hatirlatici_alt_is_ve_liste(self):
+        import time as _t
+        n = zs.C.notifier
+        n.test_sink = []
+        adm = await self.login("yonetici")
+        ali = await self.login("ali")
+        ayse = await self.login("ayse")
+        soon = int(_t.time()) + 120
+        t = (await self.j(await adm.post("/zs/api/tasks", json={"title": "Keşif", "assignee_id": self.ali["id"]}, headers=H)))["task"]
+        sub = (await self.j(await adm.post("/zs/api/tasks", json={"title": "Fotoğraf çek", "parent_id": t["id"],
+                                                                  "assignee_id": self.ayse["id"]}, headers=H)))["task"]
+        # Alt işte herkes, işi gören herkese kurar: Ali → Ayşe, Ayşe → Ali (genel uç, task_id = alt iş).
+        r1 = (await self.j(await ali.post("/zs/api/hatirlatici", json={"task_id": sub["id"], "remind_at": soon,
+                                                                       "user_id": self.ayse["id"]}, headers=H)))["reminder"]
+        self.assertEqual((r1["task_id"], r1["sub_id"]), (t["id"], sub["id"]))
+        await self.j(await ayse.post("/zs/api/hatirlatici", json={"task_id": sub["id"], "remind_at": soon, "user_id": self.ali["id"]}, headers=H))
+        # Ana işte kullanıcı başkasına kuramaz; yönetici atadığı kişiye kurar.
+        await self.j(await ali.post("/zs/api/hatirlatici", json={"task_id": t["id"], "remind_at": soon, "user_id": self.ayse["id"]}, headers=H), 400)
+        await self.j(await adm.post("/zs/api/hatirlatici", json={"task_id": t["id"], "remind_at": soon + 5, "user_id": self.ali["id"]}, headers=H))
+        # Hatırlatıcılar ekranı: Ali'ye kurulan 2 + Ali'nin kurduğu 1; başlıklar dolu.
+        lst = (await self.j(await ali.get("/zs/api/hatirlaticilar")))["reminders"]
+        self.assertEqual(len(lst), 3)
+        r = [x for x in lst if x["id"] == r1["id"]][0]
+        self.assertEqual((r["task_title"], r["sub_title"]), ("Keşif", "Fotoğraf çek"))
+        # Bildirim: alt işte "İş › Alt iş".
+        await n.drain(); n.test_sink[:] = []
+        self.assertEqual(await n.remind_tick(soon + 60), 3)
+        heads = sorted((u, m["body"].split("\n")[0]) for u, m in n.test_sink)
+        self.assertEqual(heads, sorted([(self.ayse["id"], "Keşif › Fotoğraf çek"), (self.ali["id"], "Keşif › Fotoğraf çek"),
+                                        (self.ali["id"], "Keşif")]))
+        # Alt iş silinince hatırlatıcıları da gider.
+        await self.j(await adm.post("/zs/api/hatirlatici", json={"task_id": sub["id"], "remind_at": soon + 3600}, headers=H))
+        await self.j(await adm.delete(f"/zs/api/tasks/{sub['id']}", headers=H))
+        self.assertEqual(await n.remind_tick(soon + 7200), 0)
+
     def test_rapor_donem_dilimleri(self):
         import zs_rapor
         s, e = zs_rapor.parse_range("2026-01-15", "2026-03-10")
