@@ -160,7 +160,24 @@ def _calistir(args, **kw):
     return p.returncode, (p.stdout or "")
 
 
+def _paketteki_pgsql():
+    """MSI kurulumunda PostgreSQL binaries uygulamanın yanında gelir (<kurulum>/pgsql).
+    İlk açılışta %LOCALAPPDATA%/UyapIcra/pgsql'e kopyalanır: kurulum klasöründen
+    çalışan postgres.exe güncellemede dosyaları kilitlerdi."""
+    return os.path.join(os.path.dirname(KOK), "pgsql")
+
+
 def kurulumu_dogrula(log):
+    paket = _paketteki_pgsql()
+    if not os.path.isfile(_exe("postgres")) and os.path.isfile(
+            os.path.join(paket, "bin", "postgres.exe")):
+        import shutil
+        log("… PostgreSQL ilk kez hazırlanıyor (kurulum paketinden kopyalanıyor)…")
+        try:
+            shutil.copytree(paket, PG_HOME, dirs_exist_ok=True)
+        except Exception as e:
+            log(f"⛔ PostgreSQL kopyalanamadı: {e}")
+            return False
     if not os.path.isfile(_exe("postgres")):
         log(f"⛔ PostgreSQL binaries bulunamadı: {PG_BIN}")
         return False
