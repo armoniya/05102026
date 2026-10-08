@@ -84,7 +84,12 @@ PLAN_PRICE = (os.environ.get("UYAP_PLAN_PRICE", "") or "").strip()  # ör. "₺7
 # diye engelliyordu; MSI standart kurulum biçimi — bkz. ux md/masaustu_kurulum_ve_arayuz_
 # sorunlari.md #1), (3) geçiş için eski tek-exe kurucu, (4) daha eski zip, (5) hiçbiri
 # yoksa /indir "hazırlanıyor" der.
-DOWNLOAD_URL = (os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip()
+# 2026-10-08: ana program artık UyapMasa (tam sürüm, ~200 MB → GitHub 100 MB sınırı
+# yüzünden imaja girmez; herkese açık armoniya/uyapmasa-indir deposunun Release'inde
+# durur). Gömülü CokluUyapKur.msi = eski "light" sürüm, /indir/light'tan yedek olarak sunulur.
+MASA_DOWNLOAD_URL = ("https://github.com/armoniya/uyapmasa-indir/releases/latest/download/"
+                     "UyapMasaKur.msi")
+DOWNLOAD_URL = (os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip() or MASA_DOWNLOAD_URL
 _DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 DOWNLOAD_FILE_MSI = os.path.join(_DL_DIR, "CokluUyapKur.msi")
 DOWNLOAD_FILE = os.path.join(_DL_DIR, "CokluUyapKur.exe")
@@ -1437,11 +1442,15 @@ def _render_uye_ol(msg=None, v=None):
 
 def _render_indir():
     href = _download_href()
+    light = ""
+    if os.path.exists(DOWNLOAD_FILE_MSI):
+        light = ("<p class='muted' style='font-size:12px;text-align:center'>Eski hafif sürüm "
+                 "(yalnız paylaşım): <a href='/indir/light' download>CokluUyapKur.msi</a></p>")
     if href:
         btn = (f"<a href='{html.escape(href, quote=True)}' download "
                f"style='display:block;text-align:center;background:var(--sage);color:#fff;"
                f"padding:13px;border-radius:11px;font-weight:600;margin:14px 0'>"
-               f"Ofis Programını İndir (Windows kurulum paketi · .msi)</a>")
+               f"UyapMasa'yı İndir (Windows kurulum paketi · .msi · ~200 MB)</a>")
     else:
         btn = ("<div class='err' style='margin:14px 0'>İndirme paketi şu anda hazırlanıyor; "
                "kısa süre içinde burada yayınlanacak. Sorularınız için bize ulaşın.</div>")
@@ -1453,8 +1462,9 @@ def _render_indir():
         <h2 style='margin-top:0;font-size:18px'>1. İndir, çift tıkla, bir kez giriş yap — hepsi bu</h2>
         {btn}
         <p class='muted' style='font-size:13px;line-height:1.7'>
-          <code>CokluUyapKur.msi</code> standart bir Windows kurulumudur: yönetici izni
-          istemez, masaüstüne kısayol koyar ve programı açar. Açılan pencerede
+          <code>UyapMasaKur.msi</code> standart bir Windows kurulumudur: yönetici izni
+          istemez, masaüstüne kısayol koyar ve programı açar (ilk açılışta veritabanı
+          hazırlandığı için bir dakika kadar sürebilir). Açılan pencerede
           <b>kullanıcı adınızı (kullanıcıadı@ofisadı), parolanızı ve e-imza PIN'inizi bir
           kez</b> girin: paylaşım kendiliğinden başlar, bilgisayar her açıldığında da
           otomatik kurulur. Menü/ayar gezmek gerekmez.</p>
@@ -1466,6 +1476,7 @@ def _render_indir():
           kendisi kurar ve <b>"UYAP'ı Aç"</b> düğmesi belirir. Kullanıcı eklemek/yönetmek için
           <a href='/ofis'>Ofis Yönetim Ekranı</a>'nı kullanın.</p>
       </div>
+      {light}
       <div class='foot'><a href='/'>← Ana sayfa</a></div>"""
 
 
@@ -1485,6 +1496,15 @@ async def indir_dosya(request):
                               "yüklenmedi.</p></div>", status=404)
     return web.FileResponse(yol, headers={
         "Content-Disposition": "attachment; filename=%s" % os.path.basename(yol),
+        "Cache-Control": "public, max-age=3600"})
+
+
+async def indir_light(request):
+    """Yedekte tutulan eski hafif sürüm (CokluUyapKur.msi, imaja gömülü)."""
+    if not os.path.exists(DOWNLOAD_FILE_MSI):
+        raise web.HTTPNotFound()
+    return web.FileResponse(DOWNLOAD_FILE_MSI, headers={
+        "Content-Disposition": "attachment; filename=CokluUyapKur.msi",
         "Cache-Control": "public, max-age=3600"})
 
 
@@ -2324,7 +2344,8 @@ def make_app(args):
     app.router.add_get("/uye-ol", uye_ol_get)
     app.router.add_post("/uye-ol", uye_ol_post)
     app.router.add_get("/indir", indir_get)          # ofis programı kurulum sayfası
-    app.router.add_get("/indir/dosya", indir_dosya)  # gömülü zip indirme
+    app.router.add_get("/indir/dosya", indir_dosya)  # UyapMasa (dış adrese yönlendirir)
+    app.router.add_get("/indir/light", indir_light)  # eski hafif sürüm (gömülü MSI)
     # Admin (lisans/kullanıcı oluşturma) — owner (utku) oturumu ile korunur.
     app.router.add_get("/admin", admin_get)
     app.router.add_post("/admin/create", admin_create)
