@@ -89,7 +89,11 @@ PLAN_PRICE = (os.environ.get("UYAP_PLAN_PRICE", "") or "").strip()  # ör. "₺7
 # durur). Gömülü CokluUyapKur.msi = eski "light" sürüm, /indir/light'tan yedek olarak sunulur.
 MASA_DOWNLOAD_URL = ("https://github.com/armoniya/uyapmasa-indir/releases/latest/download/"
                      "UyapMasaKur.msi")
-DOWNLOAD_URL = (os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip() or MASA_DOWNLOAD_URL
+# Geçici (2026-10-08): derlenmiş (Nuitka) UyapMasa hazır olana kadar ana düğme gömülü
+# light MSI'ı sunar; hazır olunca "or MASA_DOWNLOAD_URL" geri eklenir.
+MASA_YAYINDA = False
+DOWNLOAD_URL = ((os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip()
+                or (MASA_DOWNLOAD_URL if MASA_YAYINDA else ""))
 _DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 DOWNLOAD_FILE_MSI = os.path.join(_DL_DIR, "CokluUyapKur.msi")
 DOWNLOAD_FILE = os.path.join(_DL_DIR, "CokluUyapKur.exe")
@@ -1443,14 +1447,15 @@ def _render_uye_ol(msg=None, v=None):
 def _render_indir():
     href = _download_href()
     light = ""
-    if os.path.exists(DOWNLOAD_FILE_MSI):
+    if MASA_YAYINDA and os.path.exists(DOWNLOAD_FILE_MSI):
         light = ("<p class='muted' style='font-size:12px;text-align:center'>Eski hafif sürüm "
                  "(yalnız paylaşım): <a href='/indir/light' download>CokluUyapKur.msi</a></p>")
     if href:
         btn = (f"<a href='{html.escape(href, quote=True)}' download "
                f"style='display:block;text-align:center;background:var(--sage);color:#fff;"
                f"padding:13px;border-radius:11px;font-weight:600;margin:14px 0'>"
-               f"UyapMasa'yı İndir (Windows kurulum paketi · .msi · ~200 MB)</a>")
+               + ("UyapMasa'yı İndir (Windows kurulum paketi · .msi · ~200 MB)" if MASA_YAYINDA
+                  else "Ofis Programını İndir (Windows kurulum paketi · .msi)") + "</a>")
     else:
         btn = ("<div class='err' style='margin:14px 0'>İndirme paketi şu anda hazırlanıyor; "
                "kısa süre içinde burada yayınlanacak. Sorularınız için bize ulaşın.</div>")
@@ -1462,7 +1467,7 @@ def _render_indir():
         <h2 style='margin-top:0;font-size:18px'>1. İndir, çift tıkla, bir kez giriş yap — hepsi bu</h2>
         {btn}
         <p class='muted' style='font-size:13px;line-height:1.7'>
-          <code>UyapMasaKur.msi</code> standart bir Windows kurulumudur: yönetici izni
+          <code>{"UyapMasaKur.msi" if MASA_YAYINDA else "CokluUyapKur.msi"}</code> standart bir Windows kurulumudur: yönetici izni
           istemez, masaüstüne kısayol koyar ve programı açar (ilk açılışta veritabanı
           hazırlandığı için bir dakika kadar sürebilir). Açılan pencerede
           <b>kullanıcı adınızı (kullanıcıadı@ofisadı), parolanızı ve e-imza PIN'inizi bir

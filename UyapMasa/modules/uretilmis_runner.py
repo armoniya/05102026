@@ -15,6 +15,7 @@ import re
 import sys
 import threading
 import importlib
+import importlib.machinery
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -43,12 +44,16 @@ def _modul_adi_guvenli_mi(ad: str) -> bool:
     if not ad or not _GECERLI_MODUL_ADI.match(ad):
         return False
     modules_dir = os.path.dirname(os.path.abspath(__file__))
-    hedef = os.path.realpath(os.path.join(modules_dir, ad + ".py"))
-    try:
-        return (os.path.commonpath([os.path.realpath(modules_dir), hedef]) ==
-                os.path.realpath(modules_dir)) and os.path.isfile(hedef)
-    except (ValueError, OSError):
-        return False
+    # Derlenmiş kurulumda modül .py yerine .pyd (EXTENSION_SUFFIXES) olarak durur.
+    for uzanti in [".py"] + importlib.machinery.EXTENSION_SUFFIXES:
+        hedef = os.path.realpath(os.path.join(modules_dir, ad + uzanti))
+        try:
+            if (os.path.commonpath([os.path.realpath(modules_dir), hedef]) ==
+                    os.path.realpath(modules_dir)) and os.path.isfile(hedef):
+                return True
+        except (ValueError, OSError):
+            pass
+    return False
 
 
 class UretilmisRunner:

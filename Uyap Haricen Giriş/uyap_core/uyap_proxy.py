@@ -68,9 +68,14 @@ except Exception:
 # --------------------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LOGIN_PATH = os.path.join(_HERE, "uyap_giris_dışarıdan.py")
-_spec = importlib.util.spec_from_file_location("uyap_login", _LOGIN_PATH)
-uyap_login = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(uyap_login)
+if os.path.exists(_LOGIN_PATH):
+    _spec = importlib.util.spec_from_file_location("uyap_login", _LOGIN_PATH)
+    uyap_login = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(uyap_login)
+else:
+    # Derlenmiş kurulum (kurulum/uyapmasa_paketle.py): modül ASCII adla .pyd olarak gelir.
+    uyap_login = importlib.import_module(
+        (__package__ + "." if __package__ else "") + "uyap_giris_disaridan")
 
 UYAP_BASE = "https://avukat.uyap.gov.tr"
 UYAP_HOST = "avukat.uyap.gov.tr"
@@ -1271,10 +1276,16 @@ def _compute_inject_version():
     kaynağı hash'lenir (enjekte script bu fonksiyonun içinde olduğu için her değişiklikte
     sürüm değişir; elle bump gerekmez)."""
     try:
-        src = _inspect.getsource(_rewrite_body)
+        veri = _inspect.getsource(_rewrite_body).encode("utf-8")
     except Exception:
-        src = ""
-    return _hashlib.md5(src.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]  # sürüm etiketi
+        # Derlenmiş (.pyd) kurulumda kaynak yok: derlenmiş dosyanın kendisi hash'lenir
+        # (her yeni sürümde değişir → önbellek yine kendiliğinden geçersizleşir).
+        try:
+            with open(__spec__.origin, "rb") as f:
+                veri = f.read()
+        except Exception:
+            veri = b""
+    return _hashlib.md5(veri, usedforsecurity=False).hexdigest()[:8]  # sürüm etiketi
 
 
 INJECT_VERSION = _compute_inject_version()
