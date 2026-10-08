@@ -25,13 +25,14 @@ import queue
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 
 from theme import C, RoundButton
 from . import icra_core
 from . import dosya_core
 from . import birim_bolme
 from . import dosya_karti
+from . import evrak_indirici
 
 # BARE (paket-göreli DEĞİL) — toplu_is_kontrol/toplu_is_dialog'un TÜM
 # tüketicilerde AYNI tekil (KAYIT_DEFTERI) nesneyi görmesi için şart: bu iki
@@ -279,6 +280,11 @@ class IcraDosyalarimEkrani:
         self.edit_btn.pack(side="left", padx=(8, 0), ipadx=2)
         self.detay_btn = self._btn(bar, "Dosya Görüntüle", self._dosya_goruntule, "ghost")
         self.detay_btn.pack(side="left", padx=(8, 0), ipadx=2)
+        # 2026-10-06 kullanıcı isteği: Hukuk Dosyalarım'daki "Tüm Belgeleri İndir"in
+        # eşi — aynı evrak_indirici.calistir (ham evrak + Birlesik.pdf).
+        self.evrak_indir_btn = self._btn(bar, "Seçilenlerin Tüm Evrakını İndir",
+                                         self._secilenlerin_evrakini_indir, "ghost")
+        self.evrak_indir_btn.pack(side="left", padx=(8, 0), ipadx=2)
         # Web'deki "Barkod'u da Güncelle" düğmesinin eşi (2026-09-23): DB'deki
         # TÜM açık İcra dosyalarının barkodlarını Sorgula'dan BAĞIMSIZ tazeler.
         self.barkod_btn = self._btn(bar, "Barkod'u da Güncelle", self._barkod_hepsini_guncelle, "ghost")
@@ -1027,6 +1033,77 @@ class IcraDosyalarimEkrani:
                 toplu_is_kontrol.KAYIT_DEFTERI.sil(kontrol.ad)
         threading.Thread(target=bg, daemon=True).start()
 
+    # ─────────────────────── Seçilenlerin Tüm Evrakını İndir ───────────────────────
+    def _secilenlerin_evrakini_indir(self):
+        """Seçili dosyaların TÜM evrakını orijinal formatında indirir + her dosya
+        için tek 'Birlesik.pdf' üretir — Hukuk Dosyalarım ile AYNI çekirdek
+        (`evrak_indirici.calistir`; İcra kayıtları birimId/dosyaNo/birimAdi taşır)."""
+        if self.running:
+            return
+        secim = self.tree.selection()
+        if not secim:
+            self.durum_lbl.config(text="Önce listeden en az bir dosya seçin (Ctrl/Shift ile çoklu seçim).")
+            return
+        try:
+            kayitlar = [self._gorunen_kayitlar[int(iid)] for iid in secim]
+        except (ValueError, IndexError):
+            self.durum_lbl.config(text="Seçili satırlar bulunamadı; listeyi yenileyin.")
+            return
+        gorulen = set()   # satırlar borçlu başına — aynı dosya bir kez indirilir
+        kayitlar = [r for r in kayitlar
+                    if not ((r.get("birimAdi"), r.get("dosyaNo")) in gorulen
+                            or gorulen.add((r.get("birimAdi"), r.get("dosyaNo"))))]
+        hedef = filedialog.askdirectory(title="Evrakın indirileceği klasörü seçin")
+        if not hedef:
+            return
+        if not hasattr(self, "evrak_kontrol"):
+            self.evrak_kontrol = toplu_is_kontrol.TopluIsKontrolu(ad="İcra Dosyalarım Evrak İndir")
+        self.evrak_kontrol.sifirla()
+        akis = _tid.basvur_ile_cakisma_akisi(self.app, self.evrak_kontrol.ad, self.evrak_kontrol)
+        if akis == "iptal":
+            return
+        baslat = lambda: self._evrak_indir_baslat(kayitlar, hedef)  # noqa: E731
+        if akis == "sirada":
+            self.durum_lbl.config(text="Sırada bekliyor…")
+            _tid.sira_bekle_ve_baslat(self.app, self.evrak_kontrol.ad, self.evrak_kontrol, baslat,
+                                      durum_fn=lambda t: self.durum_lbl.config(text=t))
+            return
+        baslat()
+
+    def _evrak_indir_baslat(self, kayitlar, hedef):
+        kontrol = self._aktif_kontrol = self.evrak_kontrol
+        self._set_running(True)
+        self.evrak_indir_btn.set_state("disabled")
+        self.guncelle_btn.set_state("disabled")
+        self.secili_guncelle_btn.set_state("disabled")
+        self.durum_lbl.config(text=f"{len(kayitlar)} dosyanın evrakı indiriliyor…")
+        self._log(f"▶ {len(kayitlar)} seçili dosya için 'Tüm Evrakı İndir' başlıyor… (klasör: {hedef})")
+
+        def bg():
+            try:
+                sonuc = evrak_indirici.calistir(kayitlar, hedef, self._log, kontrol=kontrol)
+                self.result_q.put(("evrak_indirildi", (sonuc, len(kayitlar))))
+            except Exception as e:
+                self.result_q.put(("evrak_indir_hata", str(e)))
+            finally:
+                kontrol.karmadan_cik()
+                toplu_is_kontrol.KAYIT_DEFTERI.sil(kontrol.ad)
+        threading.Thread(target=bg, daemon=True).start()
+
+    def _evrak_indir_bitti(self, tip, veri):
+        self._set_running(False)
+        self._aktif_kontrol = None
+        self.evrak_indir_btn.set_state("normal")
+        self.guncelle_btn.set_state("normal")
+        self.secili_guncelle_btn.set_state("normal")
+        if tip == "evrak_indirildi":
+            sonuc, toplam = veri
+            basarili = sum(1 for s in sonuc if str(s.get("Durum", "")).startswith("✅"))
+            self.durum_lbl.config(text=f"✔ {basarili}/{toplam} dosyanın evrakı indirildi")
+        else:
+            self.durum_lbl.config(text="Evrak indirme hatası")
+            self._log(f"⚠️ Evrak indirme: {veri}")
+
     def _uyap_guncelle_bitti(self, tip, veri):
         self._set_running(False)
         self._aktif_kontrol = None
@@ -1256,6 +1333,8 @@ class IcraDosyalarimEkrani:
                     self._db_yenile_goster(veri)
                 elif tip in ("guncellendi", "guncelle_hata"):
                     self._uyap_guncelle_bitti(tip, veri)
+                elif tip in ("evrak_indirildi", "evrak_indir_hata"):
+                    self._evrak_indir_bitti(tip, veri)
                 else:
                     self._sorgu_bitti(tip, veri)
         except queue.Empty:
