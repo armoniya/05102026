@@ -24,6 +24,7 @@ işaretlenir → her biri bir kez gider). Sunucu kapalıyken zamanı geçenler a
 Telegram ayarları (ortam değişkenleri):
   ZS_TELEGRAM_TOKEN   BotFather'dan alınan bot jetonu (yoksa Telegram kapalı)
   ZS_PUBLIC_URL       ör. https://cokluuyap.com — Telegram mesajındaki bağlantı + webhook adresi
+  ZS_TELEGRAM_GROUPS  grupta /is ile iş açmaya izin verilen grup kimlikleri (zs_tg_grup.py)
   Webhook: ZS_PUBLIC_URL https ise Telegram güncellemeleri /zs/telegram/hook'a gelir (gizli başlıkla
   doğrulanır). Değilse (yerel geliştirme) sunucu Telegram'ı kendisi yoklar (long polling).
 """
@@ -130,6 +131,7 @@ class Notifier:
         self.session = None
         self.tasks = set()
         self.test_sink = None       # testlerde: gönderilecek yerine buraya eklenir
+        self.group_handler = None   # grup mesajları (zs.py bağlar)
 
     # ── yaşam döngüsü ──
     def describe(self):
@@ -280,18 +282,52 @@ class Notifier:
     def tg_link_url(self, code):
         return f"https://t.me/{self.tg_bot}?start={code}" if self.tg_bot else None
 
+    async def tg_reply(self, chat_id, text, reply_to=None):
+        """Gruba yanıt yazar; gönderilen mesajın kimliği (ya da hata olursa None)."""
+        params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if reply_to:
+            params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+        try:
+            r = await self._tg("sendMessage", **params)
+            return (r or {}).get("message_id")
+        except Exception as e:
+            print(f"[!] zs Telegram grup yanıtı gönderilemedi: {e}")
+            return None
+
+    async def tg_download(self, file_id, limit):
+        """Telegram'daki dosyayı indirir (bayt). limit aşılırsa ValueError."""
+        info = await self._tg("getFile", file_id=file_id)
+        if (info.get("file_size") or 0) > limit:
+            raise ValueError("büyük")
+        s = await self._sess()
+        async with s.get(f"{TG_API}/file/bot{self.tg_token}/{info['file_path']}",
+                         timeout=aiohttp.ClientTimeout(total=120)) as r:
+            if r.status != 200:
+                raise RuntimeError(f"HTTP {r.status}")
+            buf = bytearray()
+            async for chunk in r.content.iter_chunked(256 * 1024):
+                buf.extend(chunk)
+                if len(buf) > limit:
+                    raise ValueError("büyük")
+        return bytes(buf)
+
     async def tg_update(self, upd):
-        """Gelen mesaj: /start <kod> → bağla; /stop → bağlantıyı kaldır."""
+        """Gelen mesaj. Özel sohbet: /start <kod> → bağla; /stop → bağlantıyı kaldır.
+        Grup: group_handler'a (zs.py) devredilir."""
         msg = (upd or {}).get("message") or {}
         chat = msg.get("chat") or {}
         text = (msg.get("text") or "").strip()
+        if chat.get("type") in ("group", "supergroup") and chat.get("id"):
+            if self.group_handler:
+                await self.group_handler(msg)
+            return
         if chat.get("type") != "private" or not chat.get("id"):
             return
         cid = chat["id"]
         if text.startswith("/start"):
             code = text[6:].strip()
-            uid = await asyncio.to_thread(self.store.tg_link, code, cid, chat.get("username") or chat.get("first_name") or "") \
-                if code else None
+            uid = await asyncio.to_thread(self.store.tg_link, code, cid, chat.get("username") or chat.get("first_name") or "",
+                                          chat.get("username")) if code else None
             if uid:
                 u = await asyncio.to_thread(self.store.get_user, uid)
                 await self._tg_send(cid, f"Bağlandı: <b>{html.escape(u['display_name'])}</b>\n"
@@ -303,7 +339,9 @@ class Notifier:
             await asyncio.to_thread(self.store.tg_unlink, None, cid)
             await self._tg_send(cid, "Bildirimler durduruldu. Yeniden açmak için İş Takip'ten bağlayın.")
         else:
-            await self._tg_send(cid, "Bu bot yalnız İş Takip bildirimlerini gönderir.")
+            await asyncio.to_thread(self.store.tg_touch, cid, chat.get("username"))
+            await self._tg_send(cid, "Bu bot İş Takip bildirimlerini gönderir. Grupta iş açmak için "
+                                     "<code>/is @kişi açıklama</code> yazın (belgeye yanıt verirseniz belge de eklenir).")
 
     async def _poll(self):
         offset = 0

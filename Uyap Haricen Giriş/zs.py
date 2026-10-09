@@ -12,6 +12,7 @@ Ortam değişkenleri:
   ZS_ADMIN_USER / ZS_ADMIN_PASSWORD  → hiç kullanıcı yokken ilk yöneticiyi açar
   ZS_FILE_KEY                        → belge şifreleme anahtarı (base64 32 bayt)
   R2_*                               → bkz. zs_r2.py
+  ZS_TELEGRAM_GROUPS                 → /is ile iş açılabilen Telegram grup kimlikleri (virgülle); bkz. zs_tg_grup.py
 """
 
 import os
@@ -30,6 +31,7 @@ from aiohttp import web
 import zs_r2
 import zs_rapor
 import zs_bildirim
+import zs_tg_grup
 from zs_store import ZsStore, ZsError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -895,10 +897,14 @@ async def telegram_hook(request):
         upd = await request.json()
     except Exception:
         return web.Response(text="ok")
-    try:
-        await n.tg_update(upd)
-    except Exception as e:
-        print(f"[!] zs Telegram güncellemesi işlenemedi: {e}")
+
+    async def run():
+        try:
+            await n.tg_update(upd)
+        except Exception as e:
+            print(f"[!] zs Telegram güncellemesi işlenemedi: {e}")
+    # Grupta belge indirme uzun sürebilir; Telegram yanıt gecikirse güncellemeyi yeniden gönderir.
+    n._spawn(run())
     return web.Response(text="ok")
 
 
@@ -923,9 +929,7 @@ async def api_file_upload(request, user):
     if part is None or not part.filename:
         raise ZsError("Dosya seçilmedi.")
     filename = _clean_filename(part.filename)
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in ALLOWED:
-        raise ZsError("Bu dosya türü kabul edilmiyor (pdf, udf, doc/docx, xls/xlsx, jpg/png, tif, zip).")
+    _file_ext(filename)
     buf = bytearray()
     while True:
         chunk = await part.read_chunk(256 * 1024)
@@ -933,13 +937,38 @@ async def api_file_upload(request, user):
             break
         buf.extend(chunk)
         if len(buf) > MAX_FILE:
-            raise ZsError(f"Dosya {MAX_FILE // (1024 * 1024)} MB sınırını aşıyor.")
-    if not buf:
+            raise ZsError(_too_big())
+    f = await _save_file(user, root["id"], filename, bytes(buf))
+    return _json({"ok": True, "file": f})
+
+
+def _too_big():
+    return f"Dosya {MAX_FILE // (1024 * 1024)} MB sınırını aşıyor."
+
+
+def _file_ext(filename):
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED:
+        raise ZsError("Bu dosya türü kabul edilmiyor (pdf, udf, doc/docx, xls/xlsx, jpg/png, tif, zip).")
+    return ext
+
+
+def _check_file(filename, data):
+    """Tür + boyut + içerik imzası denetimi; mime döndürür (web yüklemesi ve Telegram ortak)."""
+    ext = _file_ext(filename)
+    if len(data) > MAX_FILE:
+        raise ZsError(_too_big())
+    if not data:
         raise ZsError("Dosya boş.")
     mime, sigs = ALLOWED[ext]
-    if not any(bytes(buf[:len(s)]) == s for s in sigs):
+    if not any(data[:len(s)] == s for s in sigs):
         raise ZsError("Dosya içeriği uzantısıyla uyuşmuyor.")
-    data = bytes(buf)
+    return mime
+
+
+async def _save_file(user, task_id, filename, data):
+    """Denetler, şifreler, depoya yazar, işe kaydeder (filename önceden _clean_filename'den geçmiş olmalı)."""
+    mime = _check_file(filename, data)
     key = secrets.token_hex(16)
     blob = await asyncio.to_thread(zs_r2.encrypt, C.file_key, data, key)
     try:
@@ -947,9 +976,8 @@ async def api_file_upload(request, user):
     except Exception as e:
         print(f"[!] zs belge yükleme hatası: {e}")
         raise ZsError("Belge depoya yazılamadı; tekrar deneyin.")
-    f = await _db(C.store.add_file, user, root["id"], filename, mime, len(data), key,
-                  hashlib.sha256(data).hexdigest())
-    return _json({"ok": True, "file": f})
+    return await _db(C.store.add_file, user, task_id, filename, mime, len(data), key,
+                     hashlib.sha256(data).hexdigest())
 
 
 async def api_file_download(request):
@@ -1016,6 +1044,172 @@ async def _safe_storage_delete(key):
         print(f"[!] zs depodan silinemedi ({key}): {e}")
 
 
+# ── Telegram grubu: /is ile iş açma, bot mesajına yanıtla belge/not ekleme ───────────
+# Ayrıştırma zs_tg_grup.py'de. Yetkiler web ile aynı: kullanıcı yalnız kendine iş açar, yönetici
+# dilediğine; belge ekleme kilitli (onaydaki/bitmiş) işte yalnız yönetici. Gönderen ve etiketlenenler
+# botla özel sohbetten bağlanmış olmalı (zs_telegram). Yalnız ZS_TELEGRAM_GROUPS'taki gruplarda çalışır.
+_TG_LINK_HELP = "İş Takip → Bildirimler → “Telegram'ı bağla” ile botla özel sohbetten bağlanılmalı."
+
+
+async def _tg_audit(msg, user, action, ok, *, target=None, error=None, data=None, result=None):
+    if C.store is None:
+        return
+    chat = msg.get("chat") or {}
+    row = dict(user_id=user["id"] if user else None, username=user["username"] if user else None,
+               role=user["role"] if user else None, ip=None, user_agent="Telegram", method="TG",
+               path=f"telegram/{chat.get('id')}/{msg.get('message_id')}", action=action, target_id=target,
+               ok=1 if ok else 0, status=200 if ok else 400, error=(error or None) and str(error)[:1000],
+               data=data, result=result)
+    try:
+        await _db(lambda: C.store.audit(**row))
+    except Exception as e:
+        print(f"[!] zs denetim kaydı yazılamadı ({action}): {e}")
+
+
+async def _tg_fetch(att):
+    """Telegram ekini indirir, denetler → (dosya adı, bayt)."""
+    if att.get("unsupported"):
+        raise ZsError(f"Bu tür ek ({att['unsupported']}) işe eklenemez; belge ya da fotoğraf gönderin.")
+    if not (C.storage and C.file_key):
+        raise ZsError("Belge yükleme bu sunucuda kapalı.")
+    limit = min(MAX_FILE, zs_tg_grup.TG_MAX_DOWNLOAD)
+    filename = _clean_filename(att["filename"])
+    _file_ext(filename)
+    if att["size"] > limit:
+        raise ZsError(f"Dosya {limit // (1024 * 1024)} MB sınırını aşıyor (Telegram botları daha büyüğünü indiremez).")
+    try:
+        data = await C.notifier.tg_download(att["file_id"], limit)
+    except ValueError:
+        raise ZsError(f"Dosya {limit // (1024 * 1024)} MB sınırını aşıyor.")
+    except Exception as e:
+        print(f"[!] zs Telegram dosyası indirilemedi: {e}")
+        raise ZsError("Dosya Telegram'dan indirilemedi; tekrar deneyin.")
+    _check_file(filename, data)
+    return filename, data
+
+
+async def _tg_resolve(mentions):
+    """Etiketlenenler → zs kullanıcıları (sıralı, tekrarsız). Bağlı olmayan varsa ZsError."""
+    users, missing = [], []
+    for m in mentions:
+        u = await _db(C.store.tg_user_by_username, m[1]) if m[0] == "username" \
+            else await _db(C.store.tg_user_by_chat, m[1])
+        if not u:
+            missing.append("@" + m[1] if m[0] == "username" else (m[2] or "?"))
+        elif u["id"] not in [x["id"] for x in users]:
+            users.append(u)
+    if missing:
+        raise ZsError(f"İş Takip'e bağlı değil: {', '.join(missing)}. {_TG_LINK_HELP}")
+    return users
+
+
+def _tg_task_link(task_id):
+    base = C.notifier.public_url if C.notifier else ""
+    return f"\n<a href=\"{html.escape(base)}/zs#is-{task_id}\">İşi aç</a>" if base else ""
+
+
+async def _tg_open_task(user, msg, cmd):
+    reply = msg.get("reply_to_message") or {}
+    att = zs_tg_grup.attachment(msg) or zs_tg_grup.attachment(reply)
+    people = await _tg_resolve(cmd["mentions"])
+    if user["role"] != "admin" and any(u["id"] != user["id"] for u in people):
+        raise ZsError("Başkasına iş yalnız yönetici atayabilir; kendinize açmak için kimseyi etiketlemeyin.")
+    assignee = people[0] if people else user
+    title = cmd["title"] or (f"Telegram belgesi: {att['filename']}" if att and att.get("filename") else "")
+    if not title:
+        raise ZsError("Ne yapılacağını yazın: /is @kişi açıklama")
+    desc = cmd["description"]
+    quoted, _ = zs_tg_grup.text_and_entities(reply)
+    if quoted.strip() and not (reply.get("from") or {}).get("is_bot"):
+        who = zs_tg_grup.sender_name(reply.get("from"))
+        desc = (desc + "\n\n" if desc else "") + f"Yanıtlanan mesaj ({who}):\n{quoted.strip()}"
+    file = await _tg_fetch(att) if att else None     # dosya sorunluysa iş hiç açılmaz
+    t = await _db(C.store.create_task, user, title, None, desc, assignee["id"])
+    for u in people[1:]:
+        await _db(C.store.add_member, user, t["id"], u["id"], "assignee", "Telegram'dan iş açılırken eklendi.")
+    lines = [f"✅ İş açıldı: <b>{html.escape(t['title'])}</b>",
+             "Atanan: " + ", ".join(html.escape(u["display_name"]) for u in (people or [user]))]
+    f, file_err = None, None
+    if file:
+        try:
+            f = await _save_file(user, t["id"], *file)
+            lines.append(f"Belge: {html.escape(f['filename'])}")
+        except ZsError as e:
+            file_err = str(e)
+            lines.append(f"⚠️ Belge eklenemedi: {html.escape(file_err)}")
+    await _tg_audit(msg, user, "tg_is_ac", True, target=t["id"],
+                    data={"title": title, "mentions": [list(m) for m in cmd["mentions"]],
+                          "file": file[0] if file else None},
+                    result={"task": {"id": t["id"]}, "file": {"id": f["id"]} if f else None}, error=file_err)
+    return "\n".join(lines) + _tg_task_link(t["id"]) + \
+        "\n<i>Bu mesaja yanıt vererek işe belge ya da not ekleyebilirsiniz.</i>", t["id"]
+
+
+async def _tg_add_to_task(user, msg, task_id):
+    att = zs_tg_grup.attachment(msg)
+    text, _ = zs_tg_grup.text_and_entities(msg)
+    text = text.strip()
+    if not att and not text:
+        return None, None
+    t, root = await _visible_task(user, task_id)
+    if att and user["role"] != "admin" and _locked(root):
+        raise ZsError("Onaydaki/onaylanmış işe belge eklenemez.")
+    file = await _tg_fetch(att) if att else None
+    lines = [f"📎 <b>{html.escape(root['title'])}</b>"]
+    f = n = None
+    if file:
+        f = await _save_file(user, root["id"], *file)
+        lines.append(f"Belge eklendi: {html.escape(f['filename'])}")
+    if text:
+        n = await _db(C.store.add_note, user, root["id"], text)
+        lines.append("Not eklendi.")
+    await _tg_audit(msg, user, "tg_ekle", True, target=root["id"], data={"file": file[0] if file else None, "note": bool(text)},
+                    result={"file": {"id": f["id"]} if f else None, "note": {"id": n["id"]} if n else None})
+    return "\n".join(lines) + _tg_task_link(root["id"]), root["id"]
+
+
+async def tg_group_message(msg):
+    """Notifier.tg_update grup mesajlarını buraya yollar."""
+    n = C.notifier
+    if C.store is None or not n:
+        return
+    chat_id, mid, frm = msg["chat"]["id"], msg.get("message_id"), msg.get("from") or {}
+    if frm.get("is_bot") or not frm.get("id"):
+        return
+    cmd = zs_tg_grup.parse_command(msg, n.tg_bot)
+    reply = msg.get("reply_to_message") or {}
+    task_id = None
+    if not cmd and (reply.get("from") or {}).get("is_bot"):
+        task_id = await _db(C.store.tg_msg_task, chat_id, reply.get("message_id"))
+    if not cmd and not task_id:
+        return                          # sıradan grup sohbeti
+    if chat_id not in zs_tg_grup.allowed_groups():
+        if cmd:
+            await n.tg_reply(chat_id, "Bu grupta iş açma kapalı. Grup kimliği: "
+                                      f"<code>{chat_id}</code> (sunucuda ZS_TELEGRAM_GROUPS'a eklenmeli).", mid)
+        return
+    user = await _db(C.store.tg_user_by_chat, frm["id"])
+    if not user:
+        await n.tg_reply(chat_id, f"Sizi İş Takip'te tanımıyorum. {_TG_LINK_HELP}", mid)
+        return
+    await _db(C.store.tg_touch, frm["id"], frm.get("username"))
+    try:
+        if cmd:
+            text, tid = await _tg_open_task(user, msg, cmd)
+        else:
+            text, tid = await _tg_add_to_task(user, msg, task_id)
+    except ZsError as e:
+        await _tg_audit(msg, user, "tg_is_ac" if cmd else "tg_ekle", False, target=task_id, error=str(e))
+        await n.tg_reply(chat_id, f"⚠️ {html.escape(str(e))}", mid)
+        return
+    if not text:
+        return
+    n.kick()
+    sent = await n.tg_reply(chat_id, text, mid)
+    if sent:
+        await _db(C.store.tg_msg_save, chat_id, sent, tid)
+
+
 # ── kurulum ──────────────────────────────────────────────────────────────────────────
 def _bootstrap_admin():
     user = (os.environ.get("ZS_ADMIN_USER") or "").strip()
@@ -1053,6 +1247,7 @@ def register(app, session_secret, guard, client_ip, store=None):
               f"şifreleme anahtarı {'VAR' if C.file_key else 'YOK → yükleme kapalı'}.")
         try:
             C.notifier = zs_bildirim.Notifier(C.store)
+            C.notifier.group_handler = tg_group_message
             app.on_startup.append(C.notifier.start)
             app.on_cleanup.append(C.notifier.stop)
             print(f"[*] İş Takip bildirim: {C.notifier.describe()}")

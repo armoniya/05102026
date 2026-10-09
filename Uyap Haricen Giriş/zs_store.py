@@ -40,6 +40,12 @@ def _now() -> int:
     return int(time.time())
 
 
+def _tg_uname(v):
+    """Telegram kullanıcı adı karşılaştırma biçimi: @ siz, küçük harf; boşsa None."""
+    v = (v or "").strip().lstrip("@").lower()
+    return v[:64] or None
+
+
 _SCHEMA = [
     """CREATE TABLE IF NOT EXISTS zs_users (
         id {pk}, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
@@ -104,6 +110,10 @@ _SCHEMA = [
         user_id BIGINT PRIMARY KEY, chat_id BIGINT NOT NULL, tg_name TEXT, linked_at BIGINT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS zs_tg_codes (
         code TEXT PRIMARY KEY, user_id BIGINT NOT NULL, expires_at BIGINT NOT NULL)""",
+    # Botun grupta "İş açıldı" diye yazdığı mesaj → iş. Bu mesaja verilen yanıt (belge/not) o işe eklenir.
+    """CREATE TABLE IF NOT EXISTS zs_tg_msgs (
+        chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL, task_id BIGINT NOT NULL, created_at BIGINT NOT NULL,
+        PRIMARY KEY (chat_id, message_id))""",
     # Hatırlatıcılar: remind_at gelince user_id'ye bildirim; sent_at dolunca bir daha gönderilmez.
     # task_id boşsa işten bağımsız hatırlatıcı (title kendi başlığı). task_id = ana iş; alt işe kurulduysa
     # sub_id = alt işin kimliği.
@@ -214,13 +224,17 @@ class ZsStore:
             added = (("is_private", "INTEGER NOT NULL DEFAULT 0"), ("priority", "INTEGER NOT NULL DEFAULT 1"),
                      ("submitted_at", "BIGINT"))
             rem_added = (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''"))
+            # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
+            tg_added = (("tg_username", "TEXT"),)
             if self._pg:
                 for col, typ in added:
                     cur.execute(f"ALTER TABLE zs_tasks ADD COLUMN IF NOT EXISTS {col} {typ}")
                 for col, typ in rem_added:
                     cur.execute(f"ALTER TABLE zs_reminders ADD COLUMN IF NOT EXISTS {col} {typ}")
+                for col, typ in tg_added:
+                    cur.execute(f"ALTER TABLE zs_telegram ADD COLUMN IF NOT EXISTS {col} {typ}")
             else:
-                for table, cols_added in (("zs_tasks", added), ("zs_reminders", rem_added)):
+                for table, cols_added in (("zs_tasks", added), ("zs_reminders", rem_added), ("zs_telegram", tg_added)):
                     cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
                     for col, typ in cols_added:
                         if col not in cols:
@@ -789,7 +803,8 @@ class ZsStore:
             for q in ("DELETE FROM zs_files WHERE task_id = ?", "DELETE FROM zs_notes WHERE task_id = ?",
                       "DELETE FROM zs_transfers WHERE task_id = ?", "DELETE FROM zs_seen WHERE task_id = ?",
                       "DELETE FROM zs_members WHERE task_id = ?", "DELETE FROM zs_extensions WHERE task_id = ?",
-                      "DELETE FROM zs_reminders WHERE task_id = ?", "DELETE FROM zs_tasks WHERE parent_id = ?", "DELETE FROM zs_tasks WHERE id = ?"):
+                      "DELETE FROM zs_reminders WHERE task_id = ?", "DELETE FROM zs_tg_msgs WHERE task_id = ?",
+                      "DELETE FROM zs_tasks WHERE parent_id = ?", "DELETE FROM zs_tasks WHERE id = ?"):
                 self._q(cur, q, (task_id,))
             # Silme izi kalsın: olaylar silinmez, task_id'si silinmiş işe işaret eder.
             self._event(cur, task_id, actor["id"], "deleted", title=t["title"])
@@ -1025,8 +1040,9 @@ class ZsStore:
         self._run(fn)
         return code
 
-    def tg_link(self, code, chat_id, tg_name=""):
-        """Kodu kullanır, sohbeti kişiye bağlar. Kişi kimliği ya da None (geçersiz/süresi dolmuş)."""
+    def tg_link(self, code, chat_id, tg_name="", tg_username=None):
+        """Kodu kullanır, sohbeti kişiye bağlar. Kişi kimliği ya da None (geçersiz/süresi dolmuş).
+        Özel sohbette chat_id = kişinin Telegram kullanıcı kimliği (gruptaki from.id ile aynı)."""
         def fn(cur):
             r = self._one(self._q(cur, "SELECT * FROM zs_tg_codes WHERE code = ?", (code,)))
             self._q(cur, "DELETE FROM zs_tg_codes WHERE code = ?", (code,))
@@ -1037,10 +1053,48 @@ class ZsStore:
                 return None
             # Bir sohbet tek kişiye bağlı olur.
             self._q(cur, "DELETE FROM zs_telegram WHERE user_id = ? OR chat_id = ?", (r["user_id"], chat_id))
-            self._q(cur, "INSERT INTO zs_telegram (user_id, chat_id, tg_name, linked_at) VALUES (?, ?, ?, ?)",
-                    (r["user_id"], chat_id, (tg_name or "")[:100], _now()))
+            self._q(cur, "INSERT INTO zs_telegram (user_id, chat_id, tg_name, linked_at, tg_username) VALUES (?, ?, ?, ?, ?)",
+                    (r["user_id"], chat_id, (tg_name or "")[:100], _now(), _tg_uname(tg_username)))
             return r["user_id"]
         return self._run(fn)
+
+    def tg_user_by_chat(self, chat_id):
+        """Telegram kullanıcı kimliğine bağlı etkin zs kullanıcısı (satırı) ya da None."""
+        return self._run(lambda cur: self._one(self._q(
+            cur, "SELECT u.* FROM zs_telegram t JOIN zs_users u ON u.id = t.user_id "
+                 "WHERE t.chat_id = ? AND u.active = 1", (chat_id,))))
+
+    def tg_user_by_username(self, username):
+        uname = _tg_uname(username)
+        if not uname:
+            return None
+        return self._run(lambda cur: self._one(self._q(
+            cur, "SELECT u.* FROM zs_telegram t JOIN zs_users u ON u.id = t.user_id "
+                 "WHERE t.tg_username = ? AND u.active = 1", (uname,))))
+
+    def tg_touch(self, chat_id, username):
+        """Bağlı kişinin Telegram kullanıcı adını tazeler (sonradan değiştirmiş/eklemiş olabilir)."""
+        uname = _tg_uname(username)
+
+        def fn(cur):
+            if uname:  # aynı ad başka satırda kalmışsa (kişi adını devretmiş) oradan silinir
+                self._q(cur, "UPDATE zs_telegram SET tg_username = NULL WHERE tg_username = ? AND chat_id <> ?",
+                        (uname, chat_id))
+            self._q(cur, "UPDATE zs_telegram SET tg_username = ? WHERE chat_id = ? AND "
+                         "COALESCE(tg_username, '') <> COALESCE(?, '')", (uname, chat_id, uname))
+        self._run(fn)
+
+    def tg_msg_save(self, chat_id, message_id, task_id):
+        self._run(lambda cur: self._q(
+            cur, "INSERT INTO zs_tg_msgs (chat_id, message_id, task_id, created_at) VALUES (?, ?, ?, ?) "
+                 "ON CONFLICT (chat_id, message_id) DO UPDATE SET task_id = excluded.task_id",
+            (chat_id, message_id, task_id, _now())))
+
+    def tg_msg_task(self, chat_id, message_id):
+        r = self._run(lambda cur: self._q(
+            cur, "SELECT task_id FROM zs_tg_msgs WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id)).fetchone())
+        return int(r[0]) if r else None
 
     def tg_get(self, user_ids):
         if not user_ids:

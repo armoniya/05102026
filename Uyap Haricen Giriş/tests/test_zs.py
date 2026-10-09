@@ -713,6 +713,149 @@ class ZsTest(unittest.IsolatedAsyncioTestCase):
         await self.j(await adm.delete(f"/zs/api/tasks/{sub['id']}", headers=H))
         self.assertEqual(await n.remind_tick(soon + 7200), 0)
 
+    # ── Telegram grubu ──
+    def _tg_setup(self):
+        """Sahte Telegram: gönderilen yanıtlar self.tg_out'a, indirilecek dosyalar self.tg_files'tan."""
+        n = zs.C.notifier
+        n.test_sink = []
+        n.tg_bot = "zs_bot"
+        self.tg_out, self.tg_files, self._mid = [], {}, [9000]
+
+        async def reply(chat_id, text, reply_to=None):
+            self._mid[0] += 1
+            self.tg_out.append((chat_id, text, reply_to, self._mid[0]))
+            return self._mid[0]
+
+        async def download(file_id, limit):
+            data = self.tg_files[file_id]
+            if len(data) > limit:
+                raise ValueError("büyük")
+            return data
+        n.tg_reply, n.tg_download = reply, download
+        old = os.environ.get("ZS_TELEGRAM_GROUPS")
+        os.environ["ZS_TELEGRAM_GROUPS"] = "-100500, -100600"
+        self.addCleanup(lambda: os.environ.__setitem__("ZS_TELEGRAM_GROUPS", old) if old is not None
+                        else os.environ.pop("ZS_TELEGRAM_GROUPS", None))
+        adm = [u for u in self.store.list_users() if u["username"] == "yonetici"][0]
+        for uid, tg_id, uname in ((adm["id"], 1001, "Patron"), (self.ali["id"], 1002, "ali_tg"),
+                                  (self.ayse["id"], 1003, None)):
+            self.assertEqual(self.store.tg_link(self.store.tg_code_new(uid), tg_id, "x", uname), uid)
+        return n
+
+    _tg_seq = [100]
+
+    def tgmsg(self, text, frm, chat=-100500, reply=None, **extra):
+        import re as _re
+        self._tg_seq[0] += 1
+        ents = []
+        m = _re.match(r"/\w+(@\w+)?", text or "")
+        if m:
+            ents.append({"type": "bot_command", "offset": 0, "length": m.end()})
+        ents += [{"type": "mention", "offset": x.start(), "length": x.end() - x.start()}
+                 for x in _re.finditer(r"(?<![/\w])@\w+", text or "")]
+        msg = {"message_id": self._tg_seq[0], "date": 1760000000, "chat": {"id": chat, "type": "supergroup"},
+               "from": {"id": frm[0], "username": frm[1], "first_name": "Ad"}, **extra}
+        if text is not None:
+            if extra.get("photo") or extra.get("document"):
+                msg["caption"], msg["caption_entities"] = text, ents
+            else:
+                msg["text"], msg["entities"] = text, ents
+        if reply:
+            msg["reply_to_message"] = reply
+        return msg
+
+    async def tg(self, msg):
+        await zs.C.notifier.tg_update({"message": msg})
+        return self.tg_out[-1][1] if self.tg_out else None
+
+    def test_tg_komut_ayristirma(self):
+        import zs_tg_grup as g
+        # Emoji UTF-16'da iki birimdir; konumlar buna göre verilir.
+        text = "/is@zs_bot 🙂 @ayse_tg Dilekçe yaz\nYarın 10'da"
+        m = {"text": text, "entities": [{"type": "bot_command", "offset": 0, "length": 10},
+                                        {"type": "mention", "offset": 14, "length": 8}]}
+        r = g.parse_command(m, "zs_bot")
+        self.assertEqual(r["mentions"], [("username", "ayse_tg")])
+        self.assertEqual((r["title"], r["description"]), ("🙂 Dilekçe yaz", "Yarın 10'da"))
+        m2 = {"text": "/is Ali'ye", "entities": [{"type": "bot_command", "offset": 0, "length": 3},
+                                                  {"type": "text_mention", "offset": 4, "length": 3,
+                                                   "user": {"id": 77, "first_name": "Ali"}}]}
+        r2 = g.parse_command(m2, "zs_bot")
+        self.assertEqual((r2["mentions"], r2["title"]), ([("id", 77, "Ali")], "'ye"))
+        for t, ln in (("/is@baska_bot x", 13), ("/isim x", 5)):
+            self.assertIsNone(g.parse_command({"text": t, "entities": [{"type": "bot_command", "offset": 0, "length": ln}]}, "zs_bot"))
+        self.assertIsNone(g.parse_command({"text": "selam"}, "zs_bot"))
+        foto = g.attachment({"date": 1760000000, "photo": [{"file_id": "k", "file_size": 10}, {"file_id": "b", "file_size": 99}]})
+        self.assertEqual(foto["file_id"], "b")
+        self.assertTrue(foto["filename"].startswith("telegram_foto_") and foto["filename"].endswith(".jpg"))
+        self.assertEqual(g.attachment({"voice": {"file_id": "v"}}), {"unsupported": "voice"})
+
+    async def test_tg_grupta_is_ac_ve_belge_ekle(self):
+        self._tg_setup()
+        ADM, ALI, AYSE, YABANCI = (1001, "Patron"), (1002, "ali_tg"), (1003, None), (2000, "kimse")
+        JPG = b"\xff\xd8\xff\xe0" + b"j" * 500
+        self.tg_files.update({"foto1": JPG, "pdf1": PDF, "exe1": b"MZ\x90\x00"})
+        n_tasks = lambda: len(self.store._run(lambda cur: cur.execute("SELECT id FROM zs_tasks").fetchall()))
+
+        # Yetkisiz grupta grup kimliği söylenir; sıradan sohbet yok sayılır; bağlı olmayan kişi reddedilir.
+        self.assertIn("-100999", await self.tg(self.tgmsg("/is @ali_tg x", ADM, chat=-100999)))
+        k = len(self.tg_out)
+        await self.tg(self.tgmsg("merhaba @ali_tg", ADM))
+        self.assertEqual(len(self.tg_out), k)
+        self.assertIn("tanımıyorum", await self.tg(self.tgmsg("/is x", YABANCI)))
+        self.assertEqual(n_tasks(), 0)
+
+        # Yönetici bir fotoğrafa yanıt vererek Ali'ye iş açar → fotoğraf belge olarak eklenir.
+        foto = self.tgmsg(None, AYSE, photo=[{"file_id": "foto1", "file_size": len(JPG)}])
+        out = await self.tg(self.tgmsg("/is @ali_tg Tebligatı işle\nAcele", ADM, reply=foto))
+        self.assertIn("İş açıldı", out)
+        bot_mid = self.tg_out[-1][3]
+        t = self.store._run(lambda cur: self.store._one(self.store._q(cur, "SELECT * FROM zs_tasks")))
+        self.assertEqual((t["title"], t["description"], t["assignee_id"]), ("Tebligatı işle", "Acele", self.ali["id"]))
+        ali = await self.login("ali")
+        d = (await self.j(await ali.get(f"/zs/api/tasks/{t['id']}")))["task"]
+        self.assertEqual(len(d["files"]), 1)
+        r = await ali.get(f"/zs/api/files/{d['files'][0]['id']}")
+        self.assertEqual(await r.read(), JPG)
+        await zs.C.notifier.drain()
+        self.assertIn((self.ali["id"], "Size yeni bir iş atandı"), [(u, m["title"]) for u, m in zs.C.notifier.test_sink])
+
+        # Botun mesajına yanıt: PDF + açıklama → aynı işe belge + not. Ali de ekleyebilir.
+        bot_msg = {"message_id": bot_mid, "from": {"id": 1, "is_bot": True}, "chat": {"id": -100500}}
+        out = await self.tg(self.tgmsg("Ek evrak", ALI, reply=bot_msg,
+                                       document={"file_id": "pdf1", "file_name": "ek.pdf", "file_size": len(PDF)}))
+        self.assertIn("Belge eklendi: ek.pdf", out)
+        d = (await self.j(await ali.get(f"/zs/api/tasks/{t['id']}")))["task"]
+        self.assertEqual(sorted(f["filename"] for f in d["files"])[0], "ek.pdf")
+        self.assertEqual(d["notes"][0]["body"], "Ek evrak")
+        # Ayşe işi göremez → ekleyemez.
+        self.assertIn("İş bulunamadı", await self.tg(self.tgmsg("not", AYSE, reply=bot_msg)))
+
+        # Kullanıcı başkasına iş açamaz; etiketsiz kendine açar.
+        self.assertIn("yalnız yönetici", await self.tg(self.tgmsg("/is @ali_tg x", AYSE)))
+        await self.tg(self.tgmsg("/is Kendi işim", AYSE))
+        own = self.store._run(lambda cur: self.store._one(self.store._q(cur, "SELECT * FROM zs_tasks WHERE title = 'Kendi işim'")))
+        self.assertEqual(own["assignee_id"], self.ayse["id"])
+
+        # Bağlı olmayan etiket ve kabul edilmeyen dosya → iş hiç açılmaz.
+        k = n_tasks()
+        self.assertIn("@kimse", await self.tg(self.tgmsg("/is @kimse x", ADM)))
+        exe = self.tgmsg(None, ADM, document={"file_id": "exe1", "file_name": "a.exe", "file_size": 4})
+        self.assertIn("kabul edilmiyor", await self.tg(self.tgmsg("/is @ali_tg x", ADM, reply=exe)))
+        self.assertEqual(n_tasks(), k)
+
+        # Birden çok etiket: ilki atanan, diğerleri ek atanan. Ayşe'nin kullanıcı adı yoktu; grupta
+        # yazınca öğrenilir.
+        self.store.tg_touch(1003, "Ayse_TG")
+        await self.tg(self.tgmsg("/is @ali_tg @ayse_tg Ortak iş", ADM))
+        t2 = self.store._run(lambda cur: self.store._one(self.store._q(cur, "SELECT * FROM zs_tasks WHERE title = 'Ortak iş'")))
+        self.assertEqual(t2["assignee_id"], self.ali["id"])
+        self.assertEqual(set(self.store.task_roles(t2["id"])["assignees"]), {self.ali["id"], self.ayse["id"]})
+        # Denetim kaydı.
+        acts = [r["action"] for r in self.store.audit_rows(limit=50)]
+        self.assertIn("tg_is_ac", acts)
+        self.assertIn("tg_ekle", acts)
+
     def test_rapor_donem_dilimleri(self):
         import zs_rapor
         s, e = zs_rapor.parse_range("2026-01-15", "2026-03-10")
