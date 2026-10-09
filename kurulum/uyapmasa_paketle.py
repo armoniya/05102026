@@ -20,7 +20,6 @@ Gereken: kurulum/araclar/nuitka-venv (aynı Python314'ten venv; pip install nuit
     python kurulum\\uyapmasa_paketle.py
 """
 import concurrent.futures
-import datetime
 import os
 import queue
 import shutil
@@ -78,8 +77,11 @@ def calistir(*komut, **kw):
 
 
 def surum():
-    t = datetime.date.today()
-    return f"{t.year % 100}.{t.month}.{t.day}"
+    """Yayın sürümü kurulum/SURUM dosyasından okunur (0.0.1'den başlar; her yayında
+    elle artırılır). MajorUpgrade yalnız daha büyük sürümü yükseltme sayar."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "SURUM"),
+              encoding="utf-8") as f:
+        return f.read().strip()
 
 
 def python_kopyala():

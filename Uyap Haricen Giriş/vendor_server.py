@@ -89,9 +89,9 @@ PLAN_PRICE = (os.environ.get("UYAP_PLAN_PRICE", "") or "").strip()  # ör. "₺7
 # durur). Gömülü CokluUyapKur.msi = eski "light" sürüm, /indir/light'tan yedek olarak sunulur.
 MASA_DOWNLOAD_URL = ("https://github.com/armoniya/uyapmasa-indir/releases/latest/download/"
                      "UyapMasaKur.msi")
-# Geçici (2026-10-08): derlenmiş (Nuitka) UyapMasa hazır olana kadar ana düğme gömülü
-# light MSI'ı sunar; hazır olunca "or MASA_DOWNLOAD_URL" geri eklenir.
-MASA_YAYINDA = False
+# 2026-10-09: derlenmiş (Nuitka) UyapMasa 0.0.1 yayında; False yapılırsa ana düğme
+# yine gömülü light MSI'ı sunar.
+MASA_YAYINDA = True
 DOWNLOAD_URL = ((os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip()
                 or (MASA_DOWNLOAD_URL if MASA_YAYINDA else ""))
 _DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")

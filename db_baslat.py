@@ -267,10 +267,18 @@ def sunucu_baslat(log):
     if sunucu_ayakta():
         return True
     log("… PostgreSQL başlatılıyor (pg_ctl start)")
+    # Çıktı PIPE ile OKUNMAZ: Windows'ta postgres.exe borunun yazma ucunu miras
+    # alıp açık tutar; pg_ctl bitse de okuma EOF görmez ve açılış sonsuza dek
+    # asılı kalırdı (09.10.2026 derlenmiş paket testinde görüldü). Ayrıntı -l log'da.
     rc, out = _calistir([
         _exe("pg_ctl"), "-D", PGDATA, "-l", LOG_DOSYA, "-w", "-t", "30",
         "-o", f"-p {DB_PORT}", "start",
-    ])
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        with open(LOG_DOSYA, encoding="utf-8", errors="replace") as f:
+            out = "".join(f.readlines()[-20:])
+    except OSError:
+        out = f"(pg_ctl çıkış kodu {rc}; {LOG_DOSYA} okunamadı)"
     # pg_ctl -w bağlantı kurulana dek bekler; yine de kısa bir doğrulama
     for _ in range(20):
         if sunucu_ayakta():
