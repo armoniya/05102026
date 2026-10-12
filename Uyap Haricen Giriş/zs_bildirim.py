@@ -332,6 +332,11 @@ class Notifier:
                 u = await asyncio.to_thread(self.store.get_user, uid)
                 await self._tg_send(cid, f"Bağlandı: <b>{html.escape(u['display_name'])}</b>\n"
                                          "İş Takip bildirimleri buraya gelecek. Durdurmak için /stop yazın.")
+            elif (linked := await asyncio.to_thread(self.store.tg_user_by_chat, cid)):
+                # Kodsuz ya da eski kodla /start (Telegram'ın "Başlat"ı, eski bağlantı): bağlantı zaten duruyor.
+                await asyncio.to_thread(self.store.tg_touch, cid, chat.get("username"))
+                await self._tg_send(cid, f"Zaten bağlısınız: <b>{html.escape(linked['display_name'])}</b>\n"
+                                         "Yeniden bağlamanız gerekmez. Durdurmak için /stop yazın.")
             else:
                 await self._tg_send(cid, "Bağlantı kodu geçersiz ya da süresi dolmuş.\n"
                                          "İş Takip'te Bildirimler → “Telegram'ı bağla” düğmesiyle yeniden deneyin.")
