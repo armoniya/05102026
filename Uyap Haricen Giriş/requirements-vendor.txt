@@ -1,3 +1,5 @@
 # Satıcı sunucusu (vendor_server.py) yalnızca statik dosya + SDP taşır.
 # WebRTC (aiortc) ya da websockets paketine GEREK YOK — signaling aiohttp ile yapılır.
 aiohttp>=3.14.3
+# aiohttp bağımlılığı; CVE-2026-104874 (13.10.2026 pip-audit) düzeltmesi için alt sınır.
+multidict>=6.9.1

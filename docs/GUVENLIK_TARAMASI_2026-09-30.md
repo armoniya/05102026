@@ -237,3 +237,23 @@ kullanıyor (requests/httpx yok) → jeton otomatik. Doğrulama: 10 kontrol + ge
 3. 4.2 güvenlik duvarı kontrolü → 127.0.0.1 ya da TLS + deneme sınırı.
 4. 4.5 durum değiştiren GET → POST; ZAP bulguları (CSP, Server başlığı) — küçük işler.
 5. İleride: UYAP'tan yalıtılmış test kopyasında ZAP aktif tarama.
+
+## 8. Light sürüm (CokluUyapKur.msi) — tüm düzeltmeler (13.10.2026)
+**Bulgu:** cokluuyap.com/indir/light'taki MSI (01.10 17:04) düzeltme ÖNCESİ kodla derlenmişti: `_looks_like_local_browser`
+duruyordu; `yerel_giris`/`yerel_kapi`, deneme sınırı, LAN giriş sayfası yoktu; cryptography 48.0.1.
+
+| # | Yapılan | Doğrulama |
+|---|---|---|
+| 1 | §6–7 düzeltmeleri light'a girdi (yeniden derleme, commit `1ebb6b6`) | paketin bayt kodu: tüm işaretler var, eski atlatma yok, cryptography 50.0.2 |
+| 2 | **pip-audit (13.10) yeni açık: multidict 6.7.1 CVE-2026-104874** → `.venv` 6.9.1, iki requirements.txt; sunucu `requirements-vendor.txt` `multidict>=6.9.1` (vendor_deploy `cfcd70a`, push → Render) | `pip check` temiz; sunucu gereksinim çözümü pip-audit: açık yok |
+| 3 | **4.2 LAN TLS** — `uyap_core/lan_tls.py`: LAN açıkken düz HTTP 8800 yalnız 127.0.0.1; ağa HTTPS kapısı **8843** (kendinden imzalı EC P-256, 3 yıl, `%LOCALAPPDATA%\UyapIcra\lan_tls\`). Parmak izi LAN biletine eklenir (`<bilet>.<sha256>`, sunucu değişikliği yok); `home_client` önce sertifikayı çekip izi doğrular, bileti yalnız o sertifikaya sabitli bağlamla gönderir. İzsiz bilet (eski ofis) → LAN denenmez, tünel. LAN giriş çerezi HTTPS'te `Secure`. Light/gecit günlüğü https adresini + parmak izini yazar | `test_lan_tls` 8 test; uçtan uca 13/13 (düz HTTP yalnız yerelde, yanlış iz → tünel + bilet gitmez, eski ofis → tünel, LAN giriş 200, Secure çerez, deneme sınırı 429) |
+| 4 | **Toplu iş light'ta kapalı** (kullanıcı kararı): `uyap_app` → `UYAP_TOPLU_IS=0`; `jobs` uçları 404, `job_handlers` + mts/teblig_212/ipotek/xml_takip/esas_no/dosya_kaydet yüklenmez ve spec'te dışlanır. UyapMasa'da varsayılan açık | light: 404 + modül yok, `sign_udf` hâlâ yönlendiriliyor; varsayılan: 12 tür, 201 |
+| 5 | **UDF e-imza köprüsü AÇIK** (kullanıcı kararı 13.10): bağlanan üye ofis e-imzasıyla belge imzalatabilir — bilinçli kabul | — |
+| 6 | **4.3 kayıtlı PIN + otomatik giriş — kabul edilmiş risk** (kullanıcı kararı 13.10): kur-unut paylaşım için PIN DPAPI ile saklanmaya devam eder; aynı Windows kullanıcısıyla çalışan kod PIN'i çözebilir. Telafi: ofis bilgisayarında ayrı/kısıtlı Windows hesabı, yabancı program kurulmaması | — |
+
+**Etki:** eski sürüm üyeler (UyapMasa 0.0.1 dahil) yeni ofise LAN'dan bağlanamaz → otomatik dış ağ tüneli (çalışır, yalnız
+daha yavaş). Tarayıcıyla LAN girişi `https://ofis-ip:8843/__uyap_lan__/giris` — ilk girişte sertifika uyarısı (günlükteki
+parmak iziyle karşılaştırılır). Güvenlik duvarı 8843'e izin sorabilir.
+**Bekleyen:** derlenen exe bu PC'de açılmadı (8800'deki çalışan UyapMasa'yı kapatırdı) → Masaüstü
+`CokluUyapKur_light_26.10.13.msi` ofiste kurulup denenecek; sonra `vendor_deploy/downloads/CokluUyapKur.msi` + push.
+Gerçek LAN (iki bilgisayar) denenmedi. Sistem Python314 / kurulu UyapMasa'da multidict hâlâ 6.7.1 (UyapMasa kapalıyken yükselt).
