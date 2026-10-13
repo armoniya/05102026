@@ -65,6 +65,18 @@ _no_interactive = asyncio.Event()
 _no_interactive.set()   # başlangıçta bekleyen bireysel yok
 
 
+def dongu_icin_sifirla():
+    """Yeni bir event loop'ta (ör. masaüstünde "Durdur → Paylaş") paylaşım başlarken çağrılır.
+    asyncio.Lock/Event ilk beklemede o anki döngüye bağlanır; önceki döngüde kalan (hatta
+    yarıda kesilen bir görevin tuttuğu) kilit yeni döngüde "bound to a different event loop"
+    hatası verip UYAP girişini engelliyordu (13.10.2026, light canlı denemesi)."""
+    global UYAP_WRITE_LOCK, _no_interactive, _interactive_pending
+    UYAP_WRITE_LOCK = asyncio.Lock()
+    _interactive_pending = 0
+    _no_interactive = asyncio.Event()
+    _no_interactive.set()
+
+
 @asynccontextmanager
 async def interactive_write():
     """Bireysel kullanıcının yazma isteği için yüksek öncelikli geçit.

@@ -41,6 +41,7 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 from . import uyap_proxy
 from . import jobs
 from . import lan_tls
+from . import _runtime
 from ._runtime import interactive_write, WRITE_METHODS as _WRITE_METHODS
 from .p2p_wire import Reassembler, send_message, load_ice_servers, fetch_ice_servers, AGENT_PREFIX
 
@@ -583,14 +584,21 @@ async def run_office(args):
     # kur. GUI'de "Paylaş → Durdur → tekrar Paylaş" yapınca lifespan kapanışı gw.client'i
     # aclose() ediyordu; eski kod gw'yi None saymadığı için ikinci paylaşım KAPALI client'la
     # çöküyordu. Client kapalıysa taze bir gw kurarız (parola args'tan zaten geliyor).
+    # Masaüstü her paylaşımı YENİ bir event loop'ta başlatır. Önceki döngüde kurulmuş oturumun
+    # httpx istemcisi ve kilidi o (kapanmış) döngüye bağlıdır; yeniden kullanılırsa istekler
+    # 500 / "bound to a different event loop" ile düşer → oturum döngü başına kurulur.
+    _runtime.dongu_icin_sifirla()
+    dongu = asyncio.get_running_loop()
     gw = uyap_proxy.gw
-    if gw is None or getattr(gw, "client", None) is None or gw.client.is_closed:
+    if (gw is None or getattr(gw, "client", None) is None or gw.client.is_closed
+            or getattr(gw, "_dongu", None) is not dongu):
         user = getattr(args, "user", None) or args.room
         uyap_proxy.configure(
             host=args.host, port=args.proxy_port, pin=args.pin, cert_id=args.cert_id,
             interval=args.interval, no_verify=args.no_verify,
             user=user, password=getattr(args, "password", None),
         )
+        uyap_proxy.gw._dongu = dongu
     uyap_proxy.IDLE_INTERVAL = args.interval
 
     # LAN-direct: proxy GERÇEKTEN yerel ağa açılıyor mu? (UYAP_LAN_SHARE kapalıyken
@@ -632,18 +640,24 @@ async def run_office(args):
     http_host = "127.0.0.1" if lan_tls_server is not None else args.host
     server = uyap_proxy.build_server(host=http_host, port=args.proxy_port, in_thread=True)
 
-    tasks = [
-        asyncio.create_task(server.serve()),
-        asyncio.create_task(run_signaling(args, ice_servers)),
-    ]
-    if lan_tls_server is not None:
-        tasks.append(asyncio.create_task(lan_tls_server.serve()))
+    sunucular = [server] + ([lan_tls_server] if lan_tls_server is not None else [])
+    sunucu_gorevleri = [asyncio.create_task(s.serve()) for s in sunucular]
+    tasks = sunucu_gorevleri + [asyncio.create_task(run_signaling(args, ice_servers))]
     try:
-        await asyncio.gather(*tasks)
+        # gather DEĞİL: dıştan iptal (Paylaşımı Durdur) gather'ı kullanınca alt görevler de anında
+        # iptal edilir ve uvicorn kapanış adımına hiç girmez → dinleyen soketler (8800/8843) açık
+        # kalır, sonraki paylaşım "WinError 10048" ile düşerdi. wait iptali alt görevlere yaymaz.
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in done:
+            if not t.cancelled() and t.exception() is not None:
+                raise t.exception()
     finally:
-        server.should_exit = True
-        if lan_tls_server is not None:
-            lan_tls_server.should_exit = True
+        for s in sunucular:
+            s.should_exit = True
+        # uvicorn'a düzgün kapanış için süre ver (soketleri kapatır, lifespan oturumu kapatır).
+        bekleyen = [t for t in sunucu_gorevleri if not t.done()]
+        if bekleyen:
+            await asyncio.wait(bekleyen, timeout=5)
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

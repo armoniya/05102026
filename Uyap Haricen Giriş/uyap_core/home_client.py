@@ -727,7 +727,10 @@ async def run_signaling(args, tunnel: Tunnel, ice_servers):
 
 
 async def amain(args):
-    global room_user, room_password
+    global room_user, room_password, probe_lock
+    # Her "Bağlantıyı Al" yeni bir event loop'ta başlar; önceki döngüye bağlı kilit/durum kalmasın.
+    probe_lock = asyncio.Lock()
+    reset_lan_state()
     room_user = args.room
     room_password = args.password or ""
 
