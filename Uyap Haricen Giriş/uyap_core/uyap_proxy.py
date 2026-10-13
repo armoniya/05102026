@@ -1834,7 +1834,8 @@ async def lan_giris(request: Request):
         _auth_hata_kaydet(ip)
         return _lan_sayfa(_lan_giris_sayfasi(hedef, "Kullanıcı adı veya parola hatalı."), 401)
     resp = Response(status_code=303, headers={"Location": hedef, "Cache-Control": "no-store"})
-    resp.set_cookie(LAN_CEREZ, GW_LAN_SECRET, httponly=True, samesite="strict", path="/")
+    resp.set_cookie(LAN_CEREZ, GW_LAN_SECRET, httponly=True, samesite="strict", path="/",
+                    secure=request.url.scheme == "https")
     return resp
 
 
@@ -1983,18 +1984,26 @@ def _resolve_bind_host(requested: str) -> str:
     return req
 
 
-def build_server(host="0.0.0.0", port=8800, in_thread=False):
+def build_server(host="0.0.0.0", port=8800, in_thread=False, ssl_cert=None, ssl_key=None,
+                 lifespan="auto"):
     """Return a configured uvicorn.Server for `app`. Pass in_thread=True when running off
     the main thread (e.g. from the GUI) so uvicorn does not try to install signal
-    handlers (which only work on the main thread)."""
+    handlers (which only work on the main thread). ssl_cert/ssl_key verilirse HTTPS
+    (LAN kapısı, bkz. lan_tls); aynı app'in ikinci sunucusu lifespan="off" ile kurulmalı
+    ki UYAP girişi/keepalive iki kez başlamasın."""
     host = _resolve_bind_host(host)
-    if host in ("127.0.0.1", "::1", "localhost"):
+    if ssl_cert:
+        print(f"[i] Yerel ağ kapısı HTTPS olarak açık ({host}:{port}).")
+    elif host in ("127.0.0.1", "::1", "localhost") and _lan_share_enabled():
+        print(f"[i] Düz HTTP yalnızca yerel arayüzde ({host}:{port}); yerel ağ HTTPS kapısından girer.")
+    elif host in ("127.0.0.1", "::1", "localhost"):
         print(f"[i] Proxy yalnızca yerel arayüzde ({host}:{port}) dinliyor; LAN-direct kapalı "
               f"(açmak için UYAP_LAN_SHARE=1). Dış-ağ paylaşımı bundan etkilenmez.")
     else:
         print(f"[!] Proxy TÜM AĞA açık dinliyor ({host}:{port}); aynı LAN'daki cihazlar "
               f"Basic-Auth (GW_PASS) ile erişebilir. İnternete port-forward ETMEYİN.")
-    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config = uvicorn.Config(app, host=host, port=port, log_level="info", lifespan=lifespan,
+                            ssl_certfile=ssl_cert, ssl_keyfile=ssl_key)
     server = uvicorn.Server(config)
     if in_thread:
         server.install_signal_handlers = lambda: None

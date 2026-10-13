@@ -53,6 +53,10 @@ JOBS_PREFIX = AGENT_PREFIX + "/jobs"
 # UDF e-imza köprüsü: istemci ham `.udf` POST eder, ofis kartla imzalayıp imzalı `.udf`
 # (binary) döndürür. JSON iş kuyruğundan ayrı, ikili gövdeli tek-atımlık bir uçtur.
 SIGN_UDF_PATH = AGENT_PREFIX + "/sign_udf"
+# Light (yalnız UYAP paylaşımı, uyap_app.py) toplu işi kapatır: UYAP_TOPLU_IS=0 → iş kuyruğu
+# uçları 404, işleyiciler (job_handlers) hiç yüklenmez ve pakete girmez. Bağlanan her üye
+# ofisin e-imzalı oturumuyla toplu UYAP yazma işi başlatamasın diye. UDF köprüsü etkilenmez.
+TOPLU_IS_ACIK = os.environ.get("UYAP_TOPLU_IS", "1") != "0"
 
 # İş durumları.
 QUEUED = "queued"        # sıraya alındı, henüz başlamadı
@@ -397,6 +401,9 @@ async def handle_control(method, path, query, body):
     if p == SIGN_UDF_PATH:
         return await _handle_sign_udf(method, query, body)
 
+    if not TOPLU_IS_ACIK:
+        return _resp(404, {"error": "Bu sürümde toplu iş kapalı."})
+
     rest = p[len(JOBS_PREFIX):].lstrip("/")   # "" | "<id>" | "<id>/cancel"
 
     try:
@@ -445,4 +452,5 @@ async def handle_control(method, path, query, body):
 
 
 # İş türü işleyicilerini kaydet (job_type dekoratörü yukarıda tanımlı olduğundan güvenli).
-from . import job_handlers  # noqa: E402,F401
+if TOPLU_IS_ACIK:
+    from . import job_handlers  # noqa: E402,F401

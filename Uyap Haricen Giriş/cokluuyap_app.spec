@@ -33,7 +33,11 @@ a = Analysis(
     # stdlib kullanır, doğrulandı). Paket ~140 MB açık / ~60 MB sıkışık kalır;
     # gömülü PostgreSQL / İcra araçları BU PAKETE ASLA GİRMEZ (2 GB şişme yasağı).
     excludes=["playwright", "matplotlib", "PIL", "numpy", "pandas",
-              "django", "fitz", "pymupdf", "openpyxl", "lxml"],
+              "django", "fitz", "pymupdf", "openpyxl", "lxml",
+              # Toplu iş işleyicileri light'ta kapalı (uyap_app → UYAP_TOPLU_IS=0); pakete girmez.
+              "uyap_core.job_handlers", "uyap_core.mts", "uyap_core.teblig_212",
+              "uyap_core.ipotek", "uyap_core.xml_takip", "uyap_core.esas_no",
+              "uyap_core.dosya_kaydet"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

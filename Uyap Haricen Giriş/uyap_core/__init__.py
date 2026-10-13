@@ -30,13 +30,15 @@ Not: Bu paket SUNUCU tarafı (vendor_server.py / accounts.py / signaling_server.
 karışmaz — onlar ayrı, bulutta çalışan satıcı bileşenleridir.
 """
 
-from . import uyap_proxy, p2p_wire, office_agent, home_client, jobs, job_handlers
+from . import uyap_proxy, p2p_wire, office_agent, home_client, jobs
+if jobs.TOPLU_IS_ACIK:  # light (UYAP_TOPLU_IS=0) işleyicileri yüklemez
+    from . import job_handlers
 from .office_agent import run_office
 from .home_client import amain as run_client
 from .jobs import MANAGER as job_manager, job_type, registered_types
 
 __all__ = [
-    "uyap_proxy", "p2p_wire", "office_agent", "home_client", "jobs", "job_handlers",
+    "uyap_proxy", "p2p_wire", "office_agent", "home_client", "jobs",
     "run_office", "run_client",
     "job_manager", "job_type", "registered_types",
 ]

@@ -38,6 +38,9 @@ try:
 except ImportError:
     websockets = None
 
+# Light yalnız UYAP'ı paylaşır: bağlanan üyelerin ofis oturumuyla toplu iş başlatmasını kapat
+# (uyap_core.jobs.TOPLU_IS_ACIK). uyap_core içe aktarılmadan ÖNCE ayarlanmalı.
+os.environ["UYAP_TOPLU_IS"] = "0"
 from uyap_core import uyap_proxy, office_agent, home_client
 # Tek tasarım dili: UyapMasa/theme.py paleti (ılık kâğıt + adaçayı). uyap_theme bu
 # paletin uygulamaya taşınmış kopyasıdır — palet değişirse ikisi birlikte güncellenir.
@@ -1699,9 +1702,14 @@ class UyapApp:
         # Bu bilgisayardan giriş yalnız "Tarayıcıyı Aç" düğmesiyle (tek kullanımlık güvenli bağlantı,
         # güvenlik taraması bulgu 4.1); düz 127.0.0.1 adresi doğrudan açılamaz.
         if self.lan_share_var.get():
-            addr_lines = [f"http://{ip}:{port}/giris" for ip in detect_ips()]
+            # LAN yalnız HTTPS kapısından (bulgu 4.2, uyap_core.lan_tls); düz 8800 yalnız yerelde.
+            from uyap_core import lan_tls
+            addr_lines = [f"https://{ip}:{lan_tls.LAN_TLS_PORT}/__uyap_lan__/giris"
+                          for ip in detect_ips()]
             body = ("Bu bilgisayardan giriş: 'Tarayıcıyı Aç' düğmesi.\n"
-                    "Yerel ağdaki diğer bilgisayarlar şu adreslerden (parolayla) bağlanabilir:\n"
+                    "Yerel ağdaki diğer bilgisayarlar 'Bağlantıyı Al' ile (şifreli) ya da tarayıcıda "
+                    "şu adreslerden (parolayla) bağlanabilir; ilk girişteki sertifika uyarısında "
+                    "günlükteki parmak iziyle karşılaştırın:\n"
                     + "  |  ".join(addr_lines))
         else:
             body = ("Bu bilgisayardan giriş: 'Tarayıcıyı Aç' düğmesi "

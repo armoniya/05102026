@@ -40,6 +40,7 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 
 from . import uyap_proxy
 from . import jobs
+from . import lan_tls
 from ._runtime import interactive_write, WRITE_METHODS as _WRITE_METHODS
 from .p2p_wire import Reassembler, send_message, load_ice_servers, fetch_ice_servers, AGENT_PREFIX
 
@@ -453,7 +454,8 @@ async def run_signaling(args, ice_servers):
                     "office_code": getattr(args, "office_code", "") or "",
                     "password": getattr(args, "password", None) or "",
                     "local_ips": detect_local_ips() if lan_token else [],
-                    "port": getattr(args, "proxy_port", 8800),
+                    # LAN açıkken üyeler HTTPS kapısına bağlanır (düz 8800 yalnız yerelde).
+                    "port": lan_tls.LAN_TLS_PORT if lan_token else getattr(args, "proxy_port", 8800),
                     "lan_token": lan_token,
                 }
                 await ws.send(json.dumps(join_msg))
@@ -597,12 +599,26 @@ async def run_office(args):
     # Açıkken oturumluk bir LAN bileti üretilir: üye parolaları satıcı sunucusunda durduğu
     # için proxy onları doğrulayamaz; signaling'e girebilen (kimliği doğrulanmış) üyeye
     # dağıtılan bu bilet, LAN Basic-Auth parolası olarak kabul edilir (uyap_proxy.require_auth).
+    #
+    # LAN TLS (bulgu 4.2): yerel ağa düz HTTP AÇILMAZ. Düz HTTP sunucusu 127.0.0.1'de kalır;
+    # LAN'a ayrı bir HTTPS kapısı (lan_tls.LAN_TLS_PORT) açılır. Sertifikanın parmak izi bilete
+    # eklenir ("<bilet>.<izi>") → üye yalnız bu sertifikaya güvenerek bağlanır (bkz. lan_tls).
     bind_host = uyap_proxy._resolve_bind_host(getattr(args, "host", "0.0.0.0"))
     lan_token = None
+    lan_tls_server = None
     if bind_host not in ("127.0.0.1", "::1", "localhost"):
-        lan_token = secrets.token_urlsafe(24)
+        bilet = secrets.token_urlsafe(24)
+        sert, anahtar, izi = lan_tls.sertifika_hazirla(detect_local_ips())
+        lan_token = lan_tls.bilet_birlestir(bilet, izi)
+        uyap_proxy.GW_LAN_TICKET = bilet
+        lan_tls_server = uyap_proxy.build_server(
+            host=bind_host, port=lan_tls.LAN_TLS_PORT, in_thread=True,
+            ssl_cert=sert, ssl_key=anahtar, lifespan="off")
+        print(f"[i] Yerel ağ HTTPS kapısı: https://<bu-bilgisayar-ip>:{lan_tls.LAN_TLS_PORT}/__uyap_lan__/giris")
+        print(f"[i] Sertifika parmak izi (SHA-256, tarayıcı uyarısında karşılaştırın): {izi}")
+    else:
+        uyap_proxy.GW_LAN_TICKET = None
     args.lan_token = lan_token
-    uyap_proxy.GW_LAN_TICKET = lan_token
 
     # ICE'ı satıcı sunucusundan çek (efemeral TURN dahil); ulaşılamazsa yerel ayara düşer.
     if args.signaling and ("127.0.0.1" in args.signaling or "localhost" in args.signaling):
@@ -612,16 +628,22 @@ async def run_office(args):
 
     # LAN sunucusu: uyap_proxy FastAPI uygulamasını bu döngüde koştur. Lifespan ilk girişi
     # yapar ve keepalive döngüsünü başlatır; böylece ayrıca giriş/keepalive yazmaya gerek yok.
-    server = uyap_proxy.build_server(host=args.host, port=args.proxy_port, in_thread=True)
+    # LAN açıksa düz HTTP yine yalnız 127.0.0.1'de; ağ yalnız HTTPS kapısından girer.
+    http_host = "127.0.0.1" if lan_tls_server is not None else args.host
+    server = uyap_proxy.build_server(host=http_host, port=args.proxy_port, in_thread=True)
 
     tasks = [
         asyncio.create_task(server.serve()),
         asyncio.create_task(run_signaling(args, ice_servers)),
     ]
+    if lan_tls_server is not None:
+        tasks.append(asyncio.create_task(lan_tls_server.serve()))
     try:
         await asyncio.gather(*tasks)
     finally:
         server.should_exit = True
+        if lan_tls_server is not None:
+            lan_tls_server.should_exit = True
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

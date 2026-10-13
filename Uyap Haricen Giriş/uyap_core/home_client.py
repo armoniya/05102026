@@ -38,6 +38,7 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 
 from .p2p_wire import Reassembler, send_message, load_ice_servers, fetch_ice_servers, HEARTBEAT_INTERVAL, AGENT_PREFIX
 from .yerel_kapi import tarayici_reddi
+from . import lan_tls
 from . import uyap_proxy as _yp  # yerel jeton + tek kullanımlık tarayıcı girişi (ofisle AYNI mekanizma)
 
 _YEREL_ADRESLER = {"127.0.0.1", "::1", "localhost"}
@@ -78,8 +79,10 @@ lan_ip = None
 lan_port = None
 # LAN isteklerinde kullanılacak Basic-Auth (kullanıcı, parola). Ofis LAN bileti dağıttıysa
 # parola o bilettir (üyenin kendi parolası ofis proxy'sinde doğrulanamaz — satıcı
-# sunucusunda durur); bilet yoksa eski davranış (oda parolası) korunur.
+# sunucusunda durur). Bilet + sertifika parmak izi yoksa LAN kullanılmaz (bkz. ensure_probed).
 lan_auth = None
+# LAN TLS: ofis sertifikasına sabitlenmiş SSL bağlamı (lan_tls.sabitli_baglam). Düz HTTP LAN yok.
+lan_ssl = None
 room_user = ""
 room_password = ""
 
@@ -88,25 +91,29 @@ probe_lock = asyncio.Lock()
 
 
 def reset_lan_state():
-    global use_lan, lan_ip, lan_port, lan_auth, has_probed
+    global use_lan, lan_ip, lan_port, lan_auth, lan_ssl, has_probed
     use_lan = False
     lan_ip = None
     lan_port = None
     lan_auth = None
+    lan_ssl = None
     has_probed = False
 
 
 async def ensure_probed(msg, start_offer_func):
     """Ofisin yerel IP'lerini dener: ulaşılırsa LAN'ı seç, ulaşılamazsa WebRTC teklifini başlat.
     Tek seferlik (has_probed) ve kilitli; aynı anda gelen start/joined'ler çift denemesin."""
-    global use_lan, lan_ip, lan_port, lan_auth, has_probed
+    global use_lan, lan_ip, lan_port, lan_auth, lan_ssl, has_probed
     local_ips = msg.get("local_ips")
     port = msg.get("port", 8800)
-    # LAN bileti: ofis paylaşımı yerel ağa açtıysa signaling üzerinden gelir ve Basic-Auth
-    # parolası olarak onu kullanırız. Bilet yoksa (eski ofis sürümü) oda parolasıyla denenir —
-    # bu yalnızca master için işe yarar, üye 401 alır ve tünele düşer.
-    token = (msg.get("lan_token") or "").strip()
-    auth = (room_user, token) if token else (room_user, room_password)
+    # LAN bileti: ofis paylaşımı yerel ağa açtıysa signaling üzerinden "<bilet>.<parmakizi>"
+    # olarak gelir; bilet Basic-Auth parolasıdır, parmak izi ofisin LAN TLS sertifikasını
+    # sabitler (lan_tls). Parmak izi yoksa ofis eski sürümdür ve LAN'ı düz HTTP'dir → parola
+    # ağda açık gitmesin diye LAN DENENMEZ, tünel kullanılır (bulgu 4.2).
+    bilet, izi = lan_tls.bilet_ayir(msg.get("lan_token") or "")
+    auth = (room_user, bilet)
+    if not izi:
+        local_ips = []
 
     async with probe_lock:
         if has_probed:
@@ -116,32 +123,36 @@ async def ensure_probed(msg, start_offer_func):
             return
 
         if not local_ips:
-            # Ofis yerel IP bildirmedi → doğrudan dış ağ tüneli.
+            # Ofis yerel IP (ya da şifreli LAN kapısı) bildirmedi → doğrudan dış ağ tüneli.
             if msg.get("type") == "start":
                 has_probed = True
                 use_lan = False
-                print("[SİSTEM] Ofis yerel ağ adresi bildirmedi. Dış ağ tüneli (WebRTC) kuruluyor.")
+                print("[SİSTEM] Ofis şifreli yerel ağ adresi bildirmedi. Dış ağ tüneli (WebRTC) kuruluyor.")
                 await start_offer_func()
             return
 
         success = False
 
         async def probe_ip(ip):
-            url = f"http://{ip}:{port}/__ping__"
+            # Önce sertifika parmak izi doğrulanır; bilet ancak sabitlenmiş bağlamla gönderilir.
+            ctx = await lan_tls.sabitli_baglam(ip, port, izi)
+            if ctx is None:
+                return None
+            url = f"https://{ip}:{port}/__ping__"
             try:
-                async with httpx.AsyncClient(timeout=1.5) as client:
+                async with httpx.AsyncClient(timeout=1.5, verify=ctx) as client:
                     resp = await client.get(url, auth=auth)
                     if resp.status_code == 200:
-                        return ip
+                        return ip, ctx
             except Exception:
                 pass
             return None
 
         tasks = [probe_ip(ip) for ip in local_ips]
         for completed_task in asyncio.as_completed(tasks):
-            result_ip = await completed_task
-            if result_ip:
-                lan_ip = result_ip
+            result = await completed_task
+            if result:
+                lan_ip, lan_ssl = result
                 lan_port = port
                 lan_auth = auth
                 use_lan = True
@@ -485,7 +496,7 @@ def make_app(tunnel: Tunnel):
         try:
             if use_lan:
                 # Doğrudan LAN: ofisin FastAPI proxy'sine httpx + Basic-Auth ile bağlan.
-                target_url = f"http://{lan_ip}:{lan_port}{request.rel_url.path}"
+                target_url = f"https://{lan_ip}:{lan_port}{request.rel_url.path}"
                 if query:
                     target_url += f"?{query}"
                 req_headers = {k: v for k, v in request.headers.items()
@@ -495,10 +506,10 @@ def make_app(tunnel: Tunnel):
                 # ofisin LAN IP'sine rewrite eder, tarayıcı oraya parolasız gidip 401 alırdı.
                 req_headers["X-Forwarded-Host"] = host
                 req_headers["X-Forwarded-Proto"] = "http"
-                async with httpx.AsyncClient(timeout=120.0) as client:
+                async with httpx.AsyncClient(timeout=120.0, verify=lan_ssl) as client:
                     resp_val = await client.request(
                         method=method, url=target_url, headers=req_headers,
-                        content=body, auth=lan_auth or (room_user, room_password),
+                        content=body, auth=lan_auth,
                     )
                     status = resp_val.status_code
                     headers = dict(resp_val.headers)

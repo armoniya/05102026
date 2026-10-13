@@ -208,7 +208,9 @@ class ConnectionManager:
 
         ips = config.detect_ips()
         # Bu bilgisayardan giriş yalnız "Tarayıcıyı Aç" ile (bulgu 4.1); düz 127.0.0.1 açılamaz.
-        addrs = [f"http://{ip}:{port}/giris" for ip in ips]
+        # Yerel ağ yalnız HTTPS kapısından (bulgu 4.2, uyap_core.lan_tls); düz 8800 yalnız yerelde.
+        from uyap_core import lan_tls
+        addrs = [f"https://{ip}:{lan_tls.LAN_TLS_PORT}/__uyap_lan__/giris" for ip in ips]
         self.emit("[SİSTEM] Bu bilgisayardan giriş: 'Tarayıcıyı Aç' düğmesi. Yerel ağ adresleri "
                   "(parolayla): " + ("  |  ".join(addrs) or "—"))
         self.emit(f"[SİSTEM] Dış ağ: '{username}' kullanıcısıyla {server_url} üzerinden paylaşılıyor.")
