@@ -257,3 +257,15 @@ parmak iziyle karşılaştırılır). Güvenlik duvarı 8843'e izin sorabilir.
 **Bekleyen:** derlenen exe bu PC'de açılmadı (8800'deki çalışan UyapMasa'yı kapatırdı) → Masaüstü
 `CokluUyapKur_light_26.10.13.msi` ofiste kurulup denenecek; sonra `vendor_deploy/downloads/CokluUyapKur.msi` + push.
 Gerçek LAN (iki bilgisayar) denenmedi. Sistem Python314 / kurulu UyapMasa'da multidict hâlâ 6.7.1 (UyapMasa kapalıyken yükselt).
+
+## 9. Kalan öneriler (13.10.2026, /zs HARİÇ — kullanıcı kararı)
+| # | Yapılan | Doğrulama |
+|---|---|---|
+| 1 | **UyapMasa 0.0.2** = 0.0.1 kodu + multidict 6.9.1 (stage site-packages yamalandı, yeniden derleme yok); GitHub Release v0.0.2 (`armoniya/uyapmasa-indir`, latest); sistem Python314 multidict 6.9.1 | MSI kurmadan açıldı: multidict 6.9.1, açık `.py` 0, `--selftest` **SELFTEST OK**; indirme bağlantısı yeni dosyayı veriyor |
+| 2 | **PBKDF2 200k → 600k** (`accounts.py`, ana + vendor_deploy `102b4dc`): eski özet ilk başarılı girişte aynı parolayla yeniden özetlenir. /zs aynı `_hash_password`'ı kullanır (kod değişmedi) | geçici depo: 200k kayıt girişte 600k'ya yükseldi, tekrar giriş/yanlış parola/olmayan kullanıcı doğru; giriş ~0,6 sn (yerel) |
+| 3 | Sunucudan eski `downloads/CokluUyapKur.exe` kaldırıldı (`102b4dc`) | — |
+| 4 | Eski `signaling_server.py` (yayında değil): V2 ofis devralma + owner /ws engeli (`96c1581`) | gerçek websockets: üye devralamadı (hata), usta bağlı kaldı, usta yeniden bağlandı |
+| 5 | **Semgrep 1.180** (p/python, security-audit, secrets, javascript) 01.10 sonrası değişen 36 dosya (/zs hariç) + sira_kapisi: 16 bulgu — hepsi yanlış alarm (html.escape'li f-string, port yoklaması bind, Windows parmak izi SHA1, yerel urllib). `_base_url` Host: Cloudflare yabancı Host'u 403 ile kesiyor | — |
+| 6 | **Gitleaks 8.30.1** (SHA doğrulandı) iki deponun TÜM git geçmişi: tek bulgu `tests/test_zs.py` sahte push anahtarı (push.example) → yanlış alarm | — |
+| 7 | **UyapMasa web ZAP 2.17.0 aktif tarama** — yalıtılmış düzenek (DB kopyası `uyap_icra_zaptest`, Python soket bekçisi yalnız 127.0.0.1:5432 + kendi portları, alt süreç/tarayıcı/PyKCS11 yasak, ayar/conn/udf/store/logger/mts/sgk/uretilmis/barkod-sorgula/login/logout 403 + ZAP dışı) | bekçi: UYAP (212.175.130.30:443) ve 8800 istekleri engellendi. **%20de DURDURULDU** (kullanıcı: kapsam yalnız light) — test DB silindi, sonuç yok |
+| — | **Kod imzalama** yapılamadı: sertifika satın alınması gerekir (kullanıcı) | — |
