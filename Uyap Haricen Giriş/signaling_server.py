@@ -123,6 +123,10 @@ async def handler(ws, path=None):
             if not ok:
                 await _safe_send(ws, {"type": "error", "error": reason})
                 return
+            if info.get("role") == "owner":
+                # Platform sahibi ofise bağlı değildir; tünele katılmaz (vendor_server ile aynı).
+                await _safe_send(ws, {"type": "error", "error": "Bu hesap paylaşıma katılamaz."})
+                return
             rk = info["office_id"]
         elif ALLOWED is not None and room not in ALLOWED:
             await _safe_send(ws, {"type": "error", "error": "Tanınmayan kullanıcı adı."})
@@ -151,6 +155,15 @@ async def handler(ws, path=None):
         slot = ROOMS.setdefault(rk, {"office": None, "homes": {}, "office_meta": None})
 
         if role == "office":
+            # Güvenlik taraması V2 (vendor_server ile aynı düzeltme): açık ofis bağlantısını yalnız
+            # AYNI kullanıcı devralabilir (meşru yeniden bağlanma). Aksi halde ofisin herhangi bir
+            # üyesi çalışan paylaşımı düşürüp tüm istemcilerin tekliflerini kendine çekebilirdi.
+            gelen_kullanici = (info or {}).get("username") or ""
+            if info and slot.get("office") is not None and slot.get("office_user")                     and slot.get("office_user") != gelen_kullanici:
+                await _safe_send(ws, {"type": "error", "error":
+                    "Bu ofiste paylaşım şu an başka bir kullanıcı tarafından yapılıyor. "
+                    "O paylaşım kapandıktan sonra yeniden deneyin."})
+                return
             slot["office_meta"] = {"local_ips": join.get("local_ips") or [],
                                    "port": join.get("port", 8800),
                                    # LAN-direct bileti (bkz. vendor_server): home, ofis
@@ -166,6 +179,7 @@ async def handler(ws, path=None):
                           f"değiştiriliyor (açık-mod, kimlik doğrulaması yok).")
                 await old.close()
             slot["office"] = ws
+            slot["office_user"] = gelen_kullanici
             await _safe_send(ws, {"type": "joined", "peer_present": len(slot["homes"]) > 0})
             # Ofis (yeniden) bağlandı: mevcut tüm istemcilere teklif üretmelerini söyle.
             for hcid, hws in list(slot["homes"].items()):

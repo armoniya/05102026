@@ -47,7 +47,9 @@ ACCOUNTS_PATH = os.path.join(DATA_DIR, "accounts.json")
 # Ayarlıysa dosya yerine PostgreSQL kullanılır (Neon/Supabase bağlantı dizesi).
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
-_PBKDF2_ITERS = 200_000
+# OWASP 2023+ önerisi (pbkdf2-sha256): 600k. Eski (200k) kayıtlar ilk başarılı girişte
+# sessizce yeniden özetlenir (authenticate) — toplu geçiş/parola sıfırlama gerekmez.
+_PBKDF2_ITERS = 600_000
 
 
 # ──────────────────────────────────────────────────────────────────────────────────────
@@ -845,6 +847,13 @@ class AccountStore:
         pw_ok = _verify_password(password or "", rec)
         if not u or not pw_ok:
             return False, _GENERIC_AUTH_FAIL, None
+        if int((rec or {}).get("iters", 0)) < _PBKDF2_ITERS:
+            # Eski tur sayısı → güncel ayarla yeniden özetle (parola aynı; oturumlar düşmez).
+            try:
+                u["password"] = _hash_password(password)
+                self.save()
+            except Exception as e:
+                print(f"[!] Parola özeti yükseltilemedi ({username}): {e}")
         # Buradan sonrası: parola DOĞRU → hesap/ofis durumu yalnızca meşru sahibe açıklanır
         # (bu mesajları görmek için zaten geçerli parola gerekir → enumeration değil).
         if not u.get("active", True):
