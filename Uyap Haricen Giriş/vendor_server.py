@@ -91,7 +91,8 @@ MASA_DOWNLOAD_URL = ("https://github.com/armoniya/uyapmasa-indir/releases/latest
                      "UyapMasaKur.msi")
 # 2026-10-09: derlenmiş (Nuitka) UyapMasa 0.0.1 yayında; False yapılırsa ana düğme
 # yine gömülü light MSI'ı sunar.
-MASA_YAYINDA = True
+# 2026-10-14 kullanıcı kararı: ana düğme yeniden CokluUyap (26.10.14, KEP eki PDF) versin.
+MASA_YAYINDA = False
 DOWNLOAD_URL = ((os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip()
                 or (MASA_DOWNLOAD_URL if MASA_YAYINDA else ""))
 _DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
@@ -1468,8 +1469,8 @@ def _render_indir():
         {btn}
         <p class='muted' style='font-size:13px;line-height:1.7'>
           <code>{"UyapMasaKur.msi" if MASA_YAYINDA else "CokluUyapKur.msi"}</code> standart bir Windows kurulumudur: yönetici izni
-          istemez, masaüstüne kısayol koyar ve programı açar (ilk açılışta veritabanı
-          hazırlandığı için bir dakika kadar sürebilir). Açılan pencerede
+          istemez, masaüstüne kısayol koyar ve programı açar{" (ilk açılışta veritabanı hazırlandığı için bir dakika kadar sürebilir)" if MASA_YAYINDA else ""}.
+          Açılan pencerede
           <b>kullanıcı adınızı (kullanıcıadı@ofisadı), parolanızı ve e-imza PIN'inizi bir
           kez</b> girin: paylaşım kendiliğinden başlar, bilgisayar her açıldığında da
           otomatik kurulur. Menü/ayar gezmek gerekmez.</p>
