@@ -54,7 +54,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from ._runtime import interactive_write, batch_write, WRITE_METHODS
+from ._runtime import interactive_write, batch_write, WRITE_METHODS, uyap_istek_izi
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -563,6 +563,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         
         // Must be a UYAP JSON/text API endpoint
         if (!url_lower.includes('.ajx') && !url_lower.includes('.uyap')) return false;
+
+        // İkili belgeler (PDF/zip/UDF/TIFF) ASLA önbelleğe alınmaz: önbellek yanıtı resp.text()
+        // ile saklayıp 'application/json' diye geri verdiği için ikinci açılışta belge bozuk
+        // geliyordu (canlı, 2026-10-14: 70 KB zip → 128 KB bozuk metin).
+        if (url_lower.includes('view_document') || url_lower.includes('_document_')) return false;
 
         // Blacklist for state-modifying actions, auth, live ws and balance checks
         const blacklist = [
@@ -1303,6 +1308,60 @@ def _build_response_headers(resp, proxy_base: str) -> dict:
     return out
 
 
+# KEP ile gelen evrak ekleri (.eyp / .eml) UYAP'tan view_document_brd.uyap ile
+# 'application/zip' olarak geliyor (canlı, 2026-10-14, 2026/26385 Alanya İcra 89/1 cevabı:
+# eyp zip = ana_evrak.pdf; eml zip = ana_evrak.html + "(ek evrak 1)ustyazi.pdf.pdf").
+# UYAP görüntüleyicisi MIME türünü yanıtın Content-Type başlığından alıyor; zip için
+# "Desteklenmeyen belge türü" diyor. Zipteki PDF'i application/pdf olarak verince UYAP'ın
+# kendi PDF görüntüleyicisi açıyor (sayfa içi kancayla canlı denendi). PDF yoksa / zip
+# bozuksa / çok büyükse orijinal zip DEĞİŞMEDEN döner (UYAP eskisi gibi davranır).
+_EK_ZIP_ACILMIS_SINIR = 50 * 1024 * 1024  # zip bombası koruması (açılmış toplam bayt)
+
+
+def _ek_zip_pdf_ac(path: str, content_type: str, body: bytes):
+    """(content_type, body) döner — yalnız view_document_brd.uyap zip yanıtını PDF'e çevirir."""
+    if not path.split("?", 1)[0].rstrip("/").endswith("view_document_brd.uyap"):
+        return content_type, body
+    if "zip" not in (content_type or "").lower() or body[:2] != b"PK":
+        return content_type, body
+    try:
+        import io
+        import hashlib
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(body)) as z:
+            adaylar = [i for i in z.infolist()
+                       if not i.is_dir() and i.filename.lower().endswith(".pdf")]
+            if sum(i.file_size for i in adaylar) > _EK_ZIP_ACILMIS_SINIR:
+                return content_type, body
+            pdfler, gorulen = [], set()
+            for i in adaylar:
+                veri = z.read(i)
+                ozet = hashlib.sha256(veri).digest()
+                if veri[:4] == b"%PDF" and ozet not in gorulen:
+                    gorulen.add(ozet)
+                    pdfler.append(veri)
+        if not pdfler:
+            return content_type, body
+        if len(pdfler) == 1:
+            return "application/pdf", pdfler[0]
+        from pypdf import PdfReader, PdfWriter
+        yazici = PdfWriter()
+        for veri in pdfler:
+            yazici.append(PdfReader(io.BytesIO(veri)))
+        cikti = io.BytesIO()
+        yazici.write(cikti)
+        return "application/pdf", cikti.getvalue()
+    except Exception:
+        return content_type, body
+
+
+def _ek_pdf_basliklari(headers: dict, content_type: str) -> dict:
+    """Yanıt başlıklarındaki Content-Type'ı (büyük/küçük harf fark etmeksizin) değiştirir."""
+    out = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+    out["content-type"] = content_type
+    return out
+
+
 # --------------------------------------------------------------------------------------
 # FastAPI app
 # --------------------------------------------------------------------------------------
@@ -1886,6 +1945,10 @@ async def proxy(full_path: str, request: Request, _user: str = Depends(require_a
         )
 
     async def forward_with_relogin():
+        async with uyap_istek_izi():
+            return await _forward_with_relogin()
+
+    async def _forward_with_relogin():
         resp = await forward()
         # "Check the session while forwarding": if UYAP answered with a login wall,
         # re-authenticate (locked) and replay the request once.
@@ -1915,13 +1978,16 @@ async def proxy(full_path: str, request: Request, _user: str = Depends(require_a
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"UYAP'a ulaşılamadı: {e}")
 
-    out_body = _rewrite_body(resp.headers.get("content-type", ""), resp.content, proxy_base)
+    ctype, govde = _ek_zip_pdf_ac(full_path, resp.headers.get("content-type", ""), resp.content)
+    out_body = _rewrite_body(ctype, govde, proxy_base)
     out_headers = _build_response_headers(resp, proxy_base)
+    if ctype != resp.headers.get("content-type", ""):
+        out_headers = _ek_pdf_basliklari(out_headers, ctype)
     return Response(
         content=out_body,
         status_code=resp.status_code,
         headers=out_headers,
-        media_type=resp.headers.get("content-type"),
+        media_type=ctype,
     )
 
 

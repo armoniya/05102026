@@ -25,6 +25,8 @@ a = Analysis(
         + collect_submodules("websockets")
         # uyap_giris_dışarıdan.py dinamik yüklendiği için bağımlılıkları da elle:
         + ["requests", "urllib3"]
+        # Sıra kapısı arayüzü/eşleştirme: uyap_app içinde yöntem içinden içe aktarılır.
+        + ["sira_kapisi_arayuz", "uyap_core.sira_eslestirme", "uyap_core.sira_kapisi"]
     ),
     hookspath=[],
     hooksconfig={},

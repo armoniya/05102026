@@ -70,11 +70,14 @@ def dongu_icin_sifirla():
     asyncio.Lock/Event ilk beklemede o anki döngüye bağlanır; önceki döngüde kalan (hatta
     yarıda kesilen bir görevin tuttuğu) kilit yeni döngüde "bound to a different event loop"
     hatası verip UYAP girişini engelliyordu (13.10.2026, light canlı denemesi)."""
-    global UYAP_WRITE_LOCK, _no_interactive, _interactive_pending
+    global UYAP_WRITE_LOCK, _no_interactive, _interactive_pending, _aktif_yok, _aktif_istek
     UYAP_WRITE_LOCK = asyncio.Lock()
     _interactive_pending = 0
     _no_interactive = asyncio.Event()
     _no_interactive.set()
+    _aktif_istek = 0
+    _aktif_yok = asyncio.Event()
+    _aktif_yok.set()
 
 
 @asynccontextmanager
@@ -104,6 +107,45 @@ async def batch_write():
         await _no_interactive.wait()
     async with UYAP_WRITE_LOCK:
         yield
+
+
+# ── Uçuştaki bireysel UYAP istekleri (GET dahil) ─────────────────────────────────────────
+# GET'ler kilide girmez; ama sıra kapısı (sira_kapisi.py — ofisteki başka bir otomasyon
+# programının istekleri) kendi isteğini göndermeden önce bizim uçuştaki isteklerimizin
+# bitmesini bekler ki UYAP'a aynı anda iki istek varmasın. Bekleme sınırlıdır: sayfa
+# yüklenirken GET akışı kesilmezse kapı sonsuza dek beklemesin.
+_aktif_istek = 0
+_aktif_yok = asyncio.Event()
+_aktif_yok.set()
+
+
+@asynccontextmanager
+async def uyap_istek_izi():
+    """Bizim (bireysel) UYAP isteğimizin uçuşta olduğunu işaretler; kilitlemez."""
+    global _aktif_istek
+    _aktif_istek += 1
+    _aktif_yok.clear()
+    try:
+        yield
+    finally:
+        _aktif_istek = max(0, _aktif_istek - 1)
+        if _aktif_istek == 0:
+            _aktif_yok.set()
+
+
+def aktif_istek_sayisi() -> int:
+    return _aktif_istek
+
+
+async def aktif_istekler_bitsin(en_cok_sn: float = 5.0) -> bool:
+    """Uçuştaki bireysel istekler bitene kadar (en çok `en_cok_sn`) bekler; bittiyse True."""
+    if _aktif_istek == 0:
+        return True
+    try:
+        await asyncio.wait_for(_aktif_yok.wait(), en_cok_sn)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 # ── İstemci "okuma ipucu" başlığı — ARTIK YALNIZ BELGESEL, bkz. modül docstring'i ────────

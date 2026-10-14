@@ -42,7 +42,8 @@ from . import uyap_proxy
 from . import jobs
 from . import lan_tls
 from . import _runtime
-from ._runtime import interactive_write, WRITE_METHODS as _WRITE_METHODS
+from . import sira_kapisi
+from ._runtime import interactive_write, uyap_istek_izi, WRITE_METHODS as _WRITE_METHODS
 from .p2p_wire import Reassembler, send_message, load_ice_servers, fetch_ice_servers, AGENT_PREFIX
 
 try:
@@ -165,17 +166,22 @@ async def _fetch_uyap(method, path, query, body, fwd_headers, proxy_base, store)
     async def forward():
         return await gw.client.request(method, target, content=body, headers=fwd_headers)
 
-    resp = await forward()
-    # "İletirken oturumu kontrol et": UYAP login duvarı döndüyse kilitli yeniden giriş.
-    if uyap_proxy._looks_like_login_wall(resp):
-        await gw.relogin()
+    # Uçuşta işareti: sıra kapısı (başka otomasyonun istekleri) bu bitmeden göndermez.
+    async with uyap_istek_izi():
         resp = await forward()
+        # "İletirken oturumu kontrol et": UYAP login duvarı döndüyse kilitli yeniden giriş.
+        if uyap_proxy._looks_like_login_wall(resp):
+            await gw.relogin()
+            resp = await forward()
 
     # Enjekte script'i de GÖM: (a) localStorage loginState=true ile UYAP SPA'sının istemci
     # tarafı giriş kontrolünü atlatır, (b) IndexedDB SWR ile anında render.
-    out_body = uyap_proxy._rewrite_body(
-        resp.headers.get("content-type", ""), resp.content, proxy_base, inject=True)
+    # KEP eki (.eyp/.eml) zip'i → içindeki PDF (bkz. uyap_proxy._ek_zip_pdf_ac).
+    ctype, govde = uyap_proxy._ek_zip_pdf_ac(path, resp.headers.get("content-type", ""), resp.content)
+    out_body = uyap_proxy._rewrite_body(ctype, govde, proxy_base, inject=True)
     out_headers = uyap_proxy._build_response_headers(resp, proxy_base)
+    if ctype != resp.headers.get("content-type", ""):
+        out_headers = uyap_proxy._ek_pdf_basliklari(out_headers, ctype)
     if store and resp.status_code == 200:
         save_response_to_cache(path, proxy_base, resp.status_code, out_headers, out_body, query)
     return resp.status_code, out_headers, out_body
@@ -643,6 +649,19 @@ async def run_office(args):
     sunucular = [server] + ([lan_tls_server] if lan_tls_server is not None else [])
     sunucu_gorevleri = [asyncio.create_task(s.serve()) for s in sunucular]
     tasks = sunucu_gorevleri + [asyncio.create_task(run_signaling(args, ice_servers))]
+    # Sıra kapısı (ofisteki başka otomasyonun UYAP isteklerini bizim kilidimizle sıraya alır,
+    # bkz. sira_kapisi.py). AYNI döngüde koşmalı ki _runtime kilidini paylaşsın. Açılamazsa
+    # (443 dolu, sertifika yok…) paylaşımı DÜŞÜRMEZ, yalnız uyarır. Denetçi, arayüzden bot
+    # eklenip silinince kapıyı paylaşımı yeniden başlatmadan günceller.
+    async def _kapi_denetci():
+        try:
+            await sira_kapisi.denetci()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[!] Sıra kapısı denetçisi durdu: {e}")
+            await asyncio.Event().wait()   # paylaşımı düşürmemek için iptale kadar bekle
+    tasks.append(asyncio.create_task(_kapi_denetci()))
     try:
         # gather DEĞİL: dıştan iptal (Paylaşımı Durdur) gather'ı kullanınca alt görevler de anında
         # iptal edilir ve uvicorn kapanış adımına hiç girmez → dinleyen soketler (8800/8843) açık

@@ -781,6 +781,12 @@ class UyapApp:
         forgot.pack(pady=(14, 0))
         forgot.bind("<Button-1>", lambda e: self.on_forgot_password())
 
+        # Bot bilgisayarı (ofisteki başka UYAP otomasyonu) giriş YAPMADAN sıra kapısına bağlanır.
+        bot_link = tk.Label(card, text="Bot bilgisayarı kurulumu (Sıra Kapısı)", bg=C.CARD,
+                            fg=C.INK_SOFT, cursor="hand2", font=('Segoe UI', 9, 'underline'))
+        bot_link.pack(pady=(6, 0))
+        bot_link.bind("<Button-1>", lambda e: self.on_bot_kurulum())
+
         self.login_status_lbl = tk.Label(card, text="", bg=C.CARD, fg=C.INK_SOFT,
                                          font=self.fonts["small"], wraplength=320, justify='center')
         self.login_status_lbl.pack(pady=(10, 0))
@@ -802,6 +808,10 @@ class UyapApp:
         # Başlık çubuğu olmadığı için pencere, kartın boş alanlarından tutulup
         # sürüklenebilir olmalı (uyapmasa.py'nin _bind_drag_recursive'i ile birebir).
         self._bind_drag_recursive(login_frame)
+
+    def on_bot_kurulum(self):
+        from sira_kapisi_arayuz import BotKurulumPenceresi
+        BotKurulumPenceresi(self.root, self.fonts)
 
     def _on_login_card_resize(self, h):
         """Giriş kartı yüksekliği değiştiğinde (PIN satırı, durum metni vb.)
@@ -1119,17 +1129,21 @@ class UyapApp:
 
         conn_tab = tk.Frame(content, bg=C.BG)
         users_tab = tk.Frame(content, bg=C.BG)
-        for f in (conn_tab, users_tab):
+        sira_tab = tk.Frame(content, bg=C.BG)
+        for f in (conn_tab, users_tab, sira_tab):
             f.place(x=0, y=0, relwidth=1, relheight=1)
-        self._dash_frames = {"baglanti": conn_tab, "kullanicilar": users_tab}
+        self._dash_frames = {"baglanti": conn_tab, "kullanicilar": users_tab, "sira": sira_tab}
 
         self._nav_buttons = {}
         self._current_nav_key = None
         tk.Frame(side, bg=C.SIDEBAR, height=14).pack(fill='x')
-        for key, text in (("baglanti", "Bağlantı"), ("kullanicilar", "Kullanıcılar")):
+        for key, text in (("baglanti", "Bağlantı"), ("kullanicilar", "Kullanıcılar"),
+                          ("sira", "Sıra Kapısı")):
             self._nav_buttons[key] = self._build_nav_item(side, key, text)
 
         self.setup_users_tab(users_tab)
+        from sira_kapisi_arayuz import SiraKapisiSekmesi
+        self.sira_sekmesi = SiraKapisiSekmesi(sira_tab, self.fonts, self.root)
 
         conn_wrap = tk.Frame(conn_tab, bg=C.BG)
         conn_wrap.pack(fill='both', expand=True, padx=14, pady=14)
@@ -1193,6 +1207,8 @@ class UyapApp:
         frame = self._dash_frames.get(key)
         if frame:
             frame.tkraise()
+        if key == "sira" and getattr(self, "sira_sekmesi", None) is not None:
+            self.sira_sekmesi.yenile()
 
     def setup_share_section(self, body, actions):
         saved_pin = ""
@@ -1906,7 +1922,41 @@ class UyapApp:
         os._exit(0)
 
 
+def _sira_kapisi_komutu(argv):
+    """Kurulu (konsolsuz) exe'de sıra kapısı komutları:
+        CokluUyap.exe --sira-kapisi kur --bot-ip 192.168.1.50   |  durum | ac | kapat | mod izle
+    Pencere açılmaz; çıktı sira_kapisi\\son_komut.txt'ye yazılıp Not Defteri'nde gösterilir
+    (netsh komutu oradan kopyalanır)."""
+    import io
+    import contextlib
+    from uyap_core import sira_kapisi
+    cikti = io.StringIO()
+    with contextlib.redirect_stdout(cikti), contextlib.redirect_stderr(cikti):
+        try:
+            sira_kapisi.main(argv)
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                print(f"\n[!] {e.code}" if isinstance(e.code, str) else "\n[!] Komut tamamlanamadı.")
+        except Exception as e:
+            print(f"\n[!] Hata: {e}")
+    os.makedirs(sira_kapisi.veri_klasoru(), exist_ok=True)
+    yol = os.path.join(sira_kapisi.veri_klasoru(), "son_komut.txt")
+    with open(yol, "w", encoding="utf-8-sig") as f:
+        f.write("CokluUyap --sira-kapisi " + " ".join(argv) + "\n\n" + cikti.getvalue())
+    try:
+        os.startfile(yol)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    # UAC ile yükseltilmiş yardımcı (sira_eslestirme.yonetici_olarak_calistir): pencere açmaz.
+    if len(sys.argv) > 1 and sys.argv[1] == "--sira-yonetici":
+        from uyap_core import sira_eslestirme
+        os._exit(sira_eslestirme.yonetici_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "--sira-kapisi":
+        _sira_kapisi_komutu(sys.argv[2:])
+        sys.exit(0)
     # Windows'ta asyncio'nun aiortc/aiohttp/uvicorn ile düzgün çalışması için Proactor döngüsü.
     if IS_WINDOWS:
         try:
