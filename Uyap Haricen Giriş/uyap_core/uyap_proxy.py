@@ -1293,29 +1293,49 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     }
 
     // ── Kartlara düğme ekle (React kartı yeniden çizerse düğme de yeniden eklenir) ──
+    // "Seçili Belgeleri İndir (N)" yalnız evrak ağacında işaret varken görünür.
+    function kartDugmesi(baslik, ozellik, ikon, metin, ipucu, kapsam) {
+        const b = document.createElement('div');
+        b.setAttribute(ozellik, '1');
+        b.setAttribute('role', 'button');
+        b.setAttribute('tabindex', '0');
+        b.title = ipucu;
+        b.className = 'dx-widget dx-button dx-button-mode-outlined dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
+        b.style.marginRight = '6px';
+        b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe ' + ikon + '"></span> <span data-metin>' + metin + '</span></div>';
+        b.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            const kart = baslik.closest('.dosya-sorgula-popup');
+            const d = kart && kartVerisi(kart);
+            if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
+            secenekAc(kart, String(d.dosyaId), dosyaAdi(d), kapsam);
+        });
+        return b;
+    }
     function kartlariTara() {
         document.querySelectorAll('.dosya-sorgula-popup .dx-popup-title').forEach(function(baslik) {
-            if (baslik.querySelector('[data-tumevrak]')) return;
-            const kartGorunumu = Array.from(baslik.querySelectorAll('[role=button]'))
-                .find(function(b) { return /Kart Görünümü/.test(b.textContent); });
-            const yer = kartGorunumu ? kartGorunumu.parentElement : null;
-            if (!yer) return;
-            const b = document.createElement('div');
-            b.setAttribute('data-tumevrak', '1');
-            b.setAttribute('role', 'button');
-            b.setAttribute('tabindex', '0');
-            b.title = 'Bu dosyadaki tüm evrakı PDF olarak indir';
-            b.className = 'dx-widget dx-button dx-button-mode-outlined dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
-            b.style.marginRight = '6px';
-            b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe icon-download"></span> Tüm Evrakı İndir</div>';
-            b.addEventListener('click', function(ev) {
-                ev.stopPropagation();
-                const kart = baslik.closest('.dosya-sorgula-popup');
-                const d = kart && kartVerisi(kart);
-                if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
-                secenekAc(kart, String(d.dosyaId), dosyaAdi(d));
-            });
-            yer.insertBefore(b, kartGorunumu);
+            let tum = baslik.querySelector('[data-tumevrak]');
+            if (!tum) {
+                const kartGorunumu = Array.from(baslik.querySelectorAll('[role=button]'))
+                    .find(function(b) { return /Kart Görünümü/.test(b.textContent); });
+                const yer = kartGorunumu ? kartGorunumu.parentElement : null;
+                if (!yer) return;
+                tum = kartDugmesi(baslik, 'data-tumevrak', 'icon-download', 'Tüm Evrakı İndir',
+                                  'Bu dosyadaki tüm evrakı PDF olarak indir', 'tum');
+                yer.insertBefore(tum, kartGorunumu);
+            }
+            let secili = baslik.querySelector('[data-tumevrak-secili]');
+            if (!secili) {
+                secili = kartDugmesi(baslik, 'data-tumevrak-secili', 'icon-check-square', 'Seçili Belgeleri İndir',
+                                     'Evrak sekmesinde işaretlediğiniz belgeleri PDF olarak indir', 'secili');
+                tum.parentElement.insertBefore(secili, tum);
+            }
+            const kart = baslik.closest('.dosya-sorgula-popup');
+            const n = kart ? kartSecimi(kart).size : 0;
+            secili.style.display = n ? '' : 'none';
+            const metin = secili.querySelector('[data-metin]');
+            const yeni = 'Seçili Belgeleri İndir (' + n + ')';
+            if (metin && metin.textContent !== yeni) metin.textContent = yeni;
         });
     }
 
@@ -1407,6 +1427,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                             if (c.checked) secim.add(e.evrakId); else secim.delete(e.evrakId);
                         });
                         agaclariTara();
+                        kartlariTara();               // "Seçili Belgeleri İndir (N)" hemen güncellensin
                         formSayisiniTazele(kart);
                     });
                     satir.insertBefore(c, satir.firstChild);
@@ -1532,37 +1553,29 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const r = form.querySelector('input[name="uyapTumEvrak_' + ad + '"]:checked');
         return r ? r.value : null;
     }
-    let formKarti = null, kapsamEtiketi = null, kapsamRadyo = null;
+    // Form yalnız çıktıyı sorar; kapsam basılan düğmeden gelir ("Tüm Evrakı İndir" → tüm,
+    // "Seçili Belgeleri İndir (N)" → kartta işaretlenenler). Seçili formda sayı canlı güncellenir.
+    let formKarti = null, formKapsami = null, kapsamEl = null;
     function formSayisiniTazele(kart) {
-        if (!kapsamEtiketi || kart !== formKarti) return;
+        if (!kapsamEl || kart !== formKarti || formKapsami !== 'secili') return;
         const n = kartSecimi(kart).size;
-        kapsamEtiketi.textContent = 'Kartta işaretlediğim belgeler (' + n + ')' +
-            (n ? '' : ' — Evrak sekmesindeki kutuları işaretleyin');
-        kapsamRadyo.disabled = !n;
-        if (n && !kapsamRadyo.checked && kapsamRadyo.__otomatik !== false) kapsamRadyo.checked = true;
-        if (!n && kapsamRadyo.checked) form.querySelector('input[name="uyapTumEvrak_kapsam"][value="tum"]').checked = true;
+        kapsamEl.textContent = n ? (n + ' işaretli belge') : 'İşaretli belge kalmadı.';
     }
-    function secenekAc(kart, dosyaId, ad) {
+    function secenekAc(kart, dosyaId, ad, kapsam) {
         panelAc();
         form.innerHTML = '';
         const kutu = el('div', 'margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
         kutu.appendChild(el('div', 'font-weight:600;word-break:break-word;', ad || 'UYAP dosyası'));
+        kapsamEl = el('div', 'margin-top:2px;color:#cbd5e1;', 'Tüm belgeler');
+        kutu.appendChild(kapsamEl);
+        formKarti = kart; formKapsami = kapsam;
+        formSayisiniTazele(kart);
         kutu.appendChild(radyoGrubu('Çıktı', 'cikti', [
             ['tek', 'Tek PDF'],
             ['ikisi', 'Tek PDF + ayrı ayrı PDF\'ler (ZIP)'],
         ], tercih('cikti', 'tek')));
-        const kapsamKutusu = radyoGrubu('Belgeler', 'kapsam', [
-            ['tum', 'Tüm belgeler'],
-            ['secili', ''],
-        ], kartSecimi(kart).size ? 'secili' : 'tum');
-        kutu.appendChild(kapsamKutusu);
-        kapsamRadyo = kapsamKutusu.querySelector('input[value="secili"]');
-        kapsamEtiketi = kapsamRadyo.parentElement.lastChild;
-        kapsamKutusu.querySelector('input[value="tum"]').addEventListener('change', function() { kapsamRadyo.__otomatik = false; });
-        formKarti = kart;
-        formSayisiniTazele(kart);
         kutu.appendChild(dugme('İndir', '#059669', function() {
-            const cikti = secilenDeger('cikti'), kapsam = secilenDeger('kapsam');
+            const cikti = secilenDeger('cikti');
             const evraklar = kapsam === 'secili' ? secilenEvraklar(kart) : null;
             if (kapsam === 'secili' && !evraklar.length) { panelMesaj('İşaretli belge yok.'); return; }
             tercihYaz('cikti', cikti);
