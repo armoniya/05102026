@@ -358,9 +358,9 @@ def is_control_path(path):
 
 async def _handle_tum_evrak(method, p, body):
     """POST   /__uyap_agent__/tum_evrak               {"dosyaId", "ad", "cikti": "tek"|"ikisi",
-                                                       "kapsam": "tum"|"secili"} → 201 {indirme}
-       GET    /__uyap_agent__/tum_evrak/<id>          → {indirme}  (ilerleme/seçim/captcha durumu)
-       POST   /__uyap_agent__/tum_evrak/<id>/secim    {"secilen": [liste sırası, …]} → devam
+                                                       "kapsam": "tum"|"secili",
+                                                       "evraklar": [kartta işaretlenenler]} → 201
+       GET    /__uyap_agent__/tum_evrak/<id>          → {indirme}  (ilerleme/captcha durumu)
        POST   /__uyap_agent__/tum_evrak/<id>/captcha  {"token"|null} → doğrulama sonrası devam
        POST   /__uyap_agent__/tum_evrak/<id>/iptal    → {indirme}
        GET    /__uyap_agent__/tum_evrak/<id>/dosya    → application/pdf (tek) | application/zip"""
@@ -377,7 +377,8 @@ async def _handle_tum_evrak(method, p, body):
             try:
                 ind = evrak_toplu.baslat(payload.get("dosyaId"), payload.get("ad"),
                                          payload.get("cikti") or evrak_toplu.CIKTI_IKISI,
-                                         payload.get("kapsam") or evrak_toplu.KAPSAM_TUM)
+                                         payload.get("kapsam") or evrak_toplu.KAPSAM_TUM,
+                                         payload.get("evraklar"))
             except ValueError as e:
                 return _resp(400, {"error": str(e)})
             return _resp(201, {"indirme": ind.to_dict()})
@@ -398,14 +399,6 @@ async def _handle_tum_evrak(method, p, body):
                 payload = {}
             jeton = payload.get("token") if isinstance(payload, dict) else None
             ind.captcha_cevapla(jeton if isinstance(jeton, str) and len(jeton) < 8192 else None)
-            return _resp(200, {"indirme": ind.to_dict()})
-        if eylem == "secim" and method == "POST":
-            try:
-                payload = json.loads(body or b"{}")
-            except Exception:
-                return _resp(400, {"error": "Geçersiz JSON gövdesi."})
-            secilen = payload.get("secilen") if isinstance(payload, dict) else None
-            ind.secim_yap(secilen if isinstance(secilen, list) else [])
             return _resp(200, {"indirme": ind.to_dict()})
         if eylem in ("dosya", "zip") and method == "GET":
             if not ind.to_dict()["dosya_hazir"]:

@@ -67,17 +67,17 @@ KAYIT_KOKU = os.environ.get("UYAP_EVRAK_KLASORU") or os.path.join(
 # Durumlar
 CALISIYOR = "calisiyor"
 SIRADA = "sirada"
-SECIM = "secim"                          # kullanıcının belge seçmesi bekleniyor
 CAPTCHA = "captcha"
 BITTI = "bitti"
 HATA = "hata"
 IPTAL = "iptal"
 
 # Seçenekler: çıktı "tek" = yalnız birleşik PDF (doğrudan .pdf iner); "ikisi" = birleşik +
-# ayrı ayrı PDF'ler (ZIP). Kapsam "tum" = tüm evrak; "secili" = liste gelince kullanıcı seçer.
+# ayrı ayrı PDF'ler (ZIP). Kapsam "tum" = tüm evrak (ofis listeyi UYAP'tan çeker); "secili" =
+# kullanıcının UYAP kartındaki evrak ağacında işaretledikleri (liste tarayıcıdan gelir).
 CIKTI_TEK, CIKTI_IKISI = "tek", "ikisi"
 KAPSAM_TUM, KAPSAM_SECILI = "tum", "secili"
-SECIM_BEKLEME_SN = 30 * 60
+SECILI_EN_COK = 3000
 
 
 class _Iptal(Exception):
@@ -97,7 +97,7 @@ def _guvenli_ad(s, max_len=100):
 
 # ── İndirme kaydı ─────────────────────────────────────────────────────────────────────
 class Indirme:
-    def __init__(self, dosya_id, ad, cikti=CIKTI_IKISI, kapsam=KAPSAM_TUM):
+    def __init__(self, dosya_id, ad, cikti=CIKTI_IKISI, kapsam=KAPSAM_TUM, evraklar=None):
         self.id = uuid.uuid4().hex
         self.dosya_id = dosya_id
         self.ad = ad
@@ -110,9 +110,7 @@ class Indirme:
         self.uyarilar = []
         self.klasor = None
         self.cikti_yol = None            # indirilecek dosya: birleşik .pdf ya da .zip
-        self.liste = None                # SECIM durumunda seçilecek evrak özetleri
-        self._secim_olay = asyncio.Event()
-        self._secilen = None
+        self.hazir_evraklar = evraklar   # kapsam "secili": kartta işaretlenen evraklar
         self.captcha = None              # {"kod", "mesaj", "site_key"}
         self.olusturma = time.time()
         self.bitis = None
@@ -129,42 +127,12 @@ class Indirme:
             "mesaj": self.mesaj, "uyarilar": self.uyarilar[-20:], "klasor": self.klasor,
             "cikti": self.cikti, "kapsam": self.kapsam,
             "dosya_hazir": bool(self.cikti_yol and os.path.exists(self.cikti_yol)),
-            "liste": self.liste if self.durum == SECIM else None,
             "captcha": self.captcha,
         }
 
     def iptal_et(self):
         self._iptal = True
         self._captcha_olay.set()
-        self._secim_olay.set()
-
-    def secim_yap(self, siralar):
-        """SECIM durumunda kullanıcının işaretlediği liste sıraları (0'dan)."""
-        if self.durum != SECIM:
-            return
-        n = len(self.liste or [])
-        self._secilen = sorted({s for s in siralar if isinstance(s, int) and 0 <= s < n})
-        self.durum, self.liste = SIRADA, None
-        self.mesaj = f"{len(self._secilen)} belge seçildi, sırada…"
-        self._secim_olay.set()
-
-    async def _secim_bekle(self, evraklar):
-        """Listeyi kullanıcıya açar, seçimi bekler (sıra kilidi TUTULMAZ). Seçilen evraklar."""
-        self.liste = [{"tur": e.get("tur") or "evrak", "no": e.get("birimEvrakNo") or "",
-                       "tarih": str(e.get("onaylandigiTarih") or "")[:16], "ek": bool(e.get("_ek"))}
-                      for e in evraklar]
-        self.durum = SECIM
-        self.mesaj = f"{len(evraklar)} belge bulundu — indirilecekleri seçin."
-        self._secim_olay.clear()
-        try:
-            await asyncio.wait_for(self._secim_olay.wait(), SECIM_BEKLEME_SN)
-        except asyncio.TimeoutError:
-            self._iptal = True
-        self.liste = None
-        self._iptal_kontrol()
-        if not self._secilen:
-            raise _Iptal("Hiç belge seçilmedi.")
-        return [evraklar[s] for s in self._secilen]
 
     def captcha_cevapla(self, jeton):
         if self.durum != CAPTCHA:
@@ -346,7 +314,7 @@ def _duzlestir(evraklar):
                 ekle({"evrakId": ek["evrakId"],
                       "tur": f"{e.get('tur', '')} (ek)".strip(),
                       "birimEvrakNo": f"{e.get('birimEvrakNo', '')}-ek{ek.get('sira', '')}",
-                      "onaylandigiTarih": e.get("onaylandigiTarih"), "_ek": True})
+                      "onaylandigiTarih": e.get("onaylandigiTarih")})
     for sira, e in enumerate(duz, 1):
         e["_sira"] = sira                 # dosya adındaki numara: tam listedeki yeri
     return duz
@@ -579,18 +547,13 @@ async def _calistir(ind):
     try:
         async with _sira_kilidi():
             ind.durum = CALISIYOR
-            ind.mesaj = "Evrak listesi alınıyor…"
-            evraklar = await _evrak_listesi(ind)
-        if not evraklar:
-            ind.durum, ind.mesaj = HATA, "Bu dosyada evrak bulunamadı."
-            return
-        if ind.kapsam == KAPSAM_SECILI:
-            evraklar = await ind._secim_bekle(evraklar)    # kilitsiz: diğer indirmeler sürer
-        kilit = _sira_kilidi()
-        if kilit.locked():
-            ind.durum, ind.mesaj = SIRADA, "Sırada (başka bir indirme sürüyor)…"
-        async with kilit:
-            ind.durum = CALISIYOR
+            evraklar = ind.hazir_evraklar
+            if evraklar is None:
+                ind.mesaj = "Evrak listesi alınıyor…"
+                evraklar = await _evrak_listesi(ind)
+            if not evraklar:
+                ind.durum, ind.mesaj = HATA, "Bu dosyada evrak bulunamadı."
+                return
             await _indir_ve_yaz(ind, evraklar)
     except _Iptal as e:
         ind.durum, ind.mesaj = IPTAL, (str(e) or "İndirme durduruldu.")
@@ -618,16 +581,42 @@ def _temizle():
             _KAYITLAR.pop(k, None)
 
 
-_AKTIF = (SIRADA, CALISIYOR, CAPTCHA, SECIM)
+_AKTIF = (SIRADA, CALISIYOR, CAPTCHA)
 
 
-def baslat(dosya_id, ad, cikti=CIKTI_IKISI, kapsam=KAPSAM_TUM):
+def _secili_evraklar(evraklar):
+    """Tarayıcıdan (UYAP kartının evrak ağacından) gelen seçimi doğrular; sıra korunur,
+    aynı evrakId bir kez alınır. Yalnız indirme için gereken alanlar tutulur."""
+    if not isinstance(evraklar, list) or not evraklar:
+        raise ValueError("İşaretli belge yok.")
+    if len(evraklar) > SECILI_EN_COK:
+        raise ValueError("Çok fazla belge işaretlendi.")
+    temiz, gorulen = [], set()
+    for e in evraklar:
+        if not isinstance(e, dict):
+            raise ValueError("Geçersiz belge kaydı.")
+        eid = e.get("evrakId")
+        if not isinstance(eid, str) or not eid or len(eid) > 400 or any(c in eid for c in "\r\n"):
+            raise ValueError("Geçersiz evrakId.")
+        if eid in gorulen:
+            continue
+        gorulen.add(eid)
+        temiz.append({"evrakId": eid,
+                      "tur": str(e.get("tur") or "evrak")[:150],
+                      "birimEvrakNo": str(e.get("birimEvrakNo") or "")[:60],
+                      "onaylandigiTarih": str(e.get("onaylandigiTarih") or "")[:30],
+                      "_sira": len(temiz) + 1})
+    return temiz
+
+
+def baslat(dosya_id, ad, cikti=CIKTI_IKISI, kapsam=KAPSAM_TUM, evraklar=None):
     _temizle()
     dosya_id = str(dosya_id or "").strip()
     if not dosya_id or len(dosya_id) > 400 or any(c in dosya_id for c in "\r\n"):
         raise ValueError("Geçersiz dosyaId.")
     if cikti not in (CIKTI_TEK, CIKTI_IKISI) or kapsam not in (KAPSAM_TUM, KAPSAM_SECILI):
         raise ValueError("Geçersiz seçenek.")
+    secili = _secili_evraklar(evraklar) if kapsam == KAPSAM_SECILI else None
     for ind in _KAYITLAR.values():                # aynı dosya zaten indiriliyorsa onu ver
         if ind.dosya_id == dosya_id and ind.durum in _AKTIF:
             return ind
@@ -636,7 +625,7 @@ def baslat(dosya_id, ad, cikti=CIKTI_IKISI, kapsam=KAPSAM_TUM):
         ad = "UYAP Evrak " + time.strftime("%Y-%m-%d %H.%M")
     if kapsam == KAPSAM_SECILI:
         ad = _guvenli_ad(ad + " - Secili", 90)
-    ind = Indirme(dosya_id, ad, cikti, kapsam)
+    ind = Indirme(dosya_id, ad, cikti, kapsam, secili)
     _KAYITLAR[ind.id] = ind
     ind._gorev = asyncio.get_running_loop().create_task(_calistir(ind))
     return ind

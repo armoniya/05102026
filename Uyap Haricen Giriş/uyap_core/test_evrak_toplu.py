@@ -287,62 +287,29 @@ class AkisTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(ind.klasor)), sorted([ad, "Orijinal"]))
         self.assertFalse(os.path.exists(ind.klasor + ".zip"))
 
-    def test_secili_belgeler(self):
+    def test_kartta_isaretlenenler(self):
+        """Kapsam "secili": evrak listesi tarayıcıdan (kartın ağacından) gelir; ofis liste çekmez."""
         evr = {f"E{i}": ("application/pdf", _pdf(str(i))) for i in range(1, 5)}
         sahte = _SahteUyap(evr, eszamanli_bir_kez=False)
-        gorulen = []
-
-        def kullanici(ind):
-            if ind.durum == evrak_toplu.SECIM:
-                liste = ind.to_dict()["liste"]
-                gorulen.append(liste)
-                ind.secim_yap([1, 3, 99])         # E1'in eki ve E3; 99 yok sayılır
-
-        ind = self._calistir(sahte, kullanici, kapsam=evrak_toplu.KAPSAM_SECILI)
+        secilen = [{"evrakId": "E3", "tur": "Evrak E3", "birimEvrakNo": "E3"},
+                   {"evrakId": "EK1", "tur": "Evrak E1 (ek) dilekce.pdf", "birimEvrakNo": "E1-ek"},
+                   {"evrakId": "E3", "tur": "Evrak E3", "birimEvrakNo": "E3"}]        # tekrar
+        ind = self._calistir(sahte, kapsam=evrak_toplu.KAPSAM_SECILI, evraklar=secilen)
         self.assertEqual(ind.durum, evrak_toplu.BITTI, ind.mesaj)
-        self.assertEqual(len(gorulen), 1)
-        liste = gorulen[0]
-        self.assertEqual(len(liste), 5)           # 4 evrak + 1 ek
-        self.assertTrue(liste[1]["ek"])
-        # Yalnız seçilenler istendi; dosya adı tam listedeki sırayı korur.
+        yollar = [k[2] for k in sahte.kayit]
+        self.assertNotIn(evrak_toplu.EVRAK_LISTESI, yollar)          # liste çekilmedi
         istenen = [k[3]["evrakId"] for k in sahte.kayit if k[2] == evrak_toplu.EVRAK_ICERIK]
-        self.assertEqual(istenen, ["EK1", "E3"])
-        dosyalar = sorted(os.listdir(ind.klasor))
-        self.assertTrue(dosyalar[0].startswith("002 - "), dosyalar)
-        self.assertTrue(dosyalar[1].startswith("004 - "), dosyalar)
+        self.assertEqual(istenen, ["E3", "EK1"])                     # sıra korunur, tekrar atlanır
+        dosyalar = sorted(f for f in os.listdir(ind.klasor) if not f.endswith("Birlesik.pdf"))
+        self.assertTrue(dosyalar[0].startswith("001 - Evrak E3"), dosyalar)
+        self.assertTrue(dosyalar[1].startswith("002 - Evrak E1 (ek)"), dosyalar)
         self.assertIn("Secili", ind.ad)
 
-    def test_secimde_vazgec(self):
-        sahte = _SahteUyap({"E1": ("application/pdf", _pdf())}, eszamanli_bir_kez=False)
-
-        def kullanici(ind):
-            if ind.durum == evrak_toplu.SECIM:
-                ind.iptal_et()
-
-        ind = self._calistir(sahte, kullanici, kapsam=evrak_toplu.KAPSAM_SECILI)
-        self.assertEqual(ind.durum, evrak_toplu.IPTAL)
-        self.assertEqual([k for k in sahte.kayit if k[2] == evrak_toplu.EVRAK_ICERIK], [])
-
-    def test_secimde_kilit_serbest(self):
-        """Seçim beklenirken başka dosyanın indirmesi bekletilmez."""
-        uyap_proxy.gw = _SahteUyap({"E1": ("application/pdf", _pdf())}, eszamanli_bir_kez=False)
-
-        async def ana():
-            a = evrak_toplu.baslat("A", "A dosyasi", kapsam=evrak_toplu.KAPSAM_SECILI)
-            while a.durum != evrak_toplu.SECIM:
-                await asyncio.sleep(0.02)
-            b = evrak_toplu.baslat("B", "B dosyasi")
-            for _ in range(500):
-                if b.durum in (evrak_toplu.BITTI, evrak_toplu.HATA):
-                    break
-                await asyncio.sleep(0.02)
-            durum_b, durum_a = b.durum, a.durum
-            a.iptal_et()
-            await asyncio.sleep(0.05)
-            return durum_a, durum_b
-        durum_a, durum_b = asyncio.run(ana())
-        self.assertEqual(durum_a, evrak_toplu.SECIM)
-        self.assertEqual(durum_b, evrak_toplu.BITTI)
+    def test_secili_dogrulama(self):
+        for kotu in (None, [], [{"evrakId": ""}], [{"evrakId": "a\nb"}], ["x"],
+                     [{"evrakId": "E"}] * (evrak_toplu.SECILI_EN_COK + 1)):
+            with self.assertRaises(ValueError):
+                evrak_toplu.baslat("D", "x", kapsam=evrak_toplu.KAPSAM_SECILI, evraklar=kotu)
 
     def test_gecersiz_secenek(self):
         with self.assertRaises(ValueError):

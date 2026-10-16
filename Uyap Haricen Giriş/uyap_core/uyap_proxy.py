@@ -1313,12 +1313,115 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 const kart = baslik.closest('.dosya-sorgula-popup');
                 const d = kart && kartVerisi(kart);
                 if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
-                secenekAc(String(d.dosyaId), dosyaAdi(d));
+                secenekAc(kart, String(d.dosyaId), dosyaAdi(d));
             });
             yer.insertBefore(b, kartGorunumu);
         });
     }
-    setInterval(kartlariTara, 700);
+
+    // ── Kartın kendi evrak ağacında seçim ──
+    // Ağacın verisi .evrak-treeview'in React fiber'ındaki props.items'tır; her düğümün id'si
+    // ekrandaki satırın data-item-id'siyle aynı. Belge düğümlerinde UYAP'ın evrak kaydı (evrakId,
+    // tur, birimEvrakNo…) durur; "(n ek)" düğümü ana belgedir, altındakiler ekleri. Seçim kart
+    // başına evrakId ile tutulur: aynı evrak "Son 20" ve "Tüm Evrak" altında birlikte işaretlenir.
+    function agacVerisi(tv) {
+        const a = Object.keys(tv).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+        let f = a ? tv[a] : null;
+        for (let i = 0; f && i < 20; i++, f = f.return) {
+            const p = f.memoizedProps;
+            const v = p && (p.items || p.dataSource);
+            if (Array.isArray(v) && v.length && v[0] && typeof v[0].id === 'string') return v;
+        }
+        return null;
+    }
+    function dugumHaritasi(koklar) {
+        const h = {};
+        (function gez(dizi, ebeveyn) {
+            dizi.forEach(function(x) { h[x.id] = { x: x, ebeveyn: ebeveyn }; if (x.items) gez(x.items, x); });
+        })(koklar, null);
+        return h;
+    }
+    function evrakOzeti(x, ebeveyn) {
+        const e = x.evrak;
+        const ana = ebeveyn && ebeveyn.evrak;
+        if (x.isEkEvrak && ana) {
+            return { evrakId: String(e.evrakId), tur: ((ana.tur || 'evrak') + ' (ek) ' + (x.text || '')).trim(),
+                     birimEvrakNo: e.birimEvrakNo || ((ana.birimEvrakNo || '') + '-ek'), onaylandigiTarih: e.onaylandigiTarih || ana.onaylandigiTarih || '' };
+        }
+        return { evrakId: String(e.evrakId), tur: e.tur || x.text || 'evrak',
+                 birimEvrakNo: e.birimEvrakNo || '', onaylandigiTarih: e.onaylandigiTarih || '' };
+    }
+    function altEvraklar(x, ebeveyn) {           // düğüm + altındaki tüm belgeler
+        const sonuc = [];
+        (function gez(d, eb) {
+            if (d.evrak && d.evrak.evrakId) sonuc.push(evrakOzeti(d, eb));
+            (d.items || []).forEach(function(c) { gez(c, d); });
+        })(x, ebeveyn);
+        return sonuc;
+    }
+    function kartSecimi(kart) {
+        if (!kart.__tumEvrakSecim) kart.__tumEvrakSecim = new Set();
+        return kart.__tumEvrakSecim;
+    }
+    // İndirme sırası: "Tüm Evrak" ağacının sırası (Son 20 sonra; tekrarlar atlanır).
+    function secilenEvraklar(kart) {
+        const tv = kart.querySelector('.evrak-treeview');
+        const koklar = tv && agacVerisi(tv);
+        const secim = kartSecimi(kart);
+        if (!koklar || !secim.size) return [];
+        const sirali = koklar.slice().sort(function(a, b) { return (a.id === '1_1' ? 0 : 1) - (b.id === '1_1' ? 0 : 1); });
+        const sonuc = [], gorulen = new Set();
+        sirali.forEach(function(k) {
+            altEvraklar(k, null).forEach(function(e) {
+                if (secim.has(e.evrakId) && !gorulen.has(e.evrakId)) { gorulen.add(e.evrakId); sonuc.push(e); }
+            });
+        });
+        return sonuc;
+    }
+    function durdur(ev) { ev.stopPropagation(); }
+    function agaclariTara() {
+        document.querySelectorAll('.dosya-sorgula-popup .evrak-treeview').forEach(function(tv) {
+            const kart = tv.closest('.dosya-sorgula-popup');
+            const koklar = agacVerisi(tv);
+            if (!kart || !koklar) return;
+            const harita = dugumHaritasi(koklar);
+            const secim = kartSecimi(kart);
+            tv.querySelectorAll('.dx-treeview-node').forEach(function(node) {
+                const d = harita[node.getAttribute('data-item-id')];
+                const satir = node.querySelector(':scope > .dx-treeview-item');
+                if (!d || !satir) return;
+                let c = satir.querySelector(':scope > input[data-tumevrak-sec]');
+                if (!c) {
+                    c = document.createElement('input');
+                    c.type = 'checkbox';
+                    c.setAttribute('data-tumevrak-sec', '1');
+                    c.title = 'İndirmek için işaretle';
+                    c.style.cssText = 'margin:0 6px 0 0;vertical-align:middle;cursor:pointer;accent-color:#059669;';
+                    // UYAP satıra tıklanınca belgeyi açar / klasörü açıp kapatır: kutu tıklaması oraya gitmez.
+                    ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'touchstart', 'touchend', 'keydown']
+                        .forEach(function(t) { c.addEventListener(t, durdur); });
+                    c.addEventListener('change', function() {
+                        const g = harita2(tv)[c.getAttribute('data-dugum')];
+                        if (!g) return;
+                        altEvraklar(g.x, g.ebeveyn).forEach(function(e) {
+                            if (c.checked) secim.add(e.evrakId); else secim.delete(e.evrakId);
+                        });
+                        agaclariTara();
+                        formSayisiniTazele(kart);
+                    });
+                    satir.insertBefore(c, satir.firstChild);
+                }
+                c.setAttribute('data-dugum', d.x.id);
+                const evr = altEvraklar(d.x, d.ebeveyn);
+                const n = evr.filter(function(e) { return secim.has(e.evrakId); }).length;
+                c.disabled = !evr.length;
+                c.checked = evr.length > 0 && n === evr.length;
+                c.indeterminate = n > 0 && n < evr.length;
+            });
+        });
+    }
+    function harita2(tv) { const k = agacVerisi(tv); return k ? dugumHaritasi(k) : {}; }
+    setInterval(function() { kartlariTara(); agaclariTara(); }, 700);
 
     // ── Sunucu ──
     async function api(yol, opts) {
@@ -1332,10 +1435,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return api(yol, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(govde || {}) });
     }
-    async function baslat(dosyaId, ad, cikti, kapsam) {
+    async function baslat(dosyaId, ad, cikti, kapsam, evraklar) {
         panelAc();
         try {
-            const j = await post('', { dosyaId: dosyaId, ad: ad, cikti: cikti, kapsam: kapsam });
+            const j = await post('', { dosyaId: dosyaId, ad: ad, cikti: cikti, kapsam: kapsam,
+                                       evraklar: kapsam === 'secili' ? evraklar : undefined });
             const v = j.indirme;
             isler[v.id] = isler[v.id] || { ad: ad || 'UYAP dosyası', zipIndirildi: false };
             isler[v.id].veri = v;
@@ -1428,7 +1532,17 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const r = form.querySelector('input[name="uyapTumEvrak_' + ad + '"]:checked');
         return r ? r.value : null;
     }
-    function secenekAc(dosyaId, ad) {
+    let formKarti = null, kapsamEtiketi = null, kapsamRadyo = null;
+    function formSayisiniTazele(kart) {
+        if (!kapsamEtiketi || kart !== formKarti) return;
+        const n = kartSecimi(kart).size;
+        kapsamEtiketi.textContent = 'Kartta işaretlediğim belgeler (' + n + ')' +
+            (n ? '' : ' — Evrak sekmesindeki kutuları işaretleyin');
+        kapsamRadyo.disabled = !n;
+        if (n && !kapsamRadyo.checked && kapsamRadyo.__otomatik !== false) kapsamRadyo.checked = true;
+        if (!n && kapsamRadyo.checked) form.querySelector('input[name="uyapTumEvrak_kapsam"][value="tum"]').checked = true;
+    }
+    function secenekAc(kart, dosyaId, ad) {
         panelAc();
         form.innerHTML = '';
         const kutu = el('div', 'margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
@@ -1437,63 +1551,31 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             ['tek', 'Tek PDF'],
             ['ikisi', 'Tek PDF + ayrı ayrı PDF\'ler (ZIP)'],
         ], tercih('cikti', 'tek')));
-        kutu.appendChild(radyoGrubu('Belgeler', 'kapsam', [
+        const kapsamKutusu = radyoGrubu('Belgeler', 'kapsam', [
             ['tum', 'Tüm belgeler'],
-            ['secili', 'Seçtiğim belgeler (liste gelince işaretlersiniz)'],
-        ], tercih('kapsam', 'tum')));
+            ['secili', ''],
+        ], kartSecimi(kart).size ? 'secili' : 'tum');
+        kutu.appendChild(kapsamKutusu);
+        kapsamRadyo = kapsamKutusu.querySelector('input[value="secili"]');
+        kapsamEtiketi = kapsamRadyo.parentElement.lastChild;
+        kapsamKutusu.querySelector('input[value="tum"]').addEventListener('change', function() { kapsamRadyo.__otomatik = false; });
+        formKarti = kart;
+        formSayisiniTazele(kart);
         kutu.appendChild(dugme('İndir', '#059669', function() {
             const cikti = secilenDeger('cikti'), kapsam = secilenDeger('kapsam');
-            tercihYaz('cikti', cikti); tercihYaz('kapsam', kapsam);
-            form.innerHTML = '';
-            baslat(dosyaId, ad, cikti, kapsam);
+            const evraklar = kapsam === 'secili' ? secilenEvraklar(kart) : null;
+            if (kapsam === 'secili' && !evraklar.length) { panelMesaj('İşaretli belge yok.'); return; }
+            tercihYaz('cikti', cikti);
+            form.innerHTML = ''; formKarti = null;
+            baslat(dosyaId, ad, cikti, kapsam, evraklar);
         }));
         kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', function() {
-            form.innerHTML = '';
+            form.innerHTML = ''; formKarti = null;
             if (!Object.keys(isler).length) panel.style.display = 'none';
         }));
         form.appendChild(kutu);
     }
 
-    // ── Belge seçimi (kapsam "secili"): onay kutulu liste ──
-    function secimListesi(id, kutu, liste) {
-        kutu.innerHTML = '';
-        const ust = el('div', 'margin-top:6px;display:flex;gap:10px;align-items:center;');
-        const sayac = el('span', 'color:#cbd5e1;');
-        const tumu = el('a', 'color:#93c5fd;cursor:pointer;', 'Tümünü seç');
-        const hicbiri = el('a', 'color:#93c5fd;cursor:pointer;', 'Hiçbiri');
-        ust.appendChild(tumu); ust.appendChild(hicbiri); ust.appendChild(sayac);
-        kutu.appendChild(ust);
-        const liste_ = el('div', 'margin-top:6px;max-height:40vh;overflow:auto;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 6px;');
-        const kutular = [];
-        const say = function() {
-            sayac.textContent = kutular.filter(function(k) { return k.checked; }).length + '/' + kutular.length + ' seçili';
-        };
-        liste.forEach(function(e, i) {
-            const etiket = el('label', 'display:flex;gap:6px;align-items:flex-start;padding:3px 0;cursor:pointer;' + (e.ek ? 'padding-left:16px;' : ''));
-            const c = document.createElement('input');
-            c.type = 'checkbox'; c.value = String(i); c.style.marginTop = '2px';
-            c.addEventListener('change', say);
-            kutular.push(c);
-            const metin = el('span', '');
-            metin.appendChild(el('span', '', e.tur));
-            const alt = [e.tarih, e.no].filter(Boolean).join(' · ');
-            if (alt) metin.appendChild(el('span', 'display:block;color:#9ca3af;font-size:11px;', alt));
-            etiket.appendChild(c); etiket.appendChild(metin);
-            liste_.appendChild(etiket);
-        });
-        tumu.addEventListener('click', function() { kutular.forEach(function(k) { k.checked = true; }); say(); });
-        hicbiri.addEventListener('click', function() { kutular.forEach(function(k) { k.checked = false; }); say(); });
-        kutu.appendChild(liste_);
-        say();
-        return function() {
-            return kutular.filter(function(k) { return k.checked; }).map(function(k) { return parseInt(k.value, 10); });
-        };
-    }
-    async function secimGonder(id, secilen) {
-        try { isler[id].veri = (await post('/' + id + '/secim', { secilen: secilen })).indirme; } catch (e) {}
-        render();
-        izle(id);
-    }
     function panelAc() { panelKur(); if (panel) { panel.style.display = 'block'; mesajEl.textContent = ''; } }
     function panelMesaj(m) { panelAc(); if (mesajEl) mesajEl.textContent = m; }
 
@@ -1516,7 +1598,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 govde.insertBefore(s.kok, govde.firstChild);
             }
             const d = v.durum;
-            if (d === 'captcha' || d === 'secim') panel.style.display = 'block';   // kullanıcıdan saklanmaz
+            if (d === 'captcha') panel.style.display = 'block';    // doğrulama kullanıcıdan saklanmaz
             s.durum.textContent = v.mesaj || '';
             s.durum.style.color = d === 'hata' ? '#fca5a5' : d === 'captcha' ? '#fcd34d' : d === 'bitti' ? '#6ee7b7' : '#e5e7eb';
             s.cubuk.style.display = (d === 'calisiyor' || d === 'captcha') && v.toplam ? 'block' : 'none';
@@ -1526,17 +1608,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (anahtar === s.anahtar) return;
             s.anahtar = anahtar;
             s.eylem.innerHTML = '';
-            if (d !== 'captcha' && d !== 'secim') s.captcha.innerHTML = '';
-            if (d === 'secim' && v.liste) {
-                const secilenler = secimListesi(id, s.captcha, v.liste);
-                s.eylem.appendChild(dugme('Seçilenleri indir', '#059669', function() {
-                    const sec = secilenler();
-                    if (!sec.length) { s.durum.textContent = 'En az bir belge seçin.'; return; }
-                    s.captcha.innerHTML = '';
-                    secimGonder(id, sec);
-                }));
-                s.eylem.appendChild(dugme('Vazgeç', '#b91c1c', function() { iptal(id); }));
-            } else if (d === 'calisiyor' || d === 'sirada') {
+            if (d !== 'captcha') s.captcha.innerHTML = '';
+            if (d === 'calisiyor' || d === 'sirada') {
                 s.eylem.appendChild(dugme('Durdur', '#b91c1c', function() { iptal(id); }));
             } else if (d === 'captcha') {
                 captchaGoster(id, s.captcha);
