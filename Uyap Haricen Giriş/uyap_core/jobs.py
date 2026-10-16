@@ -53,6 +53,9 @@ JOBS_PREFIX = AGENT_PREFIX + "/jobs"
 # UDF e-imza köprüsü: istemci ham `.udf` POST eder, ofis kartla imzalayıp imzalı `.udf`
 # (binary) döndürür. JSON iş kuyruğundan ayrı, ikili gövdeli tek-atımlık bir uçtur.
 SIGN_UDF_PATH = AGENT_PREFIX + "/sign_udf"
+# "Tüm Evrakı İndir" (evrak_toplu.py): açık dosyanın tüm evrakı PDF + ZIP. Salt okuma,
+# kendi hız/eşzamanlılık/captcha kurallarıyla; toplu iş kapalıyken (light) de çalışır.
+TUM_EVRAK_PREFIX = AGENT_PREFIX + "/tum_evrak"
 # Light (yalnız UYAP paylaşımı, uyap_app.py) toplu işi kapatır: UYAP_TOPLU_IS=0 → iş kuyruğu
 # uçları 404, işleyiciler (job_handlers) hiç yüklenmez ve pakete girmez. Bağlanan her üye
 # ofisin e-imzalı oturumuyla toplu UYAP yazma işi başlatamasın diye. UDF köprüsü etkilenmez.
@@ -349,7 +352,73 @@ def is_control_path(path):
     """Verilen HTTP yolu ofis kontrol düzlemine mi ait? (UYAP'a İLETİLMEZ.)"""
     p = (path or "").lstrip("/")
     return (p == JOBS_PREFIX or p.startswith(JOBS_PREFIX + "/")
-            or p == SIGN_UDF_PATH)
+            or p == SIGN_UDF_PATH
+            or p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"))
+
+
+async def _handle_tum_evrak(method, p, body):
+    """POST   /__uyap_agent__/tum_evrak               {"dosyaId", "ad", "cikti": "tek"|"ikisi",
+                                                       "kapsam": "tum"|"secili"} → 201 {indirme}
+       GET    /__uyap_agent__/tum_evrak/<id>          → {indirme}  (ilerleme/seçim/captcha durumu)
+       POST   /__uyap_agent__/tum_evrak/<id>/secim    {"secilen": [liste sırası, …]} → devam
+       POST   /__uyap_agent__/tum_evrak/<id>/captcha  {"token"|null} → doğrulama sonrası devam
+       POST   /__uyap_agent__/tum_evrak/<id>/iptal    → {indirme}
+       GET    /__uyap_agent__/tum_evrak/<id>/dosya    → application/pdf (tek) | application/zip"""
+    from . import evrak_toplu
+    parts = p[len(TUM_EVRAK_PREFIX):].strip("/").split("/") if p != TUM_EVRAK_PREFIX else []
+    try:
+        if not parts:
+            if method != "POST":
+                return _resp(405, {"error": "Yöntem desteklenmiyor."})
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                return _resp(400, {"error": "Geçersiz JSON gövdesi."})
+            try:
+                ind = evrak_toplu.baslat(payload.get("dosyaId"), payload.get("ad"),
+                                         payload.get("cikti") or evrak_toplu.CIKTI_IKISI,
+                                         payload.get("kapsam") or evrak_toplu.KAPSAM_TUM)
+            except ValueError as e:
+                return _resp(400, {"error": str(e)})
+            return _resp(201, {"indirme": ind.to_dict()})
+
+        ind = evrak_toplu.getir(parts[0])
+        if ind is None:
+            return _resp(404, {"error": "İndirme bulunamadı (süresi dolmuş olabilir)."})
+        eylem = parts[1] if len(parts) > 1 else None
+        if eylem is None and method == "GET":
+            return _resp(200, {"indirme": ind.to_dict()})
+        if eylem == "iptal" and method == "POST":
+            ind.iptal_et()
+            return _resp(200, {"indirme": ind.to_dict()})
+        if eylem == "captcha" and method == "POST":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                payload = {}
+            jeton = payload.get("token") if isinstance(payload, dict) else None
+            ind.captcha_cevapla(jeton if isinstance(jeton, str) and len(jeton) < 8192 else None)
+            return _resp(200, {"indirme": ind.to_dict()})
+        if eylem == "secim" and method == "POST":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                return _resp(400, {"error": "Geçersiz JSON gövdesi."})
+            secilen = payload.get("secilen") if isinstance(payload, dict) else None
+            ind.secim_yap(secilen if isinstance(secilen, list) else [])
+            return _resp(200, {"indirme": ind.to_dict()})
+        if eylem in ("dosya", "zip") and method == "GET":
+            if not ind.to_dict()["dosya_hazir"]:
+                return _resp(409, {"error": "Dosya henüz hazır değil."})
+            veri, ad, tur = await asyncio.to_thread(evrak_toplu.dosya_oku, ind)
+            return 200, {
+                "Content-Type": tur,
+                "Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(ad),
+                "Cache-Control": "no-store",
+            }, veri
+        return _resp(405, {"error": "Yöntem/eylem desteklenmiyor."})
+    except Exception as e:
+        return _resp(500, {"error": f"{type(e).__name__}: {e}"})
 
 
 async def _handle_sign_udf(method, query, body):
@@ -400,6 +469,8 @@ async def handle_control(method, path, query, body):
     # UDF e-imza köprüsü iş kuyruğundan ayrı (ikili gövde): en başta ele al.
     if p == SIGN_UDF_PATH:
         return await _handle_sign_udf(method, query, body)
+    if p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"):
+        return await _handle_tum_evrak(method, p, body)
 
     if not TOPLU_IS_ACIK:
         return _resp(404, {"error": "Bu sürümde toplu iş kapalı."})

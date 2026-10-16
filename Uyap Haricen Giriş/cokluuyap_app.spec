@@ -27,6 +27,8 @@ a = Analysis(
         + ["requests", "urllib3"]
         # Sıra kapısı arayüzü/eşleştirme: uyap_app içinde yöntem içinden içe aktarılır.
         + ["sira_kapisi_arayuz", "uyap_core.sira_eslestirme", "uyap_core.sira_kapisi"]
+        # Tüm Evrakı İndir: jobs içinden tembel içe aktarılır; dönüştürme PyMuPDF ile.
+        + ["uyap_core.evrak_toplu", "uyap_core.udf_pdf", "fitz", "pymupdf", "pypdf"]
     ),
     hookspath=[],
     hooksconfig={},
@@ -34,8 +36,9 @@ a = Analysis(
     # Çekirdek paylaşım için gereksiz ağır bağımlılıklar dışlanır (mts modülleri salt
     # stdlib kullanır, doğrulandı). Paket ~140 MB açık / ~60 MB sıkışık kalır;
     # gömülü PostgreSQL / İcra araçları BU PAKETE ASLA GİRMEZ (2 GB şişme yasağı).
+    # PyMuPDF (fitz) "Tüm Evrakı İndir" dönüştürmesi için pakette (~+25 MB).
     excludes=["playwright", "matplotlib", "PIL", "numpy", "pandas",
-              "django", "fitz", "pymupdf", "openpyxl", "lxml",
+              "django", "openpyxl", "lxml",
               # Toplu iş işleyicileri light'ta kapalı (uyap_app → UYAP_TOPLU_IS=0); pakete girmez.
               "uyap_core.job_handlers", "uyap_core.mts", "uyap_core.teblig_212",
               "uyap_core.ipotek", "uyap_core.xml_takip", "uyap_core.esas_no",

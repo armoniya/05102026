@@ -725,7 +725,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 if (cached) {
                     isFake = true;
                     fakeResponse = cached;
-                    
+
                     setTimeout(() => {
                         triggerFakeEvents();
                     }, 1);
@@ -764,7 +764,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                     });
                 }
             }
-            
+
             return xhr.send.apply(xhr, arguments);
         };
         
@@ -1258,6 +1258,348 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (ci) afterIlChange();
         }
     }, 400);
+})();
+
+// ── TÜM EVRAKI İNDİR ─────────────────────────────────────────────────────────────────
+// Her dosya kartının (.dosya-sorgula-popup) başlığına UYAP'ın kendi düğme stiliyle "Tüm
+// Evrakı İndir" eklenir. Tıklanınca dosya bilgisi O KARTIN React verisinden (props.data:
+// dosyaId, birimAdi, dosyaNo…) okunur — tahmin yok. Ofis tüm evrakı sabit hızla, tek tek
+// indirip PDF'e çevirir (bkz. uyap_core/evrak_toplu.py), ofiste klasöre kaydeder, PDF/ZIP'i
+// buraya indirir. İlerleme sağ üstteki panelde (kart kapansa da) görünür. UYAP güvenlik
+// doğrulaması isterse panel açılır ve doğrulamayı KULLANICI çözer — otomatik çözüm yok.
+(function() {
+    const EP = '/__uyap_agent__/tum_evrak';
+    const BITMIS = ['bitti', 'hata', 'iptal'];
+    const isler = {};          // indirme id -> {veri: sunucu durumu, ad, zipIndirildi}
+    let tsYukleniyor = null;
+
+    // ── Kart verisi: kart başlığındaki UYAP düğmesinin React fiber'ından yukarı yürü ──
+    function kartVerisi(kart) {
+        const kaynaklar = kart.querySelectorAll('.dx-popup-title [role=button], .dx-popup-title div');
+        for (const k of kaynaklar) {
+            const anahtar = Object.keys(k).find(function(a) { return a.indexOf('__reactFiber') === 0; });
+            let f = anahtar ? k[anahtar] : null;
+            for (let i = 0; f && i < 80; i++, f = f.return) {
+                const p = f.memoizedProps;
+                const d = p && p.data;
+                if (d && typeof d === 'object' && d.dosyaId) return d;
+            }
+        }
+        return null;
+    }
+    function dosyaAdi(d) {
+        return [d.birimAdi, d.dosyaNo, d.dosyaTurKodAciklama].filter(Boolean).join(' ')
+            .replace(/\s+/g, ' ').trim();
+    }
+
+    // ── Kartlara düğme ekle (React kartı yeniden çizerse düğme de yeniden eklenir) ──
+    function kartlariTara() {
+        document.querySelectorAll('.dosya-sorgula-popup .dx-popup-title').forEach(function(baslik) {
+            if (baslik.querySelector('[data-tumevrak]')) return;
+            const kartGorunumu = Array.from(baslik.querySelectorAll('[role=button]'))
+                .find(function(b) { return /Kart Görünümü/.test(b.textContent); });
+            const yer = kartGorunumu ? kartGorunumu.parentElement : null;
+            if (!yer) return;
+            const b = document.createElement('div');
+            b.setAttribute('data-tumevrak', '1');
+            b.setAttribute('role', 'button');
+            b.setAttribute('tabindex', '0');
+            b.title = 'Bu dosyadaki tüm evrakı PDF olarak indir';
+            b.className = 'dx-widget dx-button dx-button-mode-outlined dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
+            b.style.marginRight = '6px';
+            b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe icon-download"></span> Tüm Evrakı İndir</div>';
+            b.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                const kart = baslik.closest('.dosya-sorgula-popup');
+                const d = kart && kartVerisi(kart);
+                if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
+                secenekAc(String(d.dosyaId), dosyaAdi(d));
+            });
+            yer.insertBefore(b, kartGorunumu);
+        });
+    }
+    setInterval(kartlariTara, 700);
+
+    // ── Sunucu ──
+    async function api(yol, opts) {
+        const r = await window.fetch(EP + yol, Object.assign({ cache: 'no-store' }, opts || {}));
+        let j = null;
+        try { j = await r.json(); } catch (e) {}
+        if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+        return j;
+    }
+    function post(yol, govde) {
+        return api(yol, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(govde || {}) });
+    }
+    async function baslat(dosyaId, ad, cikti, kapsam) {
+        panelAc();
+        try {
+            const j = await post('', { dosyaId: dosyaId, ad: ad, cikti: cikti, kapsam: kapsam });
+            const v = j.indirme;
+            isler[v.id] = isler[v.id] || { ad: ad || 'UYAP dosyası', zipIndirildi: false };
+            isler[v.id].veri = v;
+            render();
+            izle(v.id);
+        } catch (e) { panelMesaj('Başlatılamadı: ' + e.message); }
+    }
+    const izlenen = {};
+    async function izle(id) {
+        if (izlenen[id]) return;
+        izlenen[id] = true;
+        try {
+            while (isler[id] && BITMIS.indexOf(isler[id].veri.durum) === -1) {
+                await new Promise(function(r) { setTimeout(r, 1500); });
+                if (!isler[id]) break;
+                try { isler[id].veri = (await api('/' + id)).indirme; } catch (e) { continue; }
+                render();
+            }
+            const is = isler[id];
+            if (is && is.veri.dosya_hazir && !is.zipIndirildi) dosyaIndir(id);
+        } finally { delete izlenen[id]; }
+    }
+    function dosyaIndir(id) {
+        if (!isler[id]) return;
+        isler[id].zipIndirildi = true;
+        const a = document.createElement('a');
+        a.href = EP + '/' + id + '/dosya';
+        a.download = '';
+        a.setAttribute('data-uyap-internal', '1');   // E-İmza indirme yakalayıcısının dışında
+        document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    // ── Panel (sağ üst; E-İmza sağ altta — çakışmaz) ──
+    function el(tag, css, metin) {
+        const e = document.createElement(tag);
+        if (css) e.style.cssText = css;
+        if (metin != null) e.textContent = metin;
+        return e;
+    }
+    function dugme(metin, renk, fn) {
+        const b = el('button', 'margin:6px 6px 0 0;padding:5px 10px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:#fff;background:' + renk + ';', metin);
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(); });
+        return b;
+    }
+    let panel, govde, mesajEl, form;
+    function panelKur() {
+        if (panel || !document.body) return;
+        panel = el('div', 'position:fixed;top:72px;right:24px;z-index:2147483646;width:320px;max-height:70vh;overflow:auto;padding:12px;border-radius:12px;background:rgba(18,18,24,0.95);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
+        panel.id = 'uyap-tumevrak-panel';
+        // UYAP'ın label/span/a renk kuralları paneldeki yazıyı koyu yapıyordu (koyu zeminde
+        // okunmuyordu): panel içinde renk panelden miras alınır; satır içi renkler yine geçerli.
+        const stil = document.createElement('style');
+        stil.textContent =
+            '#uyap-tumevrak-panel{color:#f3f4f6!important}' +
+            '#uyap-tumevrak-panel div,#uyap-tumevrak-panel span,#uyap-tumevrak-panel label,' +
+            '#uyap-tumevrak-panel a,#uyap-tumevrak-panel p{color:inherit;font-family:inherit;font-size:inherit;margin-bottom:0}' +
+            '#uyap-tumevrak-panel input{accent-color:#10b981;margin:0}';
+        document.head.appendChild(stil);
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;');
+        ust.appendChild(el('div', 'font-size:13px;font-weight:700;', 'Tüm Evrakı İndir'));
+        const kapat = el('span', 'font-size:16px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        kapat.title = 'Gizle (indirme sürer)';
+        kapat.addEventListener('click', function() { panel.style.display = 'none'; });
+        ust.appendChild(kapat);
+        mesajEl = el('div', 'margin-top:6px;color:#fca5a5;');
+        form = el('div', '');
+        govde = el('div', '');
+        panel.appendChild(ust); panel.appendChild(mesajEl); panel.appendChild(form); panel.appendChild(govde);
+        document.body.appendChild(panel);
+    }
+
+    // ── Seçenek formu: Çıktı (tek PDF | tek PDF + parçalar) × Kapsam (tüm | seçtiğim) ──
+    function tercih(ad, varsayilan) {
+        try { return localStorage.getItem('uyapTumEvrak.' + ad) || varsayilan; } catch (e) { return varsayilan; }
+    }
+    function tercihYaz(ad, deger) { try { localStorage.setItem('uyapTumEvrak.' + ad, deger); } catch (e) {} }
+    function radyoGrubu(baslik, ad, secenekler, secili) {
+        const kutu = el('div', 'margin-top:8px;');
+        kutu.appendChild(el('div', 'font-weight:600;color:#cbd5e1;margin-bottom:2px;', baslik));
+        secenekler.forEach(function(s) {
+            const etiket = el('label', 'display:flex;align-items:center;gap:6px;margin-top:3px;cursor:pointer;');
+            const r = document.createElement('input');
+            r.type = 'radio'; r.name = 'uyapTumEvrak_' + ad; r.value = s[0]; r.checked = s[0] === secili;
+            etiket.appendChild(r); etiket.appendChild(document.createTextNode(s[1]));
+            kutu.appendChild(etiket);
+        });
+        return kutu;
+    }
+    function secilenDeger(ad) {
+        const r = form.querySelector('input[name="uyapTumEvrak_' + ad + '"]:checked');
+        return r ? r.value : null;
+    }
+    function secenekAc(dosyaId, ad) {
+        panelAc();
+        form.innerHTML = '';
+        const kutu = el('div', 'margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
+        kutu.appendChild(el('div', 'font-weight:600;word-break:break-word;', ad || 'UYAP dosyası'));
+        kutu.appendChild(radyoGrubu('Çıktı', 'cikti', [
+            ['tek', 'Tek PDF'],
+            ['ikisi', 'Tek PDF + ayrı ayrı PDF\'ler (ZIP)'],
+        ], tercih('cikti', 'tek')));
+        kutu.appendChild(radyoGrubu('Belgeler', 'kapsam', [
+            ['tum', 'Tüm belgeler'],
+            ['secili', 'Seçtiğim belgeler (liste gelince işaretlersiniz)'],
+        ], tercih('kapsam', 'tum')));
+        kutu.appendChild(dugme('İndir', '#059669', function() {
+            const cikti = secilenDeger('cikti'), kapsam = secilenDeger('kapsam');
+            tercihYaz('cikti', cikti); tercihYaz('kapsam', kapsam);
+            form.innerHTML = '';
+            baslat(dosyaId, ad, cikti, kapsam);
+        }));
+        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', function() {
+            form.innerHTML = '';
+            if (!Object.keys(isler).length) panel.style.display = 'none';
+        }));
+        form.appendChild(kutu);
+    }
+
+    // ── Belge seçimi (kapsam "secili"): onay kutulu liste ──
+    function secimListesi(id, kutu, liste) {
+        kutu.innerHTML = '';
+        const ust = el('div', 'margin-top:6px;display:flex;gap:10px;align-items:center;');
+        const sayac = el('span', 'color:#cbd5e1;');
+        const tumu = el('a', 'color:#93c5fd;cursor:pointer;', 'Tümünü seç');
+        const hicbiri = el('a', 'color:#93c5fd;cursor:pointer;', 'Hiçbiri');
+        ust.appendChild(tumu); ust.appendChild(hicbiri); ust.appendChild(sayac);
+        kutu.appendChild(ust);
+        const liste_ = el('div', 'margin-top:6px;max-height:40vh;overflow:auto;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 6px;');
+        const kutular = [];
+        const say = function() {
+            sayac.textContent = kutular.filter(function(k) { return k.checked; }).length + '/' + kutular.length + ' seçili';
+        };
+        liste.forEach(function(e, i) {
+            const etiket = el('label', 'display:flex;gap:6px;align-items:flex-start;padding:3px 0;cursor:pointer;' + (e.ek ? 'padding-left:16px;' : ''));
+            const c = document.createElement('input');
+            c.type = 'checkbox'; c.value = String(i); c.style.marginTop = '2px';
+            c.addEventListener('change', say);
+            kutular.push(c);
+            const metin = el('span', '');
+            metin.appendChild(el('span', '', e.tur));
+            const alt = [e.tarih, e.no].filter(Boolean).join(' · ');
+            if (alt) metin.appendChild(el('span', 'display:block;color:#9ca3af;font-size:11px;', alt));
+            etiket.appendChild(c); etiket.appendChild(metin);
+            liste_.appendChild(etiket);
+        });
+        tumu.addEventListener('click', function() { kutular.forEach(function(k) { k.checked = true; }); say(); });
+        hicbiri.addEventListener('click', function() { kutular.forEach(function(k) { k.checked = false; }); say(); });
+        kutu.appendChild(liste_);
+        say();
+        return function() {
+            return kutular.filter(function(k) { return k.checked; }).map(function(k) { return parseInt(k.value, 10); });
+        };
+    }
+    async function secimGonder(id, secilen) {
+        try { isler[id].veri = (await post('/' + id + '/secim', { secilen: secilen })).indirme; } catch (e) {}
+        render();
+        izle(id);
+    }
+    function panelAc() { panelKur(); if (panel) { panel.style.display = 'block'; mesajEl.textContent = ''; } }
+    function panelMesaj(m) { panelAc(); if (mesajEl) mesajEl.textContent = m; }
+
+    const satirlar = {};   // id -> {kok, durum, cubukIc, eylem, captcha, anahtar}
+    function render() {
+        panelKur();
+        if (!panel) return;
+        Object.keys(isler).forEach(function(id) {
+            const is = isler[id], v = is.veri;
+            let s = satirlar[id];
+            if (!s) {
+                s = satirlar[id] = { kok: el('div', 'margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.1);') };
+                s.kok.appendChild(el('div', 'font-weight:600;word-break:break-word;', is.ad));
+                s.durum = el('div', 'margin-top:4px;'); s.kok.appendChild(s.durum);
+                const cubuk = el('div', 'margin-top:6px;height:6px;border-radius:3px;background:rgba(255,255,255,0.12);overflow:hidden;');
+                s.cubukIc = el('div', 'height:100%;width:0;background:#10b981;transition:width .3s;');
+                cubuk.appendChild(s.cubukIc); s.kok.appendChild(cubuk); s.cubuk = cubuk;
+                s.captcha = el('div', ''); s.kok.appendChild(s.captcha);
+                s.eylem = el('div', ''); s.kok.appendChild(s.eylem);
+                govde.insertBefore(s.kok, govde.firstChild);
+            }
+            const d = v.durum;
+            if (d === 'captcha' || d === 'secim') panel.style.display = 'block';   // kullanıcıdan saklanmaz
+            s.durum.textContent = v.mesaj || '';
+            s.durum.style.color = d === 'hata' ? '#fca5a5' : d === 'captcha' ? '#fcd34d' : d === 'bitti' ? '#6ee7b7' : '#e5e7eb';
+            s.cubuk.style.display = (d === 'calisiyor' || d === 'captcha') && v.toplam ? 'block' : 'none';
+            s.cubukIc.style.width = (v.toplam ? Math.round(100 * v.i / v.toplam) : 0) + '%';
+
+            const anahtar = d + '|' + (v.dosya_hazir ? 1 : 0) + '|' + (v.captcha ? v.captcha.n : '');
+            if (anahtar === s.anahtar) return;
+            s.anahtar = anahtar;
+            s.eylem.innerHTML = '';
+            if (d !== 'captcha' && d !== 'secim') s.captcha.innerHTML = '';
+            if (d === 'secim' && v.liste) {
+                const secilenler = secimListesi(id, s.captcha, v.liste);
+                s.eylem.appendChild(dugme('Seçilenleri indir', '#059669', function() {
+                    const sec = secilenler();
+                    if (!sec.length) { s.durum.textContent = 'En az bir belge seçin.'; return; }
+                    s.captcha.innerHTML = '';
+                    secimGonder(id, sec);
+                }));
+                s.eylem.appendChild(dugme('Vazgeç', '#b91c1c', function() { iptal(id); }));
+            } else if (d === 'calisiyor' || d === 'sirada') {
+                s.eylem.appendChild(dugme('Durdur', '#b91c1c', function() { iptal(id); }));
+            } else if (d === 'captcha') {
+                captchaGoster(id, s.captcha);
+                s.eylem.appendChild(dugme('Tekrar dene', 'rgba(255,255,255,0.15)', function() { captchaCevap(id, null); }));
+                s.eylem.appendChild(dugme('Durdur', '#b91c1c', function() { iptal(id); }));
+            } else {
+                if (v.uyarilar && v.uyarilar.length) {
+                    s.eylem.appendChild(el('div', 'margin-top:6px;color:#fcd34d;max-height:80px;overflow:auto;',
+                        v.uyarilar.length + ' uyarı: ' + v.uyarilar.join(' • ')));
+                }
+                if (v.dosya_hazir) s.eylem.appendChild(dugme(v.cikti === 'tek' ? 'PDF\'i indir' : 'ZIP\'i indir',
+                    '#059669', function() { dosyaIndir(id); }));
+                s.eylem.appendChild(dugme('Listeden kaldır', 'rgba(255,255,255,0.15)', function() {
+                    s.kok.remove(); delete satirlar[id]; delete isler[id];
+                    if (!Object.keys(isler).length) panel.style.display = 'none';
+                }));
+            }
+        });
+    }
+    async function iptal(id) {
+        try { isler[id].veri = (await post('/' + id + '/iptal')).indirme; } catch (e) {}
+        render();
+    }
+
+    // ── Güvenlik doğrulaması (UYAP'ın kendi Turnstile site anahtarıyla, kullanıcı çözer) ──
+    function tsYukle() {
+        if (window.turnstile) return Promise.resolve(window.turnstile);
+        if (tsYukleniyor) return tsYukleniyor;
+        tsYukleniyor = new Promise(function(res, rej) {
+            const sc = document.createElement('script');
+            sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+            sc.async = true;
+            sc.onload = function() { res(window.turnstile); };
+            sc.onerror = function() { tsYukleniyor = null; rej(new Error('doğrulama betiği yüklenemedi')); };
+            document.head.appendChild(sc);
+        });
+        return tsYukleniyor;
+    }
+    async function captchaGoster(id, kutu) {
+        kutu.innerHTML = '';
+        const c = isler[id] && isler[id].veri.captcha;
+        if (!c) return;
+        kutu.appendChild(el('div', 'margin-top:6px;color:#fcd34d;', c.mesaj || 'UYAP güvenlik doğrulaması istiyor.'));
+        const yer = el('div', 'margin-top:6px;min-height:65px;');
+        kutu.appendChild(yer);
+        const hata = function(m) {
+            kutu.appendChild(el('div', 'margin-top:6px;color:#fca5a5;', m +
+                ' Birkaç dakika bekleyip "Tekrar dene"ye basabilir ya da indirmeyi durdurabilirsiniz.'));
+        };
+        try {
+            const ts = await tsYukle();
+            ts.render(yer, {
+                sitekey: c.site_key,
+                callback: function(jeton) { captchaCevap(id, jeton); },
+                'error-callback': function(kod) { hata('Doğrulama bu adreste açılamadı (kod: ' + kod + ').'); return true; },
+            });
+        } catch (e) { hata('Doğrulama gösterilemedi (' + e.message + ').'); }
+    }
+    async function captchaCevap(id, jeton) {
+        try { isler[id].veri = (await post('/' + id + '/captcha', { token: jeton })).indirme; } catch (e) {}
+        render();
+        izle(id);
+    }
 })();
 </script>"""
         if "<head>" in text:
