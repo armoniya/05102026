@@ -1467,7 +1467,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     }
     function harita2(tv) { const k = agacVerisi(tv); return k ? dugumHaritasi(k) : {}; }
     // İş Listesi bloğu belgeye iş bağlamak / işli belgeyi işaretlemek için aynı ağaç verisini kullanır.
-    window.__uyapEvrakAgaci = { veri: agacVerisi, harita: dugumHaritasi, ozet: evrakOzeti, durdur: durdur };
+    window.__uyapEvrakAgaci = { veri: agacVerisi, harita: dugumHaritasi, ozet: evrakOzeti, alt: altEvraklar, durdur: durdur };
     setInterval(function() { kartlariTara(); agaclariTara(); }, 700);
 
     // ── Sunucu ──
@@ -1587,14 +1587,17 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const n = kartSecimi(kart).size;
         kapsamEl.textContent = n ? (n + ' işaretli belge') : 'İşaretli belge kalmadı.';
     }
-    function secenekAc(kart, dosyaId, ad, kapsam) {
+    // hazir: indirilecek belgeler önceden belli (sağ tık → "Bu belgeyi indir"); kapsam o zaman 'secili'.
+    function secenekAc(kart, dosyaId, ad, kapsam, hazir) {
         panelAc();
         form.innerHTML = '';
         const kutu = el('div', 'margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
         kutu.appendChild(el('div', 'font-weight:600;word-break:break-word;', ad || 'UYAP dosyası'));
-        kapsamEl = el('div', 'margin-top:2px;color:#cbd5e1;', 'Tüm belgeler');
+        kapsamEl = el('div', 'margin-top:2px;color:#cbd5e1;', hazir
+            ? (hazir.length === 1 ? '1 belge: ' : hazir.length + ' belge: ') + hazir[0].tur + (hazir.length > 1 ? ' ve ekleri' : '')
+            : 'Tüm belgeler');
         kutu.appendChild(kapsamEl);
-        formKarti = kart; formKapsami = kapsam;
+        formKarti = kart; formKapsami = hazir ? 'hazir' : kapsam;
         formSayisiniTazele(kart);
         kutu.appendChild(radyoGrubu('Çıktı', 'cikti', [
             ['tek', 'Tek PDF'],
@@ -1602,7 +1605,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         ], tercih('cikti', 'tek')));
         kutu.appendChild(dugme('İndir', '#059669', function() {
             const cikti = secilenDeger('cikti');
-            const evraklar = kapsam === 'secili' ? secilenEvraklar(kart) : null;
+            const evraklar = hazir || (kapsam === 'secili' ? secilenEvraklar(kart) : null);
             if (kapsam === 'secili' && !evraklar.length) { panelMesaj('İşaretli belge yok.'); return; }
             tercihYaz('cikti', cikti);
             form.innerHTML = ''; formKarti = null;
@@ -1614,6 +1617,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }));
         form.appendChild(kutu);
     }
+    window.__uyapEvrakIndir = function(kart, evraklar) {
+        const d = kartVerisi(kart);
+        if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
+        secenekAc(kart, String(d.dosyaId), dosyaAdi(d), 'secili', evraklar);
+    };
 
     function panelAc() { panelKur(); if (panel) { panel.style.display = 'block'; mesajEl.textContent = ''; } }
     function panelMesaj(m) { panelAc(); if (mesajEl) mesajEl.textContent = m; }
@@ -2116,6 +2124,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '#uyap-isata .ia-not{margin-top:4px;font-size:11px;color:#9ca3af}' +
             '#uyap-isata .ia-link{padding:0;border:0;background:none;color:#c4b5fd;cursor:pointer;font-family:inherit;font-size:11px;text-decoration:underline}' +
             '#uyap-isata .ia-link:hover{color:#ddd6fe}' +
+            // Sağ tık menüsü.
+            '#uyap-sagmenu .uyap-sagmenu-madde{padding:6px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '#uyap-sagmenu .uyap-sagmenu-madde:hover,#uyap-sagmenu .uyap-sagmenu-madde.sec{background:rgba(79,70,229,0.4)}' +
             // UYAP ana sayfası "Bildirimler": bildirimin dosyasına iş.
             '.uyap-bildirim-is{margin-left:8px;padding:1px 9px;border:1px solid #a78bfa;border-radius:999px;background:#ede9fe;color:#5b21b6;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap}' +
             '.uyap-bildirim-is:hover{background:#ddd6fe}';
@@ -3174,10 +3185,15 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             b.addEventListener('click', function(ev) {
                 ev.stopPropagation();
                 ev.preventDefault();
-                bildirimdenIs(m[1].trim(), m[2], (bas ? bas.textContent : '').replace(/\s*-\s*$/, '').trim(), metin);
+                bildirimdenIs(m[1].trim(), m[2], bildirimBasligi(bas), metin);
             });
             (bas || li).appendChild(b);
         });
+    }
+    function bildirimBasligi(bas) {
+        if (!bas) return '';
+        return Array.from(bas.childNodes).filter(function(n) { return !(n.classList && n.classList.contains('uyap-bildirim-is')); })
+            .map(function(n) { return n.textContent; }).join('').replace(/\s*-\s*$/, '').trim();
     }
     async function bildirimdenIs(birimAdi, dosyaNo, baslik, metin) {
         kur();
@@ -3218,6 +3234,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             document.body.appendChild(s);
         }
         panelKur();
+        sagMenuKur();
     }
     function isAtaDugmesi(baslik) {
         const yer = baslik.querySelector('[data-tumevrak]')
@@ -3246,6 +3263,211 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         });
         yer.parentElement.insertBefore(b, yer);
     }
+    // ── Sağ tık menüsü ──
+    // UYAP'ta tarayıcının uzun menüsü yerine sade CokluUyap menüsü: tıklanan yere göre belge / dosya
+    // kartı / bildirim maddeleri, altta kopyala, işlerim, geri, yenile. Yazı alanlarında (yapıştır,
+    // yazım denetimi), kendi pencerelerimizde ve Shift / Ctrl + sağ tıkta tarayıcının menüsü açılır.
+    // Kapatmak için: localStorage cokluuyapSagMenu = 'kapali'.
+    let sagMenu = null, sagMenuSecili = -1;
+    function sagMenuKapat() {
+        if (sagMenu && sagMenu.style.display !== 'none') { sagMenu.style.display = 'none'; sagMenuSecili = -1; }
+    }
+    function sagMenuKapali() {
+        try { return localStorage.getItem('cokluuyapSagMenu') === 'kapali'; } catch (e) { return false; }
+    }
+    function kisalt(m, n) {
+        m = String(m || '').replace(/\s+/g, ' ').trim();
+        return m.length > n ? m.slice(0, n - 1) + '…' : m;
+    }
+    function kisaBildirim(m) {
+        const b = el('div', 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:2147483647;padding:6px 14px;border-radius:8px;background:rgba(18,18,24,0.95);color:#e5e7eb;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;', m);
+        document.body.appendChild(b);
+        setTimeout(function() { b.remove(); }, 1200);
+    }
+    async function panoya(metin) {
+        try {
+            await navigator.clipboard.writeText(metin);
+        } catch (e) {
+            const ta = el('textarea', 'position:fixed;left:-9999px;top:0;');
+            ta.value = metin;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } finally { ta.remove(); }
+        }
+        kisaBildirim('Kopyalandı');
+    }
+    // ── Dosya türleri: her türün kendi menü maddeleri ──
+    // Tür, kartın dosya türü açıklamasından (dosyaTurKodAciklama), yoksa birim adından bulunur; sıra
+    // önemlidir (ilk eşleşen). Her tür:
+    //   hizliIsler: menüde "Hızlı iş" altında tek tıkla açılan işler (şablon adı → İş Ata o şablonla açılır;
+    //               şablonu olmayan ad yalnız başlık olarak dolar)
+    //   maddeler(c): türe özgü ek maddeler [[metin, fn], …]; c = {d, kart, tur, belge}
+    //                belge: sağ tıklanan evrak ağacı belgesi {anahtar, ozet} ya da null
+    // Yeni tür ya da madde buraya eklenir; menünün geri kalanı türden bağımsızdır.
+    const DOSYA_TURLERI = [
+        { anahtar: 'arabuluculuk', ad: 'Arabuluculuk', eslesir: /arabulucu/,
+          hizliIsler: [], maddeler: null },
+        { anahtar: 'icra', ad: 'İcra', eslesir: /icra dosya|icra dairesi|^icra/,
+          hizliIsler: ['Tebligat kontrol', 'Kesinleşme kontrol', 'Haciz talepleri', 'Takyidat kontrol'], maddeler: null },
+        { anahtar: 'ceza', ad: 'Ceza', eslesir: /ceza|soruşturma|savcılı|başsavcı/,
+          hizliIsler: [], maddeler: null },
+        { anahtar: 'idare', ad: 'İdare', eslesir: /idare|vergi mahkeme|danıştay/,
+          hizliIsler: [], maddeler: null },
+        { anahtar: 'hukuk', ad: 'Hukuk', eslesir: /hukuk|asliye|sulh|aile|iş mahkeme|tüketici|ticaret|kadastro/,
+          hizliIsler: [], maddeler: null },
+        { anahtar: 'diger', ad: '', eslesir: /(?:)/, hizliIsler: [], maddeler: null },
+    ];
+    function dosyaTuru(d) {
+        const metinler = [d.dosyaTurKodAciklama, d.birimAdi].map(function(x) { return kucukHarf(String(x || '')); });
+        for (const m of metinler) {
+            if (!m) continue;
+            const t = DOSYA_TURLERI.find(function(x) { return x.anahtar !== 'diger' && x.eslesir.test(m); });
+            if (t) return t;
+        }
+        return DOSYA_TURLERI[DOSYA_TURLERI.length - 1];
+    }
+    window.__uyapDosyaTuru = function(d) { return dosyaTuru(d).anahtar; };
+
+    // [[ [metin, fn], … ], …] — gruplar arasına çizgi çekilir. Başlık satırı: ['', null, 'baslik'].
+    function sagMenuMaddeleri(h) {
+        const gruplar = [];
+        const kart = h.closest('.dosya-sorgula-popup');
+        const d = kart && window.__uyapKartVerisi ? window.__uyapKartVerisi(kart) : null;
+        const tur = d ? dosyaTuru(d) : null;
+        let belge = null;
+        // Evrak ağacındaki belge.
+        const A = window.__uyapEvrakAgaci;
+        const node = d && A ? h.closest('.evrak-treeview .dx-treeview-node') : null;
+        if (node) {
+            const koklar = A.veri(node.closest('.evrak-treeview'));
+            const g = koklar && A.harita(koklar)[node.getAttribute('data-item-id')];
+            if (g && g.x.evrak && g.x.evrak.evrakId) {
+                const anahtar = belgeAnahtari(A.ozet(g.x, g.ebeveyn));
+                belge = { anahtar: anahtar, ozet: A.ozet(g.x, g.ebeveyn) };
+                const ilgili = acikIsler(d).filter(function(t) { return String(t.evrak_id) === anahtar; });
+                const m = [['Bu belgeye iş bağla', function() { pencereAc(d, kart, anahtar); }]];
+                if (ilgili.length === 1) m.push(['Belgenin işi: ' + kisalt(ilgili[0].title, 40), function() { isAc(ilgili[0].id); }]);
+                else if (ilgili.length > 1) m.push(['Belgenin ' + ilgili.length + ' işi', function() { panelDosyaAc(d); }]);
+                const sec = node.querySelector(':scope > .dx-treeview-item > input[data-tumevrak-sec]');
+                if (sec && !sec.disabled) m.push([sec.checked ? 'İndirme seçiminden çıkar' : 'İndirme seçimine ekle', function() { sec.click(); }]);
+                const evr = A.alt ? A.alt(g.x, g.ebeveyn) : [A.ozet(g.x, g.ebeveyn)];
+                if (window.__uyapEvrakIndir && evr.length) {
+                    m.push([evr.length > 1 ? 'Bu belgeyi indir (ekleriyle, ' + evr.length + ' belge)' : 'Bu belgeyi indir',
+                            function() { window.__uyapEvrakIndir(kart, evr); }]);
+                }
+                gruplar.push(m);
+            }
+        }
+        // Dosya kartı: önce türün kendi maddeleri, sonra her türde ortak olanlar.
+        if (d) {
+            const n = acikIsler(d).length;
+            const ad = [d.birimAdi, d.dosyaNo].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+            const ozel = tur.maddeler ? tur.maddeler({ d: d, kart: kart, tur: tur.anahtar, belge: belge }) || [] : [];
+            const hizli = tur.hizliIsler.map(function(sablon) {
+                return ['Hızlı iş: ' + sablon, function() { pencereAc(d, kart, belge ? belge.anahtar : null, { sablon: sablon, baslik: sablon }); }];
+            });
+            if (ozel.length || hizli.length) {
+                gruplar.push([[(tur.ad ? tur.ad + ' dosyası' : 'Dosya') + (ad ? ' · ' + kisalt(ad, 34) : ''), null]].concat(ozel, hizli));
+            }
+            const m = [['İş Ata', function() { pencereAc(d, kart); }],
+                       ['Bu dosyanın işleri' + (n ? ' (' + n + ')' : ''), function() { panelDosyaAc(d); }]];
+            if (ad) m.push(['Kopyala: ' + kisalt(ad, 40), function() { panoya(ad); }]);
+            const tum = kart.querySelector('[data-tumevrak]');
+            if (tum) m.push(['Tüm evrakı indir', function() { tum.click(); }]);
+            gruplar.push(m);
+        }
+        // Ana sayfa bildirimi.
+        const li = h.closest('.main-page-notifications li.notify-item');
+        if (li) {
+            const metinEl = li.querySelector('.icon-list-text');
+            const metin = metinEl ? (metinEl.getAttribute('aria-label') || metinEl.textContent || '').trim() : '';
+            const bm = BILDIRIM_RE.exec(metin);
+            if (bm) {
+                const bas = li.querySelector('.icon-list-baslik');
+                gruplar.push([['Bu bildirimden iş aç', function() { bildirimdenIs(bm[1].trim(), bm[2], bildirimBasligi(bas), metin); }]]);
+            }
+        }
+        // Her yerde.
+        const genel = [];
+        const secim = String(window.getSelection ? window.getSelection() : '').trim();
+        if (secim) genel.push(['Kopyala: “' + kisalt(secim, 30) + '”', function() { panoya(secim); }]);
+        const a = h.closest('a[href]');
+        if (a && !/^\s*(javascript:|#)/i.test(a.getAttribute('href'))) {
+            genel.push(['Bağlantıyı yeni sekmede aç', function() { window.open(a.href, '_blank', 'noopener'); }]);
+        }
+        genel.push(['İşlerim', panelAc], ['Geri', function() { history.back(); }], ['Sayfayı yenile', function() { location.reload(); }]);
+        gruplar.push(genel);
+        return gruplar;
+    }
+    function sagMenuGoster(x, y, gruplar) {
+        if (!sagMenu) {
+            sagMenu = el('div', 'position:fixed;left:0;top:0;z-index:2147483646;min-width:200px;max-width:340px;padding:4px 0;border-radius:9px;background:rgba(18,18,24,0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);color:#e5e7eb;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
+            sagMenu.id = 'uyap-sagmenu';
+            sagMenu.addEventListener('contextmenu', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+            document.body.appendChild(sagMenu);
+        }
+        sagMenu.innerHTML = '';
+        gruplar.forEach(function(g, i) {
+            if (i) sagMenu.appendChild(el('div', 'height:1px;margin:4px 0;background:rgba(255,255,255,0.1);'));
+            g.forEach(function(m) {
+                if (!m[1]) {               // grup başlığı (ör. "İcra dosyası · …"): tıklanmaz
+                    sagMenu.appendChild(el('div', 'padding:4px 14px 2px;color:#a5b4fc;font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;', m[0]));
+                    return;
+                }
+                const s = el('div', null, m[0]);
+                s.className = 'uyap-sagmenu-madde';
+                s.title = m[0];
+                s.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+                s.addEventListener('click', function(ev) { ev.stopPropagation(); sagMenuKapat(); m[1](); });
+                sagMenu.appendChild(s);
+            });
+        });
+        sagMenu.appendChild(el('div', 'padding:5px 14px 2px;color:#6b7280;font-size:10.5px;', 'Tarayıcı menüsü: Shift + sağ tık'));
+        sagMenu.style.display = 'block';
+        const r = sagMenu.getBoundingClientRect();
+        sagMenu.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + 'px';
+        sagMenu.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + 'px';
+    }
+    function sagMenuTus(ev) {
+        if (!sagMenu || sagMenu.style.display === 'none') return;
+        const l = sagMenu.querySelectorAll('.uyap-sagmenu-madde');
+        if (ev.key === 'Escape') {
+            sagMenuKapat();
+        } else if ((ev.key === 'ArrowDown' || ev.key === 'ArrowUp') && l.length) {
+            const n = l.length, asagi = ev.key === 'ArrowDown';
+            sagMenuSecili = sagMenuSecili < 0 ? (asagi ? 0 : n - 1) : (sagMenuSecili + (asagi ? 1 : n - 1)) % n;
+            l.forEach(function(m, i) { m.classList.toggle('sec', i === sagMenuSecili); });
+        } else if (ev.key === 'Enter' && sagMenuSecili >= 0) {
+            l[sagMenuSecili].click();
+        } else {
+            sagMenuKapat();
+            return;
+        }
+        ev.preventDefault();
+        ev.stopPropagation();
+    }
+    function sagMenuKur() {
+        if (window.top !== window || window.__uyapSagMenu || !document.body) return;
+        window.__uyapSagMenu = true;
+        document.addEventListener('contextmenu', function(ev) {
+            sagMenuKapat();
+            const h = ev.target && ev.target.closest ? ev.target : null;
+            if (ev.shiftKey || ev.ctrlKey || !h || sagMenuKapali()) return;
+            if (h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')) return;
+            if (ort && ort.contains(h)) return;
+            let gruplar;
+            try { gruplar = sagMenuMaddeleri(h); } catch (e) { return; }   // beklenmeyen sayfa yapısı: tarayıcı menüsü
+            ev.preventDefault();
+            kur();
+            sagMenuGoster(ev.clientX, ev.clientY, gruplar);
+        }, true);
+        document.addEventListener('mousedown', function(ev) { if (sagMenu && !sagMenu.contains(ev.target)) sagMenuKapat(); }, true);
+        window.addEventListener('keydown', sagMenuTus, true);
+        window.addEventListener('blur', sagMenuKapat);
+        window.addEventListener('resize', sagMenuKapat);
+        document.addEventListener('scroll', sagMenuKapat, true);
+    }
+
     setInterval(kartlariTara, 700);
 })();
 </script>"""
