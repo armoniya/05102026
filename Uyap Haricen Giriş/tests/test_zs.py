@@ -18,6 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import zs
 import zs_r2
 import zs_push
+import accounts
 
 # Testler veri klasörüne bildirim anahtarı dosyası yazmasın.
 os.environ.setdefault("ZS_VAPID_PRIVATE", zs_push.b64u(zs_push.new_private_raw()))
@@ -873,10 +874,287 @@ class ZsTest(unittest.IsolatedAsyncioTestCase):
             "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"))
 
 
+class IsListesiTest(unittest.IsolatedAsyncioTestCase):
+    """/is-listesi: ana hesaplarla giriş, büro yalıtımı, UYAP dosyası bağı, masaüstü jetonu,
+    tek kullanımlık web geçişi ve eski kullanıcı eşleştirme. Eski /zs aynı arka uçta yedek kalır."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp()
+        path = os.path.join(self.tmp, "accounts.json")
+        self.acc = accounts.AccountStore(path, backend=accounts._FileBackend(path))
+        a = self.acc.create_office("Kemal Hukuk", "ahmet", PW, slug="kemal")
+        self.acc.create_user(a["office_id"], "mehmet", PW, label="Mehmet Yılmaz")
+        b = self.acc.create_office("Deniz Hukuk", "zeynep", PW, slug="deniz")
+        self.oa, self.ob = a["office_id"], b["office_id"]
+        store = ZsStore(dsn="", sqlite_path=os.path.join(self.tmp, "zs.sqlite3"))
+        store.create_user("yonetici", "Yönetici", PW, "admin")       # eski /zs havuzu
+        self.ali = store.create_user("ali", "Ali", PW, "user")
+        app = web.Application()
+        zs.register(app, session_secret="test-secret", guard=_Guard(), client_ip=lambda r: "1.2.3.4", store=store,
+                    accounts_store=self.acc, owner_user=lambda r: "utku" if r.headers.get("X-Test-Owner") else None)
+        zs.C.storage = zs_r2.LocalStorage(os.path.join(self.tmp, "files"))
+        zs.C.file_key = os.urandom(32)
+        self.store = store
+        self.clients = []
+
+    async def asyncTearDown(self):
+        for c in self.clients:
+            await c.close()
+        self.store._conn.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def client(self):
+        app = web.Application()
+        zs_app_routes(app)
+        c = TestClient(TestServer(app))
+        await c.start_server()
+        self.clients.append(c)
+        return c
+
+    async def login(self, office, username, status=303):
+        c = await self.client()
+        r = await c.post("/is-listesi/login", data={"office_code": office, "username": username, "password": PW},
+                         allow_redirects=False)
+        self.assertEqual(r.status, status)
+        return c
+
+    async def legacy(self, username):
+        c = await self.client()
+        r = await c.post("/zs/login", data={"username": username, "password": PW}, allow_redirects=False)
+        self.assertEqual(r.status, 303)
+        return c
+
+    async def j(self, resp, status=200):
+        data = await resp.json()
+        self.assertEqual(resp.status, status, data)
+        return data
+
+    async def people(self, c):
+        return {p["display_name"]: p["id"] for p in (await self.j(await c.get("/is-listesi/api/me")))["people"]}
+
+    DOSYA = {"dosya_id": "987654", "birim_id": "1001", "birim_adi": "İstanbul 3. İcra Dairesi",
+             "dosya_no": "2026/1234", "dosya_tur": "İcra"}
+
+    async def test_giris_buro_yalitimi_ve_dosya_bagi(self):
+        ahmet = await self.login("kemal", "ahmet")
+        me = await self.j(await ahmet.get("/is-listesi/api/me"))
+        self.assertEqual(me["me"]["role"], "admin")                  # büro sahibi → yönetici
+        self.assertEqual(me["office"]["code"], "kemal")
+        ppl = await self.people(ahmet)
+        self.assertIn("Mehmet Yılmaz", ppl)                          # hiç girmemiş üyeye de atanabilir
+        self.assertNotIn("Ali", ppl)                                 # eski /zs havuzu görünmez
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Haciz talebi", "assignee_id": ppl["Mehmet Yılmaz"], "dosya": self.DOSYA})))["task"]
+        self.assertEqual((t["dosya_id"], t["dosya_no"], t["office_id"]), ("987654", "2026/1234", self.oa))
+        await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Dosyasız iş"}))
+        lst = await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu&dosya_id=987654"))
+        self.assertEqual([x["id"] for x in lst["tasks"]], [t["id"]])
+        # Başka büro: görmez, kendi kişisi olmayana atayamaz.
+        zeynep = await self.login("deniz", "zeynep")
+        self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/tasks?filtre=tumu")))["tasks"], [])
+        await self.j(await zeynep.get(f"/is-listesi/api/tasks/{t['id']}"), 400)
+        await self.j(await zeynep.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "x", "assignee_id": ppl["Mehmet Yılmaz"]}), 400)
+        # Eski /zs havuzu da görmez.
+        eski = await self.legacy("yonetici")
+        self.assertEqual((await self.j(await eski.get("/zs/api/tasks?filtre=tumu")))["tasks"], [])
+        # Üye yalnız kendine iş açar; işi görür.
+        mehmet = await self.login("kemal", "mehmet")
+        kendi = (await self.j(await mehmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "y", "assignee_id": ppl["Ahmet"] if "Ahmet" in ppl else me["me"]["id"]})))["task"]
+        self.assertEqual(kendi["assignee_id"], ppl["Mehmet Yılmaz"])
+        ids = {x["id"] for x in (await self.j(await mehmet.get("/is-listesi/api/tasks")))["tasks"]}
+        self.assertIn(t["id"], ids)
+
+    async def test_uyap_kart_verisi_saklanir(self):
+        """'UYAP'ta aç' için kartın UYAP verisi türleriyle saklanır; tanınmayan/iç içe alanlar atılır."""
+        ahmet = await self.login("kemal", "ahmet")
+        uyap = {"dosyaId": "987654", "dosyaNo": "2026/1234", "birimId": "1001", "birimAdi": "İstanbul 3. İcra Dairesi",
+                "dosyaTurKod": 35, "dosyaTurKodAciklama": "İcra", "dosyaDurumKod": 0, "birimTuru3": 1101,
+                "zararli": "<script>", "dosyaDurum": {"ic": "nesne"}}
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Kart", "dosya": dict(self.DOSYA, uyap=uyap)})))["task"]
+        kart = json.loads(t["dosya_uyap"])
+        self.assertEqual(kart["dosyaTurKod"], 35)                     # sayı sayı kalır
+        self.assertNotIn("zararli", kart)
+        self.assertNotIn("dosyaDurum", kart)                          # nesne değer alınmaz
+        # Kart verisi olmayan (eski) işte alan boş; düzenlemede dosya bağı kaldırılabilir.
+        t2 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Eski", "dosya": self.DOSYA})))["task"]
+        self.assertIsNone(t2["dosya_uyap"])
+        t3 = (await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t['id']}", headers=H, json={"dosya": None})))["task"]
+        self.assertIsNone(t3["dosya_id"]); self.assertIsNone(t3["dosya_uyap"])
+
+    async def test_eski_kullanici_ve_owner_yeni_arayuze_giremez(self):
+        c = await self.client()
+        r = await c.post("/is-listesi/login", data={"office_code": "", "username": "ali", "password": PW},
+                         allow_redirects=False)
+        self.assertEqual(r.status, 401)
+        await self.login("kemal", "ahmet", status=303)
+        await self.login("kemal", "ahmet-yok", status=401)
+        # Eski /zs oturum çerezi yeni arayüzde geçmez (ayrı çerez + bağlı hesap şartı).
+        eski = await self.legacy("ali")
+        self.assertEqual((await eski.get("/is-listesi/api/me")).status, 401)
+
+    async def test_ana_hesap_degisince_oturum_duser(self):
+        ahmet = await self.login("kemal", "ahmet")
+        await self.j(await ahmet.get("/is-listesi/api/me"))
+        self.acc.bump_sess_epoch("ahmet@kemal")                      # ana hesapta çıkış / parola değişimi
+        self.assertEqual((await ahmet.get("/is-listesi/api/me")).status, 401)
+        mehmet = await self.login("kemal", "mehmet")
+        self.acc.set_user_active("mehmet@kemal", False)
+        self.assertEqual((await mehmet.get("/is-listesi/api/me")).status, 401)
+        await self.login("kemal", "mehmet", status=401)
+        # Pasif hesap büro listesinde kapalı görünür, ona iş atanamaz.
+        ahmet = await self.login("kemal", "ahmet")
+        u = await self.j(await ahmet.get("/is-listesi/api/users"))
+        m = next(x for x in u["users"] if x["account_username"] == "mehmet@kemal")
+        self.assertFalse(m["active"])
+        await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "x", "assignee_id": m["id"]}), 400)
+
+    async def test_hesapli_kisiler_ofis_panelinden_yonetilir(self):
+        ahmet = await self.login("kemal", "ahmet")
+        ppl = await self.people(ahmet)
+        mid = ppl["Mehmet Yılmaz"]
+        await self.j(await ahmet.post("/is-listesi/api/users", headers=H, json={"username": "x", "display_name": "X"}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/users/{mid}/sifre", headers=H, json={}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/users/{mid}/aktif", headers=H, json={"active": False}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/me/password", headers=H, json={"old": PW, "new": PW + "x"}), 400)
+        # Rol değişir: üye yönetici yapılabilir ve sonraki girişte de öyle kalır.
+        await self.j(await ahmet.post(f"/is-listesi/api/users/{mid}", headers=H, json={"role": "admin"}))
+        mehmet = await self.login("kemal", "mehmet")
+        self.assertEqual((await self.j(await mehmet.get("/is-listesi/api/me")))["me"]["role"], "admin")
+        # Büro sahibinin rolü düşürülemez; başka büronun kişisi düzenlenemez.
+        aid = (await self.j(await ahmet.get("/is-listesi/api/me")))["me"]["id"]
+        await self.j(await mehmet.post(f"/is-listesi/api/users/{aid}", headers=H, json={"role": "user"}), 400)
+        zeynep = await self.login("deniz", "zeynep")
+        await self.j(await zeynep.post(f"/is-listesi/api/users/{mid}", headers=H, json={"role": "user"}), 400)
+
+    async def test_masaustu_jetonu_ve_web_gecisi(self):
+        c = await self.client()
+        r = await self.j(await c.post("/is-listesi/api/token", json={"office_code": "kemal", "username": "ahmet",
+                                                                      "password": "yanlis"}), 401)
+        r = await self.j(await c.post("/is-listesi/api/token", json={"office_code": "kemal", "username": "ahmet",
+                                                                      "password": PW}))
+        auth = {"Authorization": f"Bearer {r['token']}"}
+        # Jetonla X-ZS başlığı gerekmez; dosya kartından iş açılır ve dosyanın işleri listelenir.
+        t = (await self.j(await c.post("/is-listesi/api/tasks", headers=auth,
+                                       json={"title": "Kart işi", "dosya": self.DOSYA})))["task"]
+        lst = await self.j(await c.get("/is-listesi/api/tasks?filtre=tumu&dosya_id=987654", headers=auth))
+        self.assertEqual([x["id"] for x in lst["tasks"]], [t["id"]])
+        # Jeton çerez yerine geçmez; bozuk jeton reddedilir.
+        self.assertEqual((await c.get("/is-listesi/api/me", headers={"Authorization": "Bearer xx"})).status, 401)
+        # Tek kullanımlık web geçişi: kod bir kez çalışır, oturum çerezi kurulur.
+        k = await self.j(await c.post("/is-listesi/api/sso-kod", headers=auth, json={}))
+        web_c = await self.client()
+        r1 = await web_c.get(k["url"], allow_redirects=False)
+        self.assertEqual(r1.status, 200)
+        self.assertIn("il_sess", r1.cookies)
+        me = await self.j(await web_c.get("/is-listesi/api/me"))
+        self.assertEqual(me["me"]["account_username"], "ahmet@kemal")
+        other = await self.client()
+        self.assertEqual((await other.get(k["url"], allow_redirects=False)).status, 401)
+        # Ana hesap epoch'u değişince jeton da düşer.
+        self.acc.bump_sess_epoch("ahmet@kemal")
+        self.assertEqual((await c.get("/is-listesi/api/me", headers=auth)).status, 401)
+
+    async def test_eslestirme(self):
+        # Eski havuzda yönetici Ali'ye iş açmış; Mehmet'in hesabı İş Listesi'ne önceden girmiş (boş satır).
+        eski = await self.legacy("yonetici")
+        t = (await self.j(await eski.post("/zs/api/tasks", headers=H, json={"title": "Eski iş", "assignee_id": self.ali["id"]})))["task"]
+        await self.j(await eski.post("/zs/api/tasks", headers=H, json={"title": "alt", "parent_id": t["id"]}))
+        await self.login("kemal", "mehmet")
+        c = await self.client()
+        self.assertEqual((await c.get("/is-listesi/yonetim/eslestir")).status, 403)
+        own = {"X-Test-Owner": "1"}
+        page = await c.get("/is-listesi/yonetim/eslestir", headers=own)
+        self.assertIn("mehmet@kemal", await page.text())
+        r = await c.post("/is-listesi/yonetim/eslestir", headers=own, allow_redirects=False,
+                         data={"csrf": "sahte", "zs_user_id": str(self.ali["id"]), "account_username": "mehmet@kemal"})
+        self.assertEqual(r.status, 403)
+        r = await c.post("/is-listesi/yonetim/eslestir", headers=own, allow_redirects=False,
+                         data={"csrf": zs._map_csrf("utku"), "zs_user_id": str(self.ali["id"]),
+                               "account_username": "mehmet@kemal"})
+        self.assertEqual(r.status, 303)
+        self.assertNotIn("hata=1", r.headers["Location"])
+        u = self.store.get_user(self.ali["id"])
+        self.assertEqual((u["account_username"], u["office_id"]), ("mehmet@kemal", self.oa))
+        self.assertEqual(self.store.get_task(t["id"])["office_id"], self.oa)
+        self.assertTrue(all(s["office_id"] == self.oa for s in self.store.task_detail(t["id"])["subtasks"]))
+        # Mehmet yeni arayüzde eski işini görür; eski havuzun yöneticisi artık görmez.
+        mehmet = await self.login("kemal", "mehmet")
+        me = await self.j(await mehmet.get("/is-listesi/api/me"))
+        self.assertEqual(me["me"]["id"], self.ali["id"])
+        self.assertEqual([x["id"] for x in (await self.j(await mehmet.get("/is-listesi/api/tasks")))["tasks"]], [t["id"]])
+        self.assertEqual((await self.j(await eski.get("/zs/api/tasks?filtre=tumu")))["tasks"], [])
+        # Aynı hesap ikinci kez eşlenemez.
+        ayse = self.store.create_user("ayse", "Ayşe", PW, "user")
+        r = await c.post("/is-listesi/yonetim/eslestir", headers=own, allow_redirects=False,
+                         data={"csrf": zs._map_csrf("utku"), "zs_user_id": str(ayse["id"]),
+                               "account_username": "mehmet@kemal"})
+        self.assertIn("hata=1", r.headers["Location"])
+
+    async def test_masaustu_koprusu(self):
+        """uyap_core/is_listesi: dosya kartındaki 'İş Ata' yerel köprüsü gerçek sunucuya karşı."""
+        from uyap_core import is_listesi as k
+        c = await self.client()
+        base = str(c.make_url("")).rstrip("/")
+        try:
+            k.clear()
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")
+            self.assertEqual(st, 503)
+            k.configure(base, "kemal", "ahmet", "yanlis")
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")
+            self.assertEqual(st, 401)
+            k.configure(base, "kemal", "ahmet", PW)
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")
+            ppl = {p["display_name"]: p["id"] for p in json.loads(out)["people"]}
+            self.assertEqual(st, 200)
+            body = json.dumps({"title": "Kart işi", "assignee_id": ppl["Mehmet Yılmaz"], "dosya": self.DOSYA,
+                               "status": "onaylandi"}).encode()      # izinsiz alan iletilmez
+            st, _, out = await k.handle("POST", "/__uyap_kisi__/is-listesi/tasks", "", body)
+            t = json.loads(out)["task"]
+            self.assertEqual((st, t["status"], t["dosya_id"]), (200, "acik", "987654"))
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "dosya_id=987654", b"")
+            self.assertEqual([x["id"] for x in json.loads(out)["tasks"]], [t["id"]])
+            st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "", b"")
+            self.assertEqual(st, 400)
+            st, hdr, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/ac", "", b"")
+            self.assertEqual(st, 303)
+            self.assertTrue(hdr["Location"].startswith(base + "/is-listesi/sso?kod="))
+            st, _, _ = await k.handle("DELETE", "/__uyap_kisi__/is-listesi/tasks", "", b"")
+            self.assertEqual(st, 404)
+            # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.
+            self.acc.bump_sess_epoch("ahmet@kemal")
+            st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")
+            self.assertEqual(st, 200)
+            self.assertTrue(k.is_path("__uyap_kisi__/is-listesi/me") and not k.is_path("/__uyap_agent__/jobs"))
+        finally:
+            k.clear()
+
+    async def test_eski_arayuz_yedek_olarak_durur(self):
+        c = await self.client()
+        self.assertIn("İş Takip", await (await c.get("/zs")).text())
+        self.assertIn("Ofis kodu", await (await c.get("/is-listesi")).text())
+        for p in ("/zs", "/is-listesi"):
+            r = await c.get(f"{p}/static/zs.js")
+            self.assertEqual(r.status, 200)
+            self.assertIn(f"{p}/api/me", await r.text())
+            sw = await c.get(f"{p}/sw.js")
+            self.assertEqual(sw.headers.get("Service-Worker-Allowed"), p)
+            # Sayfanın istediği her dosya gerçekten sunuluyor (yanlış ad → stilsiz/boş sayfa).
+            with open(os.path.join(zs.WEB_DIRS[p], "index.html"), encoding="utf-8") as f:
+                refs = __import__("re").findall(r'(?:href|src)="(/[^"]+)"', f.read())
+            self.assertTrue(any(r.endswith(".css") for r in refs) and any(r.endswith(".js") for r in refs))
+            for ref in refs:
+                self.assertTrue(ref.startswith(p + "/"), ref)
+                self.assertEqual((await c.get(ref)).status, 200, ref)
+
+
 def zs_app_routes(app):
     """register()'ın rota kısmını mevcut C durumunu bozmadan yeni bir uygulamaya bağlar."""
     saved = (zs.C.store, zs.C.storage, zs.C.file_key, zs.C.notifier)
-    zs.register(app, session_secret="test-secret", guard=zs.C.guard, client_ip=zs.C.client_ip, store=saved[0])
+    zs.register(app, session_secret="test-secret", guard=zs.C.guard, client_ip=zs.C.client_ip, store=saved[0],
+                accounts_store=zs.C.accounts, owner_user=zs.C.owner_user)
     zs.C.store, zs.C.storage, zs.C.file_key, zs.C.notifier = saved
 
 

@@ -473,7 +473,7 @@ async function registerServiceWorker() {
     status("Tarayıcı Service Worker desteklemiyor.", "err");
     throw new Error("no-sw");
   }
-  const reg = await navigator.serviceWorker.register("/__app__/sw.js", { scope: "/" });
+  const reg = await navigator.serviceWorker.register("/__app__/sw.js?v=20261019-worklist", { scope: "/" });
   await navigator.serviceWorker.ready;
   if (!navigator.serviceWorker.controller) {
     await new Promise((resolve) => {

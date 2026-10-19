@@ -55,6 +55,7 @@ from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from ._runtime import interactive_write, batch_write, WRITE_METHODS, uyap_istek_izi
+from . import is_listesi
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1291,6 +1292,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return [d.birimAdi, d.dosyaNo, d.dosyaTurKodAciklama].filter(Boolean).join(' ')
             .replace(/\s+/g, ' ').trim();
     }
+    // İş Listesi bloğu (aşağıda) aynı kart verisini kullanır.
+    window.__uyapKartVerisi = kartVerisi;
+    window.__uyapDosyaAdi = dosyaAdi;
 
     // ── Kartlara düğme ekle (React kartı yeniden çizerse düğme de yeniden eklenir) ──
     // "Seçili Belgeleri İndir (N)" yalnız evrak ağacında işaret varken görünür.
@@ -1687,6 +1691,287 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         izle(id);
     }
 })();
+
+// ── İŞ LİSTESİ ───────────────────────────────────────────────────────────────────────
+// Dosya kartına "İş Ata": o dosyanın işleri + yeni iş formu (iş UYAP dosyasına bağlanır).
+// Sol altta "İş Listesi": uzak tarayıcıda doğrudan siteyi açar; yerel kurulumda SSO köprüsünü
+// kullanır. İş atama istekleri yerel köprüye (/__uyap_kisi__/is-listesi) gider.
+(function() {
+    const EP = '/__uyap_kisi__/is-listesi';
+    const DURUM = { acik: 'Açık', devam: 'Devam ediyor', onayda: 'Onayda', onaylandi: 'Onaylandı', tamamlandi: 'Tamamlandı' };
+    let ben = null;            // {me, people, office} — ilk açılışta alınır
+
+    async function api(yol, opts) {
+        const r = await window.fetch(EP + yol, Object.assign({ cache: 'no-store' }, opts || {}));
+        let j = null;
+        try { j = await r.json(); } catch (e) {}
+        if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || ('HTTP ' + r.status));
+        return j;
+    }
+    function el(tag, css, metin) {
+        const e = document.createElement(tag);
+        if (css) e.style.cssText = css;
+        if (metin != null) e.textContent = metin;
+        return e;
+    }
+    function dugme(metin, renk, fn) {
+        const b = el('button', 'margin:10px 6px 0 0;padding:6px 12px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:#fff;background:' + renk + ';', metin);
+        b.type = 'button';
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(b); });
+        return b;
+    }
+    function tarih(ts) {
+        if (!ts) return '';
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString('tr-TR') + ' ' + d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+    }
+    function ac() {
+        const host = location.hostname;
+        const yerel = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+        window.open(yerel ? EP + '/ac' : '/is-listesi/', '_blank', 'noopener');
+    }
+
+    // ── Pencere ──
+    let ort, kutu, mesajEl;
+    function kur() {
+        if (ort || !document.body) return;
+        const stil = document.createElement('style');
+        stil.textContent =
+            '#uyap-isata{color:#f3f4f6!important}' +
+            '#uyap-isata div,#uyap-isata span,#uyap-isata label,#uyap-isata a,#uyap-isata p{color:inherit;font-family:inherit;font-size:inherit;margin-bottom:0}' +
+            '#uyap-isata input,#uyap-isata textarea,#uyap-isata select{width:100%;box-sizing:border-box;margin-top:3px;padding:6px 8px;border-radius:7px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.08);color:#f3f4f6;font:inherit}' +
+            '#uyap-isata select option{color:#111827}' +
+            '#uyap-islistesi-dugme{position:fixed;left:16px;bottom:16px;z-index:2147483645;padding:8px 14px;border:0;border-radius:999px;cursor:pointer;background:#4f46e5;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 6px 18px rgba(79,70,229,0.35)}' +
+            '#uyap-islistesi-dugme:hover{background:#4338ca}';
+        document.head.appendChild(stil);
+        ort = el('div', 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,0.45);display:none;align-items:flex-start;justify-content:center;padding-top:8vh;');
+        ort.addEventListener('click', function(ev) { if (ev.target === ort) kapat(); });
+        kutu = el('div', 'width:min(520px,92vw);max-height:80vh;overflow:auto;padding:16px;border-radius:12px;background:rgba(18,18,24,0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;');
+        kutu.id = 'uyap-isata';
+        ort.appendChild(kutu);
+        document.body.appendChild(ort);
+        document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && ort.style.display !== 'none') kapat(); });
+    }
+    function kapat() { if (ort) ort.style.display = 'none'; }
+
+    async function pencereAc(d) {
+        kur();
+        if (!kutu) return;
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ad = window.__uyapDosyaAdi ? window.__uyapDosyaAdi(d) : String(d.dosyaNo || d.dosyaId);
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', 'İş Ata'));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', kapat);
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        kutu.appendChild(el('div', 'margin-top:2px;color:#cbd5e1;word-break:break-word;', ad || 'UYAP dosyası'));
+        mesajEl = el('div', 'margin-top:8px;color:#fca5a5;');
+        kutu.appendChild(mesajEl);
+        const liste = el('div', 'margin-top:10px;');
+        kutu.appendChild(liste);
+        const formYeri = el('div', '');
+        kutu.appendChild(formYeri);
+        liste.appendChild(el('div', 'color:#9ca3af;', 'Yükleniyor…'));
+        try {
+            ben = await api('/me');   // her açılışta: büroya eklenen/silinen kişiler hemen yansısın
+            await listeyiYukle(liste, d);
+            formYeri.appendChild(formKur(d, liste));
+        } catch (e) {
+            liste.innerHTML = '';
+            mesajEl.textContent = e.message;
+        }
+    }
+
+    function kisiAdi(id) {
+        const p = ben && ben.people.find(function(x) { return x.id === id; });
+        return p ? p.display_name : '—';
+    }
+
+    async function listeyiYukle(liste, d) {
+        const j = await api('/tasks?dosya_id=' + encodeURIComponent(String(d.dosyaId)));
+        liste.innerHTML = '';
+        const isler = j.tasks || [];
+        liste.appendChild(el('div', 'font-weight:600;color:#cbd5e1;margin-bottom:4px;',
+            isler.length ? 'Bu dosyanın işleri (' + isler.length + ')' : 'Bu dosyaya bağlı iş yok.'));
+        isler.forEach(function(t) {
+            const s = el('div', 'padding:6px 8px;margin-top:4px;border-radius:8px;background:rgba(255,255,255,0.06);');
+            s.appendChild(el('div', 'font-weight:600;word-break:break-word;', t.title));
+            const kim = (t.assignees && t.assignees.length ? t.assignees : [t.assignee_id]).filter(Boolean).map(kisiAdi).join(', ');
+            s.appendChild(el('div', 'color:#cbd5e1;', [DURUM[t.status] || t.status, kim, t.due_at ? 'Son: ' + tarih(t.due_at) : '']
+                .filter(Boolean).join(' · ')));
+            liste.appendChild(s);
+        });
+    }
+
+    function alan(etiket, girdi) {
+        const l = el('label', 'display:block;margin-top:8px;font-weight:600;color:#cbd5e1;', etiket);
+        l.appendChild(girdi);
+        return l;
+    }
+
+    function formKur(d, liste) {
+        const f = el('div', 'margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12);');
+        f.appendChild(el('div', 'font-weight:700;', 'Yeni iş'));
+        const baslik = el('input'); baslik.maxLength = 300; baslik.placeholder = 'Ne yapılacak?';
+        const aciklama = el('textarea'); aciklama.rows = 3; aciklama.maxLength = 5000;
+        const kisi = el('select');
+        const admin = ben.me.role === 'admin';
+        ben.people.filter(function(p) { return p.active; }).forEach(function(p) {
+            const o = el('option', null, p.display_name + (p.id === ben.me.id ? ' (ben)' : ''));
+            o.value = String(p.id);
+            if (p.id === ben.me.id) o.selected = true;
+            kisi.appendChild(o);
+        });
+        // Üye yalnız kendine iş açar (sunucu da böyle uygular).
+        if (!admin) { kisi.disabled = true; kisi.title = 'Başkasına iş yalnız yönetici atayabilir'; }
+        const son = el('input'); son.type = 'datetime-local';
+        const oncelik = el('select');
+        [['1', 'Normal'], ['2', 'Acil'], ['0', 'Düşük']].forEach(function(x) {
+            const o = el('option', null, x[1]); o.value = x[0]; oncelik.appendChild(o);
+        });
+        f.appendChild(alan('Başlık', baslik));
+        f.appendChild(alan('Açıklama', aciklama));
+        f.appendChild(alan('Atanacak kişi', kisi));
+        f.appendChild(alan('Son tarih', son));
+        f.appendChild(alan('Öncelik', oncelik));
+        f.appendChild(dugme('Kaydet', '#4f46e5', async function(b) {
+            if (!baslik.value.trim()) { mesajEl.textContent = 'Başlık yazın.'; baslik.focus(); return; }
+            b.disabled = true;
+            mesajEl.textContent = '';
+            try {
+                await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    title: baslik.value, description: aciklama.value,
+                    assignee_id: admin ? Number(kisi.value) : null,
+                    due_at: son.value ? Math.floor(new Date(son.value).getTime() / 1000) : null,
+                    priority: Number(oncelik.value),
+                    dosya: { dosya_id: String(d.dosyaId), birim_id: String(d.birimId || d.birimID || ''),
+                             birim_adi: d.birimAdi || '', dosya_no: d.dosyaNo || '', dosya_tur: d.dosyaTurKodAciklama || '',
+                             uyap: kartAlanlari(d) } }) });
+                baslik.value = ''; aciklama.value = ''; son.value = '';
+                mesajEl.style.color = '#86efac';
+                mesajEl.textContent = 'İş açıldı.';
+                setTimeout(function() { if (mesajEl) { mesajEl.textContent = ''; mesajEl.style.color = '#fca5a5'; } }, 3000);
+                await listeyiYukle(liste, d);
+            } catch (e) {
+                mesajEl.style.color = '#fca5a5';
+                mesajEl.textContent = 'İş açılamadı: ' + e.message;
+            } finally { b.disabled = false; }
+        }));
+        f.appendChild(dugme('İş Listesi\'nde aç', 'rgba(255,255,255,0.15)', ac));
+        f.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+        setTimeout(function() { baslik.focus(); }, 0);
+        return f;
+    }
+
+    // ── İş Listesi'nden "UYAP'ta aç": UYAP'ın kendi dosya kartını açma ──
+    // UYAP ana sayfasındaki arama bileşeni bir dosya sonucu seçilince kartı şöyle açar:
+    //   I({dosyaId, dosyaNo, birimId, birimAdi, dosyaTurKod, dosyaTurKodAciklama, dosyaDurum,
+    //      dosyaDurumKod, birimTuru3}); w(!0)        (UYAP main.js, "dosya-sorgula-popup")
+    // Bileşenin kancaları sırasıyla: …, [E,w] (kart görünür mü), [b,I] (kart verisi), [B,x],
+    // S=useRef(#searchId), D=useRef(#mainSearchArea). Kancalar S ref'inden geriye sayılarak bulunur;
+    // yapı tutmazsa hiçbir şey yapılmaz (UYAP güncellenmiş olabilir) ve kullanıcıya söylenir.
+    const KART_ALANLARI = ['dosyaId', 'dosyaNo', 'birimId', 'birimAdi', 'dosyaTurKod', 'dosyaTurKodAciklama',
+                           'dosyaDurum', 'dosyaDurumKod', 'birimTuru3'];
+    function kartAlanlari(d) {
+        const o = {};
+        KART_ALANLARI.forEach(function(k) { if (d[k] !== undefined && d[k] !== null) o[k] = d[k]; });
+        return o;
+    }
+    function uyapKartiAc(dosya) {
+        const ara = document.getElementById('searchId');
+        if (!ara) return false;
+        const a = Object.keys(ara).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+        for (let f = a ? ara[a] : null, i = 0; f && i < 40; i++, f = f.return) {
+            if (typeof f.type !== 'function') continue;
+            const kancalar = [];
+            for (let h = f.memoizedState; h && kancalar.length < 200; h = h.next) kancalar.push(h);
+            const ri = kancalar.findIndex(function(h) {
+                return !h.queue && h.memoizedState && typeof h.memoizedState === 'object' && h.memoizedState.current === ara;
+            });
+            if (ri < 3) continue;
+            const gorunur = kancalar[ri - 3], veri = kancalar[ri - 2];
+            if (!gorunur.queue || !veri.queue || typeof gorunur.memoizedState !== 'boolean'
+                || typeof gorunur.queue.dispatch !== 'function' || typeof veri.queue.dispatch !== 'function') return false;
+            veri.queue.dispatch(dosya);
+            gorunur.queue.dispatch(true);
+            return true;
+        }
+        return false;
+    }
+    let acmaUyarisi = null;
+    function bekleyenDosyaAc() {
+        let kayit = null;
+        try { kayit = JSON.parse(sessionStorage.getItem('cokluuyapDosyaAc') || 'null'); } catch (e) {}
+        if (!kayit) return;
+        const sil = function() { try { sessionStorage.removeItem('cokluuyapDosyaAc'); } catch (e) {} };
+        if (!kayit.dosya || !kayit.dosya.dosyaId || Date.now() - (kayit.t || 0) > 90000) { sil(); return; }
+        if (!document.getElementById('searchId')) {
+            // Ana sayfa henüz çizilmedi (ya da UYAP girişi bekleniyor) — sonraki turda tekrar.
+            return;
+        }
+        // dosya-ac sayfası yetkisiz açılabildiği için kayda güvenilmez: yalnız kart alanlarının düz değerleri.
+        const dosya = {};
+        KART_ALANLARI.forEach(function(k) {
+            const v = kayit.dosya[k];
+            if (typeof v === 'string' || typeof v === 'number') dosya[k] = typeof v === 'string' ? v.slice(0, 200) : v;
+        });
+        if (uyapKartiAc(dosya)) { sil(); return; }
+        sil();
+        if (!acmaUyarisi && document.body) {
+            acmaUyarisi = el('div', 'position:fixed;left:16px;bottom:60px;z-index:2147483646;max-width:360px;padding:10px 12px;border-radius:10px;background:rgba(18,18,24,0.95);color:#fca5a5;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;',
+                'Dosya kartı otomatik açılamadı (UYAP sayfası değişmiş olabilir). Dosya: ' +
+                [kayit.dosya.birimAdi, kayit.dosya.dosyaNo].filter(Boolean).join(' ') + ' — üstteki aramadan açabilirsiniz.');
+            acmaUyarisi.addEventListener('click', function() { acmaUyarisi.remove(); acmaUyarisi = null; });
+            document.body.appendChild(acmaUyarisi);
+        }
+    }
+
+    // ── Kart düğmesi + sabit "İş Listesi" düğmesi ──
+    function kartlariTara() {
+        bekleyenDosyaAc();
+        if (!window.__uyapKartVerisi) return;
+        document.querySelectorAll('.dosya-sorgula-popup .dx-popup-title').forEach(function(baslik) {
+            if (baslik.querySelector('[data-isata]')) return;
+            const yer = baslik.querySelector('[data-tumevrak]') || Array.from(baslik.querySelectorAll('[role=button]'))
+                .find(function(b) { return /Kart Görünümü/.test(b.textContent); });
+            if (!yer || !yer.parentElement) return;
+            const b = document.createElement('div');
+            b.setAttribute('data-isata', '1');
+            b.setAttribute('role', 'button');
+            b.setAttribute('tabindex', '0');
+            b.title = 'Bu dosyaya iş ata (İş Listesi)';
+            b.className = 'dx-widget dx-button dx-button-mode-outlined dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
+            b.style.marginRight = '6px';
+            b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe icon-check-circle"></span> <span>İş Ata</span></div>';
+            b.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                const kart = baslik.closest('.dosya-sorgula-popup');
+                const d = kart && window.__uyapKartVerisi(kart);
+                if (!d) {
+                    kur();
+                    kutu.replaceChildren(el('div', 'color:#fca5a5;', 'Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'),
+                                         dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+                    ort.style.display = 'flex';
+                    return;
+                }
+                pencereAc(d);
+            });
+            yer.parentElement.insertBefore(b, yer);
+        });
+        if (document.body && !document.getElementById('uyap-islistesi-dugme')) {
+            kur();
+            const s = el('button', null, 'İş Listesi');
+            s.id = 'uyap-islistesi-dugme';
+            s.type = 'button';
+            s.title = 'Büronuzun iş listesini aç (cokluuyap.com)';
+            s.addEventListener('click', ac);
+            document.body.appendChild(s);
+        }
+    }
+    setInterval(kartlariTara, 700);
+})();
 </script>"""
         if "<head>" in text:
             text = text.replace("<head>", f"<head>{script}", 1)
@@ -1725,14 +2010,24 @@ INJECT_VERSION = _compute_inject_version()
 
 
 def _build_response_headers(resp, proxy_base: str) -> dict:
+    # HTML'e kendi betiğimizi gömüyoruz (_rewrite_body): UYAP'ın Last-Modified/ETag'i bu gövdeyi
+    # tanımlamaz. Cache-Control yokken Chrome Last-Modified'a bakıp sayfayı saatlerce SORMADAN
+    # önbellekten veriyordu (sezgisel önbellek) → program güncellense de eski betik çalışıyordu
+    # (canlı, 2026-10-16: "UYAP'ta aç" 54 KB'lık eski betikli ana sayfayı açtı). HTML her açılışta
+    # sunucuya sorulsun.
+    html = "text/html" in (resp.headers.get("content-type") or "").lower()
     out = {}
     for k, v in resp.headers.multi_items():
         lk = k.lower()
         if lk in DROP_RESPONSE:
             continue
+        if html and lk in ("last-modified", "etag", "cache-control", "expires"):
+            continue
         if lk == "location":
             v = v.replace("https://avukat.uyap.gov.tr", proxy_base)
         out[k] = v
+    if html:
+        out["Cache-Control"] = "no-cache"
     return out
 
 
@@ -2294,6 +2589,17 @@ def _lan_istegi_reddi(request: Request):
     return None
 
 
+@app.get(is_listesi.DOSYA_AC_PATH)
+async def is_listesi_dosya_ac(request: Request):
+    """İş Listesi'nden "UYAP'ta aç": yerel yetki aranmaz (Strict çerez çapraz-site gezinmede
+    gelmez); sayfa yalnız kart verisini sekmeye koyup UYAP ana sayfasına geçer (bkz. is_listesi)."""
+    from .yerel_kapi import tarayici_reddi   # çapraz-site üst düzey GET gezinmesine izin verir
+    if (request.client.host if request.client else "") not in _LOCAL_HOSTS or tarayici_reddi(request.headers, request.method):
+        return Response(content=b"Bulunamadi.", status_code=404)
+    return Response(content=is_listesi.DOSYA_AC_SAYFASI, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/__uyap_lan__/giris")
 async def lan_giris_formu(request: Request, hedef: str = "/giris"):
     red = _lan_istegi_reddi(request)
@@ -2332,6 +2638,16 @@ async def lan_giris(request: Request):
 )
 async def proxy(full_path: str, request: Request, _user: str = Depends(require_auth)):
     body = await request.body()
+
+    # İŞ LİSTESİ köprüsü (dosya kartından iş atama): ofis bilgisayarında giriş yapan kişinin
+    # hesabıyla cokluuyap.com'a gider. Yalnız bu bilgisayarın tarayıcısına açık — LAN istemcisi
+    # kendi home_client'ında kendi hesabıyla işler; ofisin kimliğini kullanamaz.
+    if is_listesi.is_path(full_path):
+        if (request.client.host if request.client else "") not in _LOCAL_HOSTS:
+            return Response(content=b"Bulunamadi.", status_code=404)
+        status, headers, out_body = await is_listesi.handle(
+            request.method, full_path, request.url.query, body)
+        return Response(content=out_body, status_code=status, headers=headers)
 
     # GEÇİT: yerel Django arayüzü (127.0.0.1:8000) — UYAP'a hiç gitmez. LAN istemcisi
     # (home_client) doğrudan buraya bağlandığı için bu yönlendirme tünel yolundaki

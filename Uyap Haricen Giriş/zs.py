@@ -1,12 +1,20 @@
 """
-/zs İş Takip — HTTP katmanı (zs.py)
------------------------------------
+İş Listesi (/is-listesi) + eski İş Takip (/zs) — HTTP katmanı (zs.py)
+---------------------------------------------------------------------
 Yapılacak iş listesi: ana iş + alt işler, kullanıcıya atama, yönetici onayı, tarih-saatli
-notlar, şifreli belge yükleme. UYAP/ofis hesaplarından BAĞIMSIZ kullanıcı sistemi.
+notlar, şifreli belge yükleme, UYAP dosyasına bağlı işler.
 
-vendor_server.make_app içinden `zs.register(app, ...)` ile bağlanır; yalnız /zs ile başlayan
-rotalar ekler. vendor_server'ı içe AKTARMAZ (döngüsel import olmasın) — oturum anahtarı, giriş
-sınırlayıcı ve IP fonksiyonu parametre olarak gelir.
+İki arayüz aynı arka ucu paylaşır:
+  /is-listesi  → CokluUyap ana hesaplarıyla (ahmet@ofis) giriş; her büro yalnız kendi işlerini
+                 görür. Büro sahibi (master) yönetici, üye kullanıcıdır. Masaüstü uygulaması
+                 Bearer jetonla (/is-listesi/api/token) bağlanır.
+  /zs          → eski arayüz, YEDEK olarak aynen durur: kendi (ayrı) kullanıcılarıyla giriş.
+                 Ana hesaba eşlenmemiş kullanıcılar burada eski ortak havuzu görür.
+Eski kullanıcılar ana hesaplara owner'ın /is-listesi/yonetim/eslestir ekranından bağlanır.
+
+vendor_server.make_app içinden `zs.register(app, ...)` ile bağlanır; yalnız bu iki önekle
+başlayan rotalar ekler. vendor_server'ı içe AKTARMAZ (döngüsel import olmasın) — oturum anahtarı,
+giriş sınırlayıcı, IP fonksiyonu, hesap deposu ve owner oturumu okuyucu parametre olarak gelir.
 
 Ortam değişkenleri:
   ZS_ADMIN_USER / ZS_ADMIN_PASSWORD  → hiç kullanıcı yokken ilk yöneticiyi açar
@@ -28,16 +36,20 @@ import secrets
 
 from aiohttp import web
 
+import accounts
 import zs_r2
 import zs_rapor
 import zs_bildirim
 import zs_tg_grup
-from zs_store import ZsStore, ZsError
+from zs_store import ZsStore, ZsError, office_of
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ZS_WEB_DIR = os.path.join(BASE_DIR, "webapp", "zs")
 
-COOKIE = "zs_sess"
+NEW = "/is-listesi"     # ana hesaplarla, büro bazlı
+OLD = "/zs"             # eski arayüz (yedek)
+PREFIXES = (OLD, NEW)
+WEB_DIRS = {OLD: os.path.join(BASE_DIR, "webapp", "zs"), NEW: os.path.join(BASE_DIR, "webapp", "is_listesi")}
+COOKIES = {OLD: "zs_sess", NEW: "il_sess"}
 SESSION_TTL = int(os.environ.get("ZS_SESSION_TTL", "43200"))  # 12 saat
 MAX_FILE = int(os.environ.get("ZS_MAX_FILE_MB", "25")) * 1024 * 1024
 
@@ -70,9 +82,17 @@ class _Ctx:
     storage_desc = ""
     notifier = None
     setup_error = None      # hiç kullanıcı yokken giriş sayfasında gösterilecek kurulum sorunu
+    accounts = None         # accounts.AccountStore (ana hesaplar); yoksa /is-listesi girişi kapalı
+    owner_user = None       # request → owner kullanıcı adı | None (vendor_server owner oturumu)
+    tok_secret = b""        # Bearer jeton imza anahtarı (çerez anahtarından ayrı)
 
 
 C = _Ctx()
+
+
+def _prefix(request) -> str:
+    p = request.path
+    return NEW if p == NEW or p.startswith(NEW + "/") else OLD
 
 
 # ── yardımcılar ──────────────────────────────────────────────────────────────────────
@@ -89,28 +109,116 @@ def _err(msg, status=400):
     return _json({"ok": False, "error": msg}, status=status)
 
 
-def _make_cookie(user) -> str:
+def _account_rec(account_username):
+    """Ana hesap kaydı (etkin, büroya bağlı, büro etkin) ya da None."""
+    if not C.accounts or not account_username:
+        return None
+    rec = C.accounts.users.get(account_username)
+    if not rec or rec.get("role") == "owner" or not rec.get("active", True):
+        return None
+    office = C.accounts.get_office(rec.get("office_id"))
+    if not office or not office.get("active", True):
+        return None
+    return rec
+
+
+def _make_cookie(user, key=None) -> str:
+    """uid|zs_epoch|exp[|ana_hesap_epoch]|imza. Ana hesaba bağlı kullanıcıda ana hesabın epoch'u da
+    gömülür: parolası değişir/çıkış yapılır/pasifleşirse İş Listesi oturumu da düşer."""
     exp = int(time.time()) + SESSION_TTL
     payload = f"{user['id']}|{user['sess_epoch']}|{exp}"
-    sig = hmac.new(C.secret, payload.encode(), hashlib.sha256).hexdigest()
+    if user.get("account_username"):
+        rec = (C.accounts.users.get(user["account_username"]) if C.accounts else None) or {}
+        payload += f"|{rec.get('sess_epoch', 0)}"
+    sig = hmac.new(key or C.secret, payload.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode("ascii")
 
 
-async def _current_user(request):
-    tok = request.cookies.get(COOKIE)
+async def _read_token(tok, key):
     if not tok:
         return None
     try:
-        uid, epoch, exp, sig = base64.urlsafe_b64decode(tok.encode("ascii")).decode().split("|")
-        expected = hmac.new(C.secret, f"{uid}|{epoch}|{exp}".encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected) or int(exp) < time.time():
+        parts = base64.urlsafe_b64decode(tok.encode("ascii")).decode().split("|")
+        if len(parts) not in (4, 5):
+            return None
+        uid, epoch, exp = parts[:3]
+        acct = parts[3] if len(parts) == 5 else None
+        expected = hmac.new(key, "|".join(parts[:-1]).encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(parts[-1], expected) or int(exp) < time.time():
             return None
         u = await _db(C.store.get_user, int(uid))
     except Exception:
         return None
     if not u or not u["active"] or str(u["sess_epoch"]) != epoch:
         return None
+    if u.get("account_username"):
+        rec = _account_rec(u["account_username"])
+        if acct is None or not rec or str(rec.get("sess_epoch", 0)) != acct \
+                or (rec.get("office_id") or "") != office_of(u):
+            return None
+    elif acct is not None:
+        return None
     return u
+
+
+async def _auth(request):
+    """(kullanıcı, "cookie"|"bearer") — /is-listesi yalnız ana hesaba bağlı kullanıcıya açıktır."""
+    h = request.headers.get("Authorization") or ""
+    if h.startswith("Bearer "):
+        u, via = await _read_token(h[7:].strip(), C.tok_secret), "bearer"
+    else:
+        u, via = await _read_token(request.cookies.get(COOKIES[_prefix(request)]), C.secret), "cookie"
+    if u and _prefix(request) == NEW and not u.get("account_username"):
+        u = None
+    return u, via
+
+
+async def _current_user(request):
+    return (await _auth(request))[0]
+
+
+def _display_name(account_username, rec):
+    return (rec.get("label") or "").strip() or account_username.split("@", 1)[0]
+
+
+def _sync_user(account_username):
+    """Ana hesabın İş Listesi satırını eşitler (senkron; _db ile çağrılır)."""
+    rec = C.accounts.users.get(account_username) if C.accounts else None
+    if not rec:
+        u = C.store.user_by_account(account_username)
+        if u and u["active"]:     # ana hesap silinmiş → kapat
+            C.store.sync_account(account_username, u["office_id"], u["display_name"], False, False)
+        return u
+    return C.store.sync_account(account_username, rec.get("office_id"), _display_name(account_username, rec),
+                                bool(_account_rec(account_username)), rec.get("role") == "master")
+
+
+def _sync_office(office_id):
+    """Büronun tüm ana hesaplarını İş Listesi'ne yansıtır: hiç girmemiş üyeye de iş atanabilsin;
+    silinen/pasif hesaplar kapansın."""
+    if not C.accounts or not office_id:
+        return
+    names = [n for n, r in list(C.accounts.users.items()) if r.get("office_id") == office_id and r.get("role") != "owner"]
+    for n in names:
+        _sync_user(n)
+    for u in C.store.list_users(office_id):
+        if u["account_username"] and u["account_username"] not in names:
+            _sync_user(u["account_username"])
+
+
+def _account_login(office_code, username, password):
+    """Ana hesapla giriş → (İş Listesi kullanıcısı, None) | (None, hata). Olay döngüsünde çağrılır
+    (vendor_server da STORE.authenticate'i böyle çağırır; hesap deposu iş parçacığına açılmaz)."""
+    if not C.accounts:
+        return None, "Ana hesap girişi bu sunucuda kapalı."
+    username = (username or "").strip()
+    scoped = username if "@" in username or not office_code else accounts.compose_username(office_code, username)
+    ok, reason, info = C.accounts.authenticate(scoped, password or "")
+    if not ok:
+        return None, reason
+    if info.get("role") == "owner":
+        return None, "Platform hesabıyla İş Listesi'ne girilmez; büro hesabınızı kullanın."
+    return scoped, None
 
 
 # ── denetim kaydı (geliştirici) ──────────────────────────────────────────────────────
@@ -118,33 +226,34 @@ async def _current_user(request):
 # yazılır. Arayüzde ve API'de okuma ucu YOKTUR; yalnız zs_denetim.py ile (sunucuda) okunur.
 # Parolalar kaydedilmez. Silme/düzenlemede işlemden önceki hâl ("before") saklanır.
 _ACTIONS = {
-    ("POST", "/zs/api/me/password"): "parola_degistir",
-    ("POST", "/zs/api/users"): "kullanici_ekle",
-    ("POST", "/zs/api/users/{id}"): "kullanici_duzenle",
-    ("POST", "/zs/api/users/{id}/aktif"): "kullanici_aktiflik",
-    ("POST", "/zs/api/users/{id}/sifre"): "kullanici_parola_sifirla",
-    ("POST", "/zs/api/tasks"): "is_ac",
-    ("PATCH", "/zs/api/tasks/{id}"): "is_duzenle",
-    ("DELETE", "/zs/api/tasks/{id}"): "is_sil",
-    ("POST", "/zs/api/tasks/{id}/durum"): "is_durum",
-    ("POST", "/zs/api/tasks/{id}/devret"): "is_devret",
-    ("POST", "/zs/api/tasks/{id}/gorunur"): "is_gorunur_yap",
-    ("POST", "/zs/api/tasks/{id}/kisiler"): "kisi_ekle",
-    ("POST", "/zs/api/tasks/{id}/kisiler/cikar"): "kisi_cikar",
-    ("POST", "/zs/api/tasks/{id}/ek-sure"): "ek_sure_iste",
-    ("POST", "/zs/api/ek-sure/{id}/karar"): "ek_sure_karar",
-    ("POST", "/zs/api/tasks/{id}/notes"): "not_ekle",
-    ("POST", "/zs/api/tasks/{id}/hatirlatici"): "hatirlatici_kur",
-    ("POST", "/zs/api/hatirlatici"): "hatirlatici_kur_bagimsiz",
-    ("DELETE", "/zs/api/hatirlatici/{id}"): "hatirlatici_sil",
-    ("POST", "/zs/api/tasks/{id}/files"): "belge_yukle",
-    ("DELETE", "/zs/api/files/{id}"): "belge_sil",
-    ("GET", "/zs/api/files/{id}"): "belge_indir",
-    ("POST", "/zs/api/bildirim/push"): "bildirim_cihaz_ekle",
-    ("POST", "/zs/api/bildirim/push/sil"): "bildirim_cihaz_sil",
-    ("POST", "/zs/api/bildirim/telegram"): "bildirim_telegram_kod",
-    ("POST", "/zs/api/bildirim/telegram/sil"): "bildirim_telegram_sil",
-    ("POST", "/zs/api/bildirim/deneme"): "bildirim_deneme",
+    ("POST", "/api/me/password"): "parola_degistir",
+    ("POST", "/api/users"): "kullanici_ekle",
+    ("POST", "/api/users/{id}"): "kullanici_duzenle",
+    ("POST", "/api/users/{id}/aktif"): "kullanici_aktiflik",
+    ("POST", "/api/users/{id}/sifre"): "kullanici_parola_sifirla",
+    ("POST", "/api/tasks"): "is_ac",
+    ("PATCH", "/api/tasks/{id}"): "is_duzenle",
+    ("DELETE", "/api/tasks/{id}"): "is_sil",
+    ("POST", "/api/tasks/{id}/durum"): "is_durum",
+    ("POST", "/api/tasks/{id}/devret"): "is_devret",
+    ("POST", "/api/tasks/{id}/gorunur"): "is_gorunur_yap",
+    ("POST", "/api/tasks/{id}/kisiler"): "kisi_ekle",
+    ("POST", "/api/tasks/{id}/kisiler/cikar"): "kisi_cikar",
+    ("POST", "/api/tasks/{id}/ek-sure"): "ek_sure_iste",
+    ("POST", "/api/ek-sure/{id}/karar"): "ek_sure_karar",
+    ("POST", "/api/tasks/{id}/notes"): "not_ekle",
+    ("POST", "/api/tasks/{id}/hatirlatici"): "hatirlatici_kur",
+    ("POST", "/api/hatirlatici"): "hatirlatici_kur_bagimsiz",
+    ("DELETE", "/api/hatirlatici/{id}"): "hatirlatici_sil",
+    ("POST", "/api/tasks/{id}/files"): "belge_yukle",
+    ("DELETE", "/api/files/{id}"): "belge_sil",
+    ("GET", "/api/files/{id}"): "belge_indir",
+    ("POST", "/api/bildirim/push"): "bildirim_cihaz_ekle",
+    ("POST", "/api/bildirim/push/sil"): "bildirim_cihaz_sil",
+    ("POST", "/api/bildirim/telegram"): "bildirim_telegram_kod",
+    ("POST", "/api/bildirim/telegram/sil"): "bildirim_telegram_sil",
+    ("POST", "/api/bildirim/deneme"): "bildirim_deneme",
+    ("POST", "/api/sso-kod"): "web_gecis_kodu",
 }
 _SECRET_KEYS = {"password", "old", "new", "pw", "parola", "sifre"}
 
@@ -160,10 +269,15 @@ def _redact(v):
 
 
 def _route(request) -> str:
+    """Kanonik rota, önek olmadan ('/api/tasks/{id}') — iki arayüz aynı eylem adlarını kullanır."""
     try:
-        return request.match_info.route.resource.canonical
+        r = request.match_info.route.resource.canonical
     except Exception:
-        return request.path
+        r = request.path
+    for p in PREFIXES:
+        if r.startswith(p + "/"):
+            return r[len(p):]
+    return r
 
 
 def _target(request):
@@ -190,15 +304,15 @@ async def _before(request, method, route):
     if tid is None:
         return None
     try:
-        if route.startswith("/zs/api/tasks/{id}"):
+        if route.startswith("/api/tasks/{id}"):
             return await _db(C.store.snapshot_task, tid, method == "DELETE")
-        if route.startswith("/zs/api/files/{id}"):
+        if route.startswith("/api/files/{id}"):
             return await _db(C.store.snapshot_file, tid)
-        if route.startswith("/zs/api/hatirlatici/{id}"):
+        if route.startswith("/api/hatirlatici/{id}"):
             return await _db(C.store.get_reminder, tid)
-        if route.startswith("/zs/api/ek-sure/{id}"):
+        if route.startswith("/api/ek-sure/{id}"):
             return await _db(C.store.snapshot_extension, tid)
-        if route.startswith("/zs/api/users/{id}"):
+        if route.startswith("/api/users/{id}"):
             return C.store._public_user(await _db(C.store.get_user, tid))
     except Exception as e:
         return {"snapshot_hatasi": str(e)[:300]}
@@ -244,9 +358,12 @@ def _api(admin=False):
     """API uç dekoratörü: oturum + (durum değiştiren isteklerde) X-ZS başlığı + hata çevirisi + denetim kaydı."""
     def deco(fn):
         async def run(request, st):
-            if request.method not in ("GET", "HEAD") and request.headers.get("X-ZS") != "1":
+            user, via = await _auth(request)
+            # Çerezli isteklerde CSRF koruması: X-ZS başlığı. Bearer jeton tarayıcıca kendiliğinden
+            # gönderilmediği için (masaüstü uygulaması) başlık aranmaz.
+            if request.method not in ("GET", "HEAD") and via != "bearer" and request.headers.get("X-ZS") != "1":
                 return _err("Geçersiz istek.", 403)
-            user = st["user"] = await _current_user(request)
+            st["user"] = user
             if not user:
                 return _err("Oturum yok ya da süresi doldu.", 401)
             if admin and user["role"] != "admin":
@@ -335,14 +452,19 @@ def _can_edit_sub(user, sub, root) -> bool:
 
 
 # ── sayfalar ─────────────────────────────────────────────────────────────────────────
-_PWA_HEAD = ("<link rel='manifest' href='/zs/manifest.webmanifest'>"
-             "<link rel='icon' href='/zs/static/icon-192.png' type='image/png'>"
-             "<link rel='apple-touch-icon' href='/zs/static/apple-touch-icon.png'>"
-             "<meta name='theme-color' content='#4f46e5'>"
-             "<meta name='apple-mobile-web-app-capable' content='yes'>"
-             "<meta name='mobile-web-app-capable' content='yes'>"
-             "<meta name='apple-mobile-web-app-title' content='İş Takip'>"
-             "<meta name='apple-mobile-web-app-status-bar-style' content='default'>")
+def _pwa_head(p):
+    return (f"<link rel='manifest' href='{p}/manifest.webmanifest'>"
+            f"<link rel='icon' href='{p}/static/icon-192.png' type='image/png'>"
+            f"<link rel='apple-touch-icon' href='{p}/static/apple-touch-icon.png'>"
+            "<meta name='theme-color' content='#4f46e5'>"
+            "<meta name='apple-mobile-web-app-capable' content='yes'>"
+            "<meta name='mobile-web-app-capable' content='yes'>"
+            f"<meta name='apple-mobile-web-app-title' content='{_title(p)}'>"
+            "<meta name='apple-mobile-web-app-status-bar-style' content='default'>")
+
+
+def _title(p):
+    return "İş Listesi" if p == NEW else "İş Takip"
 
 _LOGIN_CSS = """<style>
 :root{--bg:#f3f4f8;--card:#fff;--text:#111827;--muted:#6b7280;--border:#d3d8e3;--accent:#4f46e5;--accent2:#4338ca;--soft:#eef0ff;--err:#dc2626;--errbg:#fee2e2}
@@ -365,7 +487,9 @@ button:hover{background:var(--accent2)}
 </style>"""
 
 
-def _login_page(msg=None, status=200):
+def _login_page(msg=None, status=200, p=OLD, office_code=""):
+    if p == NEW:
+        return _new_login_page(msg, status, office_code)
     if not msg and C.setup_error and C.store is not None:
         try:
             if C.store.user_count() == 0:
@@ -377,9 +501,24 @@ def _login_page(msg=None, status=200):
     note = f"<div class='msg'>{html.escape(msg)}</div>" if msg else ""
     body = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='color-scheme' content='light dark'>
-{_PWA_HEAD}<title>İş Takip — Giriş</title>{_LOGIN_CSS}</head><body><form class='box' method='post' action='/zs/login'>
+{_pwa_head(OLD)}<title>İş Takip — Giriş</title>{_LOGIN_CSS}</head><body><form class='box' method='post' action='/zs/login'>
 <div class='logo'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M20 6 9 17l-5-5'/></svg></div>
 <h1>İş Takip</h1><p>Görev, onay ve belge takibi</p>{note}
+<label for='u'>Kullanıcı adı</label><input id='u' name='username' autocomplete='username' required autofocus>
+<label for='p'>Parola</label><input id='p' name='password' type='password' autocomplete='current-password' required>
+<button type='submit'>Giriş yap</button><div class='foot'>cokluuyap</div></form></body></html>"""
+    return web.Response(text=body, content_type="text/html", charset="utf-8", status=status,
+                        headers={"Cache-Control": "no-store"})
+
+
+def _new_login_page(msg, status, office_code=""):
+    note = f"<div class='msg'>{html.escape(msg)}</div>" if msg else ""
+    body = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='color-scheme' content='light dark'>
+{_pwa_head(NEW)}<title>İş Listesi — Giriş</title>{_LOGIN_CSS}</head><body><form class='box' method='post' action='{NEW}/login'>
+<div class='logo'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M20 6 9 17l-5-5'/></svg></div>
+<h1>İş Listesi</h1><p>CokluUyap hesabınızla girin</p>{note}
+<label for='o'>Ofis kodu</label><input id='o' name='office_code' value='{html.escape(office_code)}' autocomplete='organization' required>
 <label for='u'>Kullanıcı adı</label><input id='u' name='username' autocomplete='username' required autofocus>
 <label for='p'>Parola</label><input id='p' name='password' type='password' autocomplete='current-password' required>
 <button type='submit'>Giriş yap</button><div class='foot'>cokluuyap</div></form></body></html>"""
@@ -390,10 +529,11 @@ def _login_page(msg=None, status=200):
 async def page_get(request):
     if C.store is None:
         return web.Response(status=503, text="İş Takip şu an kullanılamıyor (veritabanı hatası).")
+    p = _prefix(request)
     user = await _current_user(request)
     if not user:
-        return _login_page()
-    with open(os.path.join(ZS_WEB_DIR, "index.html"), "rb") as f:
+        return _login_page(p=p)
+    with open(os.path.join(WEB_DIRS[p], "index.html"), "rb") as f:
         data = f.read()
     return web.Response(body=data, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-store"})
@@ -402,31 +542,56 @@ async def page_get(request):
 async def login_post(request):
     if C.store is None:
         return web.Response(status=503, text="İş Takip şu an kullanılamıyor.")
-    key = f"zs-login:{C.client_ip(request)}"
+    p = _prefix(request)
+    key = f"{'il' if p == NEW else 'zs'}-login:{C.client_ip(request)}"
     t0 = time.monotonic()
     wait = C.guard.blocked_for(key)
     if wait:
         await _audit(request, None, "giris_engellendi", 429, t0=t0, error=f"{wait} sn bekleme")
-        return _login_page(f"Çok fazla hatalı deneme. {wait} sn sonra tekrar deneyin.", status=429)
+        return _login_page(f"Çok fazla hatalı deneme. {wait} sn sonra tekrar deneyin.", status=429, p=p)
     form = await request.post()
     uname = str(form.get("username", ""))[:100]
-    user = await _db(C.store.authenticate, uname, form.get("password", ""))
+    office_code = str(form.get("office_code", ""))[:100]
+    if p == NEW:
+        user, err = await _new_login(office_code, uname, str(form.get("password", "")))
+    else:
+        user = await _db(C.store.authenticate, uname, form.get("password", ""))
+        err = "Kullanıcı adı veya parola hatalı."
     if not user:
         C.guard.record_fail(key)
-        await _audit(request, None, "giris", 401, t0=t0, error="Kullanıcı adı veya parola hatalı.", username=uname)
-        return _login_page("Kullanıcı adı veya parola hatalı.", status=401)
+        await _audit(request, None, "giris", 401, t0=t0, error=err, username=uname)
+        return _login_page(err, status=401, p=p, office_code=office_code)
     C.guard.record_ok(key)
     await _audit(request, user, "giris", 303, t0=t0)
-    resp = _see_other("/zs")
-    resp.set_cookie(COOKIE, _make_cookie(user), max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/zs")
+    resp = _see_other(p)
+    _set_session(resp, p, user)
     return resp
 
 
+async def _new_login(office_code, username, password):
+    """Ana hesapla giriş + İş Listesi satırını (ve büroyu) eşitleme → (kullanıcı, None) | (None, hata)."""
+    scoped, err = _account_login(office_code, username, password)
+    if not scoped:
+        return None, err
+    user = await _db(_sync_user, scoped)
+    if user:
+        await _db(_sync_office, user["office_id"])
+        user = await _db(C.store.get_user, user["id"])
+    if not (user and user["active"]):
+        return None, "Hesabınız İş Listesi'nde kapalı."
+    return user, None
+
+
+def _set_session(resp, p, user):
+    resp.set_cookie(COOKIES[p], _make_cookie(user), max_age=SESSION_TTL, httponly=True, samesite="Strict", path=p)
+
+
 async def logout_post(request):
+    p = _prefix(request)
     if C.store is not None:
         await _audit(request, await _current_user(request), "cikis", 303)
-    resp = _see_other("/zs")
-    resp.del_cookie(COOKIE, path="/zs")
+    resp = _see_other(p)
+    resp.del_cookie(COOKIES[p], path=p)
     return resp
 
 
@@ -435,18 +600,21 @@ def _see_other(location):
     return web.Response(status=303, headers={"Location": location, "Cache-Control": "no-store"})
 
 
-async def _slash_redirect(_request):
-    return _see_other("/zs")
+async def _slash_redirect(request):
+    return _see_other(_prefix(request))
 
 
-def _static(name, ctype, binary=False, headers=None):
-    async def handler(_request):
-        path = os.path.join(ZS_WEB_DIR, name)
+def _static(name, ctype, binary=False, sw=False):
+    async def handler(request):
+        p = _prefix(request)
+        path = os.path.join(WEB_DIRS[p], name)
         if not os.path.isfile(path):
             return web.Response(status=404, text="Bulunamadı.")
         with open(path, "rb") as f:
             data = f.read()
-        hdr = {"Cache-Control": "public, max-age=86400" if binary else "no-cache", **(headers or {})}
+        hdr = {"Cache-Control": "public, max-age=86400" if binary else "no-cache"}
+        if sw:
+            hdr["Service-Worker-Allowed"] = p
         if binary:
             return web.Response(body=data, content_type=ctype, headers=hdr)
         return web.Response(body=data, content_type=ctype, charset="utf-8", headers=hdr)
@@ -454,21 +622,38 @@ def _static(name, ctype, binary=False, headers=None):
 
 
 # ── API: oturum / kullanıcılar ───────────────────────────────────────────────────────
+_ACCOUNT_MANAGED = "Bu kişi CokluUyap hesabıyla bağlı; ad, parola ve etkinlik Ofis panelinden (/ofis) yönetilir."
+
+
 @_api()
 async def api_me(request, user):
-    users = await _db(C.store.list_users)
+    if user.get("account_username"):
+        await _db(_sync_office, user["office_id"])     # büroya yeni eklenen hesaplar da atanabilsin
+    users = await _db(C.store.list_users, office_of(user))
     people = [{"id": u["id"], "display_name": u["display_name"], "active": u["active"]} for u in users]
+    office = (C.accounts.get_office(user["office_id"]) if C.accounts and user.get("office_id") else None) or {}
     return _json({"ok": True, "me": ZsStore._public_user(user), "people": people,
+                  "office": {"label": office.get("label", ""), "code": office.get("slug", "")} if office else None,
                   "uploads": bool(C.storage and C.file_key), "max_file_mb": MAX_FILE // (1024 * 1024)})
+
+
+async def _office_user(user, uid):
+    """Yöneticinin bürosundaki kullanıcı (değilse 'bulunamadı' — başka büroyu sızdırmadan)."""
+    u = await _db(C.store.get_user, uid)
+    if not u or office_of(u) != office_of(user):
+        raise ZsError("Kullanıcı bulunamadı.")
+    return u
 
 
 @_api(admin=True)
 async def api_users_list(request, user):
-    return _json({"ok": True, "users": await _db(C.store.list_users)})
+    return _json({"ok": True, "users": await _db(C.store.list_users, office_of(user))})
 
 
 @_api(admin=True)
 async def api_users_create(request, user):
+    if user.get("account_username"):
+        raise ZsError("Kişiler CokluUyap Ofis panelinden (/ofis) eklenir; eklenen hesap burada kendiliğinden görünür.")
     d = await _body(request)
     pw = (d.get("password") or "").strip() or _gen_password()
     u = await _db(C.store.create_user, d.get("username"), d.get("display_name"), pw, d.get("role") or "user")
@@ -479,6 +664,8 @@ async def api_users_create(request, user):
 async def api_users_active(request, user):
     d = await _body(request)
     uid = int(request.match_info["id"])
+    if (await _office_user(user, uid)).get("account_username"):
+        raise ZsError(_ACCOUNT_MANAGED)
     if uid == user["id"] and not d.get("active"):
         raise ZsError("Kendi hesabınızı kapatamazsınız.")
     await _db(C.store.set_active, uid, bool(d.get("active")))
@@ -489,30 +676,44 @@ async def api_users_active(request, user):
 async def api_users_update(request, user):
     d = await _body(request)
     uid = int(request.match_info["id"])
+    target = await _office_user(user, uid)
     role = d.get("role")
     if uid == user["id"] and role is not None and role != user["role"]:
         raise ZsError("Kendi rolünüzü değiştiremezsiniz.")
-    u = await _db(C.store.update_user, uid, d.get("display_name"), role)
+    if target.get("account_username"):
+        if d.get("display_name") is not None and d["display_name"] != target["display_name"]:
+            raise ZsError(_ACCOUNT_MANAGED)
+        rec = C.accounts.users.get(target["account_username"]) if C.accounts else None
+        if role not in (None, "admin") and rec and rec.get("role") == "master":
+            raise ZsError("Büro sahibi (master) her zaman yöneticidir.")
+        u = await _db(C.store.update_user, uid, None, role)
+    else:
+        u = await _db(C.store.update_user, uid, d.get("display_name"), role)
     return _json({"ok": True, "user": u})
 
 
 @_api(admin=True)
 async def api_users_password(request, user):
     d = await _body(request)
+    uid = int(request.match_info["id"])
+    if (await _office_user(user, uid)).get("account_username"):
+        raise ZsError(_ACCOUNT_MANAGED)
     pw = (d.get("password") or "").strip() or _gen_password()
-    await _db(C.store.set_password, int(request.match_info["id"]), pw)
+    await _db(C.store.set_password, uid, pw)
     return _json({"ok": True, "password": pw})
 
 
 @_api()
 async def api_my_password(request, user):
+    if user.get("account_username"):
+        raise ZsError("Parolanızı CokluUyap hesabınızdan değiştirin (İş Listesi aynı parolayı kullanır).")
     d = await _body(request)
     if not await _db(C.store.authenticate, user["username"], d.get("old") or ""):
         raise ZsError("Mevcut parola hatalı.")
     await _db(C.store.set_password, user["id"], d.get("new") or "")
     fresh = await _db(C.store.get_user, user["id"])
     resp = _json({"ok": True})
-    resp.set_cookie(COOKIE, _make_cookie(fresh), max_age=SESSION_TTL, httponly=True, samesite="Strict", path="/zs")
+    _set_session(resp, _prefix(request), fresh)
     return resp
 
 
@@ -530,7 +731,8 @@ async def api_tasks(request, user):
     filtre = request.query.get("filtre", "benim")
     if filtre not in ("benim", "onay", "tumu"):
         filtre = "benim"
-    return _json({"ok": True, "tasks": await _db(C.store.list_tree, user, filtre)})
+    dosya_id = (request.query.get("dosya_id") or "").strip()[:200] or None
+    return _json({"ok": True, "tasks": await _db(C.store.list_tree, user, filtre, dosya_id)})
 
 
 @_api()
@@ -565,7 +767,7 @@ async def api_task_create(request, user):
     private = bool(d.get("private")) and not parent_id
     t = await _db(C.store.create_task, user, d.get("title"), parent_id, d.get("description") or "",
                   assignee, _opt_int(d.get("due_at")), private=private,
-                  priority=1 if pr is None else pr)
+                  priority=1 if pr is None else pr, dosya=d.get("dosya"))
     # Yönetici işi açarken ek atanan / onay yetkilisi de seçebilir.
     if user["role"] == "admin" and not parent_id and not private:
         for role, key in (("assignee", "assignees"), ("approver", "approvers")):
@@ -586,6 +788,8 @@ async def api_task_update(request, user):
     for k in ("assignee_id", "due_at", "priority"):
         if k in d:
             fields[k] = _opt_int(d[k])
+    if "dosya" in d:
+        fields["dosya"] = d["dosya"]
     if "done" in d:
         fields["done"] = bool(d["done"])
     if d.get("move") in (-1, 1):
@@ -716,7 +920,7 @@ async def _create_reminder(user, task_id, d):
     other = None
     if target != user["id"]:
         other = await _db(C.store.get_user, target)
-        if not other or not other["active"]:
+        if not other or not other["active"] or office_of(other) != office_of(user):
             raise ZsError("Kişi bulunamadı.")
     when, note = _opt_int(d.get("remind_at")), d.get("note") or ""
     if task_id is None:
@@ -799,8 +1003,8 @@ async def api_report(request, user):
         group = q.get("grup") or "hafta"
         person = _opt_int(q.get("kisi")) if admin else user["id"]
         now = int(time.time())
-        src = await _db(C.store.report_source, user["id"])
-        users = await _db(C.store.list_users) if admin else []
+        src = await _db(C.store.report_source, user["id"], office_of(user))
+        users = await _db(C.store.list_users, office_of(user)) if admin else []
         return _json({"ok": True,
                       "kisiler": zs_rapor.kisi_raporu(src, users, start, end, now),
                       "donemler": zs_rapor.zaman_raporu(src, start, end, group, now, person),
@@ -814,6 +1018,8 @@ async def api_activity(request, user):
     """Kişinin bir dönemde yaptıkları. Yönetici herkesinkini, kullanıcı yalnız kendisininkini görür."""
     q = request.query
     person = (_opt_int(q.get("kisi")) or user["id"]) if user["role"] == "admin" else user["id"]
+    if person != user["id"]:
+        await _office_user(user, person)
     try:
         start, end = zs_rapor.parse_range(q.get("bas"), q.get("bit"))
         if end - start > 366 * 86400:
@@ -1088,12 +1294,15 @@ async def _tg_fetch(att):
     return filename, data
 
 
-async def _tg_resolve(mentions):
-    """Etiketlenenler → zs kullanıcıları (sıralı, tekrarsız). Bağlı olmayan varsa ZsError."""
+async def _tg_resolve(mentions, office):
+    """Etiketlenenler → zs kullanıcıları (sıralı, tekrarsız; yalnız gönderenin bürosundan).
+    Bağlı olmayan varsa ZsError."""
     users, missing = [], []
     for m in mentions:
-        u = await _db(C.store.tg_user_by_username, m[1]) if m[0] == "username" \
+        u = await _db(C.store.tg_user_by_username, m[1], office) if m[0] == "username" \
             else await _db(C.store.tg_user_by_chat, m[1])
+        if u and office_of(u) != office:
+            u = None
         if not u:
             missing.append("@" + m[1] if m[0] == "username" else (m[2] or "?"))
         elif u["id"] not in [x["id"] for x in users]:
@@ -1103,15 +1312,16 @@ async def _tg_resolve(mentions):
     return users
 
 
-def _tg_task_link(task_id):
+def _tg_task_link(task_id, user):
     base = C.notifier.public_url if C.notifier else ""
-    return f"\n<a href=\"{html.escape(base)}/zs#is-{task_id}\">İşi aç</a>" if base else ""
+    p = NEW if user.get("account_username") else OLD
+    return f"\n<a href=\"{html.escape(base)}{p}#is-{task_id}\">İşi aç</a>" if base else ""
 
 
 async def _tg_open_task(user, msg, cmd):
     reply = msg.get("reply_to_message") or {}
     att = zs_tg_grup.attachment(msg) or zs_tg_grup.attachment(reply)
-    people = await _tg_resolve(cmd["mentions"])
+    people = await _tg_resolve(cmd["mentions"], office_of(user))
     if user["role"] != "admin" and any(u["id"] != user["id"] for u in people):
         raise ZsError("Başkasına iş yalnız yönetici atayabilir; kendinize açmak için kimseyi etiketlemeyin.")
     assignee = people[0] if people else user
@@ -1141,7 +1351,7 @@ async def _tg_open_task(user, msg, cmd):
                     data={"title": title, "mentions": [list(m) for m in cmd["mentions"]],
                           "file": file[0] if file else None},
                     result={"task": {"id": t["id"]}, "file": {"id": f["id"]} if f else None}, error=file_err)
-    return "\n".join(lines) + _tg_task_link(t["id"]) + \
+    return "\n".join(lines) + _tg_task_link(t["id"], user) + \
         "\n<i>Bu mesaja yanıt vererek işe belge ya da not ekleyebilirsiniz.</i>", t["id"]
 
 
@@ -1165,7 +1375,7 @@ async def _tg_add_to_task(user, msg, task_id):
         lines.append("Not eklendi.")
     await _tg_audit(msg, user, "tg_ekle", True, target=root["id"], data={"file": file[0] if file else None, "note": bool(text)},
                     result={"file": {"id": f["id"]} if f else None, "note": {"id": n["id"]} if n else None})
-    return "\n".join(lines) + _tg_task_link(root["id"]), root["id"]
+    return "\n".join(lines) + _tg_task_link(root["id"], user), root["id"]
 
 
 async def tg_group_message(msg):
@@ -1210,6 +1420,164 @@ async def tg_group_message(msg):
         await _db(C.store.tg_msg_save, chat_id, sent, tid)
 
 
+# ── masaüstü (CokluUyap) bağlantısı ──────────────────────────────────────────────────
+# Masaüstü uygulaması kullanıcının CokluUyap hesabıyla jeton alır; UYAP dosya kartından iş
+# atarken /is-listesi/api/* uçlarını "Authorization: Bearer <jeton>" ile çağırır. "İş Listesi"
+# bağlantısı için tek kullanımlık kod alır; tarayıcı /is-listesi/sso?kod=… ile şifresiz girer.
+async def api_token(request):
+    if C.store is None:
+        return _err("İş Listesi şu an kullanılamıyor.", 503)
+    key = f"il-token:{C.client_ip(request)}"
+    t0 = time.monotonic()
+    wait = C.guard.blocked_for(key)
+    if wait:
+        await _audit(request, None, "jeton_engellendi", 429, t0=t0, error=f"{wait} sn bekleme")
+        return _err(f"Çok fazla hatalı deneme. {wait} sn sonra tekrar deneyin.", 429)
+    try:
+        d = await _body(request)
+    except ValueError:
+        return _err("Geçersiz istek verisi.")
+    uname = str(d.get("username") or "")[:100]
+    user, err = await _new_login(str(d.get("office_code") or "")[:100], uname, str(d.get("password") or ""))
+    if not user:
+        C.guard.record_fail(key)
+        await _audit(request, None, "jeton", 401, t0=t0, error=err, username=uname)
+        return _err(err, 401)
+    C.guard.record_ok(key)
+    await _audit(request, user, "jeton", 200, t0=t0)
+    return _json({"ok": True, "token": _make_cookie(user, C.tok_secret), "expires_in": SESSION_TTL,
+                  "me": ZsStore._public_user(user)})
+
+
+@_api()
+async def api_sso_code(request, user):
+    if not user.get("account_username"):
+        raise ZsError("Yalnız CokluUyap hesabıyla kullanılabilir.")
+    code = await _db(C.store.sso_code_new, user["id"])
+    return _json({"ok": True, "url": f"{NEW}/sso?kod={code}"})
+
+
+async def sso_get(request):
+    """Tek kullanımlık kodla oturum açar. Yanıt yönlendirme değil küçük bir sayfa: başka siteden
+    (127.0.0.1) gelinen gezinmede SameSite=Strict çerez hemen ardından gelen yönlendirmede
+    gönderilmez; sayfanın kendi başlattığı gezinme aynı site sayılır."""
+    if C.store is None:
+        return web.Response(status=503, text="İş Listesi şu an kullanılamıyor.")
+    t0 = time.monotonic()
+    code = (request.query.get("kod") or "")[:100]
+    uid = await _db(C.store.sso_code_use, code) if code else None
+    user = await _db(C.store.get_user, uid) if uid else None
+    ok = bool(user and user["active"] and _account_rec(user.get("account_username"))
+              and (_account_rec(user["account_username"]).get("office_id") or "") == office_of(user))
+    await _audit(request, user if ok else None, "web_gecis", 200 if ok else 401, t0=t0,
+                 error=None if ok else "Kod geçersiz ya da süresi dolmuş.")
+    if not ok:
+        return _login_page("Geçiş bağlantısının süresi dolmuş; giriş yapın.", status=401, p=NEW)
+    page = (f"<!doctype html><html lang='tr'><head><meta charset='utf-8'>"
+            f"<meta http-equiv='refresh' content='0;url={NEW}'><title>İş Listesi</title></head>"
+            f"<body><a href='{NEW}'>İş Listesi'ni aç</a></body></html>")
+    resp = web.Response(text=page, content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    _set_session(resp, NEW, user)
+    return resp
+
+
+# ── owner: eski /zs kullanıcılarını ana hesaplara eşleştirme ─────────────────────────
+# Yalnız platform owner'ı (vendor_server /owner oturumu, TOTP'li). Form gönderimi imzalı
+# bir jetonla korunur (CSRF): HMAC(owner adı + saat dilimi).
+_MAP_PATH = f"{NEW}/yonetim/eslestir"
+
+
+def _map_csrf(owner, hour=None):
+    hour = int(time.time() // 3600) if hour is None else hour
+    return hmac.new(C.secret, f"eslestir|{owner}|{hour}".encode(), hashlib.sha256).hexdigest()
+
+
+def _map_csrf_ok(owner, tok):
+    h = int(time.time() // 3600)
+    return any(hmac.compare_digest(tok or "", _map_csrf(owner, x)) for x in (h, h - 1))
+
+
+def _map_page(owner, msg="", err=False):
+    esc = html.escape
+    legacy = C.store.legacy_users()
+    offices = {oid: o for oid, o in C.accounts.offices.items()} if C.accounts else {}
+    linked = C.store.used_accounts()
+    opts = []
+    for oid, o in sorted(offices.items(), key=lambda kv: (kv[1].get("label") or "").lower()):
+        names = sorted(n for n, r in C.accounts.users.items()
+                       if r.get("office_id") == oid and r.get("role") != "owner" and n not in linked)
+        if names:
+            inner = "".join(f"<option value='{esc(n)}'>{esc(n)} — {esc(C.accounts.users[n].get('label') or '')}"
+                            f"{' (master)' if C.accounts.users[n].get('role') == 'master' else ''}</option>" for n in names)
+            opts.append(f"<optgroup label='{esc(o.get('label') or oid)} ({esc(o.get('slug') or '')})'>{inner}</optgroup>")
+    options = "".join(opts)
+    csrf = _map_csrf(owner)
+    rows = []
+    for u in legacy:
+        rows.append(
+            f"<tr><td>{esc(u['display_name'])}<div class='m'>{esc(u['username'])} · {esc(u['role'])}"
+            f"{'' if u['active'] else ' · kapalı'}</div></td><td><form method='post' action='{_MAP_PATH}'>"
+            f"<input type='hidden' name='csrf' value='{csrf}'><input type='hidden' name='zs_user_id' value='{u['id']}'>"
+            f"<select name='account_username' required><option value=''>— ana hesap seçin —</option>{options}</select>"
+            f"<button type='submit'>Eşleştir</button></form></td></tr>")
+    table = ("<table><tr><th>Eski /zs kullanıcısı</th><th>CokluUyap hesabı</th></tr>" + "".join(rows) + "</table>"
+             if rows else "<p>Eşleştirilmemiş eski kullanıcı kalmadı.</p>")
+    note = f"<div class='{'e' if err else 'k'}'>{esc(msg)}</div>" if msg else ""
+    body = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<meta name='color-scheme' content='light dark'><title>İş Listesi — Eşleştirme</title><style>
+:root{{--bg:#f3f4f8;--card:#fff;--text:#111827;--muted:#6b7280;--border:#d3d8e3;--accent:#4f46e5}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#0b0e15;--card:#131824;--text:#e8ebf2;--muted:#8b94a7;--border:#2e3850;--accent:#818cf8}}}}
+body{{margin:0;padding:16px;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,sans-serif}}
+main{{max-width:900px;margin:0 auto;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px}}
+table{{width:100%;border-collapse:collapse}} td,th{{text-align:left;padding:10px 6px;border-top:1px solid var(--border);vertical-align:top}}
+.m{{color:var(--muted);font-size:12px}} select{{max-width:100%;padding:6px}} button{{margin-left:6px;padding:6px 12px;background:var(--accent);color:#fff;border:0;border-radius:6px;cursor:pointer}}
+.k{{background:#dcfce7;color:#166534;padding:10px;border-radius:8px;margin-bottom:12px}} .e{{background:#fee2e2;color:#991b1b;padding:10px;border-radius:8px;margin-bottom:12px}}
+p.h{{color:var(--muted);font-size:14px}}
+</style></head><body><main><h1>Eski kullanıcıları eşleştir</h1>
+<p class='h'>Eşleştirilen kişinin görev geçmişi, Telegram ve telefon bildirimi kayıtları korunur; açtığı ve
+kendisine atanmış işler seçilen hesabın bürosuna geçer. Önce yöneticiyi eşleştirin. Ana hesabı olmayan kişi için
+hesabı Ofis panelinden açıp bu sayfayı yenileyin. /zs (eski arayüz) yedek olarak çalışmaya devam eder.</p>
+{note}{table}</main></body></html>"""
+    return web.Response(text=body, content_type="text/html", charset="utf-8", headers={"Cache-Control": "no-store"})
+
+
+def _map_owner(request):
+    return C.owner_user(request) if C.owner_user else None
+
+
+async def map_get(request):
+    owner = _map_owner(request)
+    if not owner or C.store is None:
+        return web.Response(status=403, text="Önce /owner üzerinden giriş yapın.")
+    return await _db(_map_page, owner, request.query.get("msg", "")[:300], request.query.get("hata") == "1")
+
+
+async def map_post(request):
+    from urllib.parse import quote
+    owner = _map_owner(request)
+    if not owner or C.store is None:
+        return web.Response(status=403, text="Önce /owner üzerinden giriş yapın.")
+    form = await request.post()
+    t0 = time.monotonic()
+    if not _map_csrf_ok(owner, str(form.get("csrf", ""))):
+        return web.Response(status=403, text="Sayfanın süresi dolmuş; yenileyip tekrar deneyin.")
+    acct = str(form.get("account_username", "")).strip()
+    try:
+        uid = int(form.get("zs_user_id", ""))
+        rec = C.accounts.users.get(acct) if C.accounts else None
+        if not rec or rec.get("role") == "owner" or not rec.get("office_id"):
+            raise ZsError("Ana hesap bulunamadı.")
+        u = await _db(C.store.link_account, uid, acct, rec["office_id"])
+        await _db(_sync_user, acct)
+        msg, err = f"{u['display_name']} → {acct} eşleştirildi.", False
+    except (ZsError, ValueError) as e:
+        msg, err = (str(e) if isinstance(e, ZsError) else "Geçersiz istek."), True
+    await _audit(request, None, "eslestir", 400 if err else 303, t0=t0, username=f"owner:{owner}",
+                 error=msg if err else None, data={"account_username": acct, "zs_user_id": form.get("zs_user_id")})
+    return _see_other(f"{_MAP_PATH}?msg={quote(msg)}{'&hata=1' if err else ''}")
+
+
 # ── kurulum ──────────────────────────────────────────────────────────────────────────
 def _bootstrap_admin():
     user = (os.environ.get("ZS_ADMIN_USER") or "").strip()
@@ -1230,10 +1598,14 @@ def _bootstrap_admin():
         print(f"[!] İş Takip (/zs): {C.setup_error}")
 
 
-def register(app, session_secret, guard, client_ip, store=None):
-    """Rotaları ekler. Veritabanı açılamazsa site çökmez; /zs 503 döner."""
+def register(app, session_secret, guard, client_ip, store=None, accounts_store=None, owner_user=None):
+    """Rotaları ekler. Veritabanı açılamazsa site çökmez; /zs ve /is-listesi 503 döner.
+    accounts_store: ana hesap deposu (yoksa /is-listesi girişi kapalı); owner_user: request →
+    owner kullanıcı adı | None (eşleştirme ekranı için)."""
     C.secret = hashlib.sha256((session_secret + "|zs").encode()).digest()
+    C.tok_secret = hashlib.sha256((session_secret + "|is-listesi-token").encode()).digest()
     C.guard, C.client_ip = guard, client_ip
+    C.accounts, C.owner_user = accounts_store, owner_user
     try:
         C.store = store or ZsStore()
         _bootstrap_admin()
@@ -1256,52 +1628,59 @@ def register(app, session_secret, guard, client_ip, store=None):
             print(f"[!] İş Takip bildirimleri başlatılamadı: {e}")
 
     r = app.router
-    r.add_get("/zs", page_get)
-    # Sonda eğik çizgiyle yazılan/paylaşılan adres 404 vermesin.
-    r.add_get("/zs/", _slash_redirect)
-    r.add_post("/zs/login", login_post)
-    r.add_post("/zs/logout", logout_post)
-    r.add_get("/zs/static/zs.js", _static("zs.js", "application/javascript"))
-    r.add_get("/zs/static/zs.css", _static("zs.css", "text/css"))
-    for icon_name in ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "badge-72.png"):
-        r.add_get(f"/zs/static/{icon_name}", _static(icon_name, "image/png", binary=True))
-    r.add_get("/zs/manifest.webmanifest", _static("manifest.webmanifest", "application/manifest+json"))
-    r.add_get("/zs/sw.js", _static("sw.js", "application/javascript", headers={"Service-Worker-Allowed": "/zs"}))
-    r.add_get("/zs/api/bildirim", api_notify_get)
-    r.add_post("/zs/api/bildirim/push", api_notify_push_add)
-    r.add_post("/zs/api/bildirim/push/sil", api_notify_push_remove)
-    r.add_post("/zs/api/bildirim/telegram", api_notify_tg_link)
-    r.add_post("/zs/api/bildirim/telegram/sil", api_notify_tg_unlink)
-    r.add_post("/zs/api/bildirim/deneme", api_notify_test)
-    r.add_post("/zs/telegram/hook", telegram_hook)
-    r.add_get("/zs/api/me", api_me)
-    r.add_post("/zs/api/me/password", api_my_password)
-    r.add_get("/zs/api/users", api_users_list)
-    r.add_post("/zs/api/users", api_users_create)
-    r.add_post("/zs/api/users/{id:\\d+}", api_users_update)
-    r.add_post("/zs/api/users/{id:\\d+}/aktif", api_users_active)
-    r.add_post("/zs/api/users/{id:\\d+}/sifre", api_users_password)
-    r.add_get("/zs/api/tasks", api_tasks)
-    r.add_post("/zs/api/tasks", api_task_create)
-    r.add_get("/zs/api/tasks/{id:\\d+}", api_task_get)
-    r.add_patch("/zs/api/tasks/{id:\\d+}", api_task_update)
-    r.add_delete("/zs/api/tasks/{id:\\d+}", api_task_delete)
-    r.add_post("/zs/api/tasks/{id:\\d+}/durum", api_task_transition)
-    r.add_post("/zs/api/tasks/{id:\\d+}/devret", api_task_transfer)
-    r.add_post("/zs/api/tasks/{id:\\d+}/gorunur", api_task_publish)
-    r.add_post("/zs/api/tasks/{id:\\d+}/kisiler", api_member_add)
-    r.add_post("/zs/api/tasks/{id:\\d+}/kisiler/cikar", api_member_remove)
-    r.add_post("/zs/api/tasks/{id:\\d+}/ek-sure", api_extension_request)
-    r.add_post("/zs/api/ek-sure/{id:\\d+}/karar", api_extension_decide)
-    r.add_post("/zs/api/tasks/{id:\\d+}/notes", api_note_create)
-    r.add_get("/zs/api/tasks/{id:\\d+}/hatirlatici", api_reminder_list)
-    r.add_post("/zs/api/tasks/{id:\\d+}/hatirlatici", api_reminder_create)
-    r.add_get("/zs/api/hatirlatici", api_free_reminder_list)
-    r.add_get("/zs/api/hatirlaticilar", api_my_reminders)
-    r.add_post("/zs/api/hatirlatici", api_free_reminder_create)
-    r.add_delete("/zs/api/hatirlatici/{id:\\d+}", api_reminder_delete)
-    r.add_post("/zs/api/tasks/{id:\\d+}/files", api_file_upload)
-    r.add_get("/zs/api/rapor", api_report)
-    r.add_get("/zs/api/rapor/etkinlik", api_activity)
-    r.add_get("/zs/api/files/{id:\\d+}", api_file_download)
-    r.add_delete("/zs/api/files/{id:\\d+}", api_file_delete)
+    for P in PREFIXES:
+        r.add_get(P, page_get)
+        # Sonda eğik çizgiyle yazılan/paylaşılan adres 404 vermesin.
+        r.add_get(f"{P}/", _slash_redirect)
+        r.add_post(f"{P}/login", login_post)
+        r.add_post(f"{P}/logout", logout_post)
+        r.add_get(f"{P}/static/zs.js", _static("zs.js", "application/javascript"))
+        r.add_get(f"{P}/static/zs.css", _static("zs.css", "text/css"))
+        for icon_name in ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "badge-72.png"):
+            r.add_get(f"{P}/static/{icon_name}", _static(icon_name, "image/png", binary=True))
+        r.add_get(f"{P}/manifest.webmanifest", _static("manifest.webmanifest", "application/manifest+json"))
+        r.add_get(f"{P}/sw.js", _static("sw.js", "application/javascript", sw=True))
+        r.add_get(f"{P}/api/bildirim", api_notify_get)
+        r.add_post(f"{P}/api/bildirim/push", api_notify_push_add)
+        r.add_post(f"{P}/api/bildirim/push/sil", api_notify_push_remove)
+        r.add_post(f"{P}/api/bildirim/telegram", api_notify_tg_link)
+        r.add_post(f"{P}/api/bildirim/telegram/sil", api_notify_tg_unlink)
+        r.add_post(f"{P}/api/bildirim/deneme", api_notify_test)
+        r.add_get(f"{P}/api/me", api_me)
+        r.add_post(f"{P}/api/me/password", api_my_password)
+        r.add_get(f"{P}/api/users", api_users_list)
+        r.add_post(f"{P}/api/users", api_users_create)
+        r.add_post(f"{P}/api/users/{{id:\\d+}}", api_users_update)
+        r.add_post(f"{P}/api/users/{{id:\\d+}}/aktif", api_users_active)
+        r.add_post(f"{P}/api/users/{{id:\\d+}}/sifre", api_users_password)
+        r.add_get(f"{P}/api/tasks", api_tasks)
+        r.add_post(f"{P}/api/tasks", api_task_create)
+        r.add_get(f"{P}/api/tasks/{{id:\\d+}}", api_task_get)
+        r.add_patch(f"{P}/api/tasks/{{id:\\d+}}", api_task_update)
+        r.add_delete(f"{P}/api/tasks/{{id:\\d+}}", api_task_delete)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/durum", api_task_transition)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/devret", api_task_transfer)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/gorunur", api_task_publish)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/kisiler", api_member_add)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/kisiler/cikar", api_member_remove)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/ek-sure", api_extension_request)
+        r.add_post(f"{P}/api/ek-sure/{{id:\\d+}}/karar", api_extension_decide)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/notes", api_note_create)
+        r.add_get(f"{P}/api/tasks/{{id:\\d+}}/hatirlatici", api_reminder_list)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/hatirlatici", api_reminder_create)
+        r.add_get(f"{P}/api/hatirlatici", api_free_reminder_list)
+        r.add_get(f"{P}/api/hatirlaticilar", api_my_reminders)
+        r.add_post(f"{P}/api/hatirlatici", api_free_reminder_create)
+        r.add_delete(f"{P}/api/hatirlatici/{{id:\\d+}}", api_reminder_delete)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/files", api_file_upload)
+        r.add_get(f"{P}/api/rapor", api_report)
+        r.add_get(f"{P}/api/rapor/etkinlik", api_activity)
+        r.add_get(f"{P}/api/files/{{id:\\d+}}", api_file_download)
+        r.add_delete(f"{P}/api/files/{{id:\\d+}}", api_file_delete)
+    # Telegram webhook adresi değişmez (bot ayarı); masaüstü + owner uçları yalnız yeni arayüzde.
+    r.add_post(f"{OLD}/telegram/hook", telegram_hook)
+    r.add_post(f"{NEW}/api/token", api_token)
+    r.add_post(f"{NEW}/api/sso-kod", api_sso_code)
+    r.add_get(f"{NEW}/sso", sso_get)
+    r.add_get(_MAP_PATH, map_get)
+    r.add_post(_MAP_PATH, map_post)

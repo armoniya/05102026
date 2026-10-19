@@ -394,7 +394,7 @@ async def _security_mw(request, handler):
     if getattr(resp, "prepared", False):
         return resp  # ör. WebSocket: başlıklar zaten gönderildi, dokunma
     # Özel/oturumlu sayfalar arama motorlarına kapalı (SEO planı — CANLIYA_HAZIRLIK.md Faz 6).
-    if request.path.startswith(("/ofis", "/admin", "/owner", "/reset", "/satin-al/sonuc", "/giris", "/zs")):
+    if request.path.startswith(("/ofis", "/admin", "/owner", "/reset", "/satin-al/sonuc", "/giris", "/zs", "/is-listesi")):
         resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
     # Server başlığı aiohttp/Python sürümünü sızdırmasın (ZAP aktif tarama, 2026-10-01).
     resp.headers["Server"] = "cokluuyap"
@@ -2339,9 +2339,14 @@ def make_app(args):
             return web.Response(body=data, content_type=ct, charset="utf-8", headers=headers)
         return handler
 
+    async def legacy_worklist_redirect(_request):
+        raise web.HTTPSeeOther("/is-listesi/")
+
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/__app__/config.js", config_js)
     app.router.add_get("/ice", ice_endpoint)
+    # Eski ofis uygulamalarının İş Listesi bağlantısını UYAP tüneline göndermeden aç.
+    app.router.add_get("/__uyap_kisi__/is-listesi/ac", legacy_worklist_redirect)
     # Owner (utku) girişi — TOTP 2FA'lı; /admin'i owner oturumu korur.
     app.router.add_get("/owner/login", owner_login_get)
     app.router.add_post("/owner/login", owner_login_post)
@@ -2390,9 +2395,11 @@ def make_app(args):
     app.router.add_get("/satin-al/sonuc", cred_claim_get)
     app.router.add_post("/odeme/webhook", odeme_webhook)
 
-    # İş Takip (/zs): ayrı kullanıcılı yapılacak iş listesi + onay + şifreli belge (zs.py).
+    # İş Listesi (/is-listesi, ana hesaplarla, büro bazlı) + eski İş Takip (/zs, yedek, ayrı kullanıcılı):
+    # yapılacak iş listesi + onay + şifreli belge (zs.py). Owner eski kullanıcıları eşleştirir.
     import zs
-    zs.register(app, session_secret=SESSION_SECRET, guard=GUARD, client_ip=_client_ip)
+    zs.register(app, session_secret=SESSION_SECRET, guard=GUARD, client_ip=_client_ip,
+                accounts_store=STORE, owner_user=_read_owner_session)
 
     # Oda anahtarlarını düzensiz (rastgele) aralıklarla otomatik döndüren arka plan görevi.
     app.on_startup.append(_start_rotation)

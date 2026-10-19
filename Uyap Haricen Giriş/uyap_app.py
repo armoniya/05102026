@@ -41,7 +41,7 @@ except ImportError:
 # Light yalnız UYAP'ı paylaşır: bağlanan üyelerin ofis oturumuyla toplu iş başlatmasını kapat
 # (uyap_core.jobs.TOPLU_IS_ACIK). uyap_core içe aktarılmadan ÖNCE ayarlanmalı.
 os.environ["UYAP_TOPLU_IS"] = "0"
-from uyap_core import uyap_proxy, office_agent, home_client
+from uyap_core import uyap_proxy, office_agent, home_client, is_listesi
 # Tek tasarım dili: UyapMasa/theme.py paleti (ılık kâğıt + adaçayı). uyap_theme bu
 # paletin uygulamaya taşınmış kopyasıdır — palet değişirse ikisi birlikte güncellenir.
 from uyap_theme import C, RoundButton, make_fonts, round_rect
@@ -1024,6 +1024,8 @@ class UyapApp:
                 self.office_code = office or ""
                 self.role = (info or {}).get("role", "member")
                 self.office_label = (info or {}).get("office_label", "")
+                # UYAP dosya kartından iş atama (İş Listesi) bu bilgisayarda giriş yapan kişinin hesabıyla.
+                is_listesi.configure(self._api_base(), self.office_code, self.username, self.password)
                 self.save_login_config()
                 login_pin = self.login_pin_var.get().strip()
                 self.show_dashboard()
@@ -1897,6 +1899,7 @@ class UyapApp:
             self.stop_receiving()
             self.username = ""
             self.password = ""
+            is_listesi.clear()
             self.show_login_screen()
 
     def on_close(self):

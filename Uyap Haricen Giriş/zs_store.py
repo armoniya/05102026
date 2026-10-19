@@ -124,7 +124,56 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS zs_reminders_user ON zs_reminders(user_id)",
     "CREATE INDEX IF NOT EXISTS zs_reminders_task ON zs_reminders(task_id)",
     "CREATE INDEX IF NOT EXISTS zs_reminders_due ON zs_reminders(sent_at, remind_at)",
+    # Masaüstünden (CokluUyap) web'e şifresiz geçiş: tek kullanımlık, kısa ömürlü kod.
+    """CREATE TABLE IF NOT EXISTS zs_sso_codes (
+        code TEXT PRIMARY KEY, user_id BIGINT NOT NULL, expires_at BIGINT NOT NULL)""",
 ]
+
+# Sonradan eklenen sütunlar: tablo → ((sütun, tür), ...)
+_ADDED_COLS = {
+    "zs_tasks": (("is_private", "INTEGER NOT NULL DEFAULT 0"), ("priority", "INTEGER NOT NULL DEFAULT 1"),
+                 ("submitted_at", "BIGINT"),
+                 # Büro (ana hesaplardaki office_id; eski /zs kayıtlarında boş) + bağlı UYAP dosyası.
+                 ("office_id", "TEXT"), ("dosya_id", "TEXT"), ("birim_id", "TEXT"), ("birim_adi", "TEXT"),
+                 ("dosya_no", "TEXT"), ("dosya_tur", "TEXT"),
+                 # UYAP'ın dosya kartını açmak için kartın kendi verisi (JSON; türleri korunur).
+                 ("dosya_uyap", "TEXT")),
+    "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
+    # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
+    "zs_telegram": (("tg_username", "TEXT"),),
+    # Ana CokluUyap hesabına bağ (ahmet@ofis) + o hesabın bürosu. Boşsa eski /zs kullanıcısı.
+    "zs_users": (("account_username", "TEXT"), ("office_id", "TEXT")),
+}
+# Sütunlar eklendikten sonra kurulan indeksler.
+_POST_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS zs_users_account ON zs_users(account_username) "
+    "WHERE account_username IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS zs_tasks_office_dosya ON zs_tasks(office_id, dosya_id)",
+)
+# UYAP dosya alanları (görevde).
+DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap")
+# UYAP'ın dosya kartı (dosya-sorgula-popup) bu alanlarla açılır — UYAP'ın kendi arama sonucundan
+# kartı açarken verdiği nesneyle aynı anahtarlar.
+UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod", "dosyaTurKodAciklama",
+                      "dosyaDurum", "dosyaDurumKod", "birimTuru3")
+
+
+def office_of(user) -> str:
+    """Kullanıcının bürosu; eski /zs kullanıcıları için '' (kendi ortak havuzları)."""
+    return (user or {}).get("office_id") or ""
+
+
+def clean_dosya(d):
+    """{dosya_id, birim_id, birim_adi, dosya_no, dosya_tur, uyap: {kart verisi}} → temizlenmiş sözlük;
+    dosya_id yoksa None. uyap'tan yalnız UYAP_KART_ALANLARI'ndaki düz değerler (metin/sayı) alınır."""
+    if not isinstance(d, dict):
+        return None
+    out = {k: (str(d.get(k) or "").strip()[:200] or None) for k in DOSYA_FIELDS if k != "dosya_uyap"}
+    u = d.get("uyap")
+    kart = {k: (v[:200] if isinstance(v, str) else v) for k, v in (u.items() if isinstance(u, dict) else ())
+            if k in UYAP_KART_ALANLARI and isinstance(v, (str, int, float)) and not isinstance(v, bool)}
+    out["dosya_uyap"] = json.dumps(kart, ensure_ascii=False) if kart.get("dosyaId") else None
+    return out if out["dosya_id"] else None
 
 # Gizlenebilen türler: (zs_transfers bayrağı, kesim sütunu)
 _HIDE_KINDS = {"task": ("hide_subtasks", "cut_task"), "note": ("hide_notes", "cut_note"),
@@ -221,24 +270,17 @@ class ZsStore:
             for stmt in _SCHEMA:
                 cur.execute(stmt.format(pk=pk))
             # Sonradan eklenen sütunlar (eski tablolara).
-            added = (("is_private", "INTEGER NOT NULL DEFAULT 0"), ("priority", "INTEGER NOT NULL DEFAULT 1"),
-                     ("submitted_at", "BIGINT"))
-            rem_added = (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''"))
-            # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
-            tg_added = (("tg_username", "TEXT"),)
-            if self._pg:
-                for col, typ in added:
-                    cur.execute(f"ALTER TABLE zs_tasks ADD COLUMN IF NOT EXISTS {col} {typ}")
-                for col, typ in rem_added:
-                    cur.execute(f"ALTER TABLE zs_reminders ADD COLUMN IF NOT EXISTS {col} {typ}")
-                for col, typ in tg_added:
-                    cur.execute(f"ALTER TABLE zs_telegram ADD COLUMN IF NOT EXISTS {col} {typ}")
-            else:
-                for table, cols_added in (("zs_tasks", added), ("zs_reminders", rem_added), ("zs_telegram", tg_added)):
+            for table, cols_added in _ADDED_COLS.items():
+                if self._pg:
+                    for col, typ in cols_added:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+                else:
                     cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
                     for col, typ in cols_added:
                         if col not in cols:
                             cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            for stmt in _POST_INDEXES:
+                cur.execute(stmt)
         self._run(fn)
 
     # ── kullanıcılar ─────────────────────────────────────────────────────────────────
@@ -247,7 +289,8 @@ class ZsStore:
         if not u:
             return None
         return {"id": u["id"], "username": u["username"], "display_name": u["display_name"],
-                "role": u["role"], "active": bool(u["active"]), "created_at": u["created_at"]}
+                "role": u["role"], "active": bool(u["active"]), "created_at": u["created_at"],
+                "account_username": u.get("account_username"), "office_id": u.get("office_id")}
 
     def user_count(self) -> int:
         return self._run(lambda cur: self._q(cur, "SELECT COUNT(*) FROM zs_users").fetchone()[0])
@@ -255,10 +298,126 @@ class ZsStore:
     def get_user(self, user_id):
         return self._run(lambda cur: self._one(self._q(cur, "SELECT * FROM zs_users WHERE id = ?", (user_id,))))
 
-    def list_users(self):
-        rows = self._run(lambda cur: self._rows(self._q(
-            cur, "SELECT * FROM zs_users ORDER BY active DESC, display_name")))
+    def list_users(self, office=None):
+        """office verilirse yalnız o büronun kullanıcıları ('' = eski /zs havuzu); None → hepsi."""
+        q, params = "SELECT * FROM zs_users", ()
+        if office is not None:
+            q, params = q + " WHERE COALESCE(office_id, '') = ?", (office,)
+        rows = self._run(lambda cur: self._rows(self._q(cur, q + " ORDER BY active DESC, display_name", params)))
         return [self._public_user(u) for u in rows]
+
+    # ── ana hesaplarla (accounts) bağ ────────────────────────────────────────────────
+    def user_by_account(self, account_username):
+        return self._run(lambda cur: self._one(self._q(
+            cur, "SELECT * FROM zs_users WHERE account_username = ?", (account_username,))))
+
+    def sync_account(self, account_username, office_id, display_name, active, is_master):
+        """Ana hesabın İş Listesi satırını bulur ya da açar ve ana hesapla eşitler (ad, büro, etkinlik).
+        Rol: büro sahibi (master) her zaman yönetici; üye ilk açılışta kullanıcı, sonra yöneticinin
+        verdiği rolde kalır. Satırı döndürür."""
+        display_name = (display_name or "").strip()[:80] or account_username
+        role_new = "admin" if is_master else "user"
+
+        def fn(cur):
+            u = self._one(self._q(cur, "SELECT * FROM zs_users WHERE account_username = ?", (account_username,)))
+            if not u:
+                # zs_users.username benzersiz ve [a-z0-9._-] — ana hesap adından türetilir, çakışırsa sayı eklenir.
+                base = "".join(c if (c.isalnum() and c.isascii()) or c in "._-" else "." for c in
+                               account_username.lower().replace("@", "."))[:36] or "hesap"
+                name, i = base, 2
+                while self._one(self._q(cur, "SELECT id FROM zs_users WHERE username = ?", (name,))):
+                    name, i = f"{base}-{i}", i + 1
+                uid = self._insert(cur, "INSERT INTO zs_users (username, display_name, pw_hash, role, active, sess_epoch, "
+                                        "created_at, account_username, office_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                                   (name, display_name, self._AUTO_PW, role_new, 1 if active else 0, _now(),
+                                    account_username, office_id))
+                return self._one(self._q(cur, "SELECT * FROM zs_users WHERE id = ?", (uid,)))
+            sets, params = [], []
+            if u["display_name"] != display_name:
+                sets.append("display_name = ?"); params.append(display_name)
+            if (u["office_id"] or "") != (office_id or ""):
+                sets.append("office_id = ?"); params.append(office_id)
+            if bool(u["active"]) != bool(active):
+                sets.append("active = ?"); params.append(1 if active else 0)
+            if is_master and u["role"] != "admin":
+                sets.append("role = ?"); params.append("admin")
+            if sets:
+                self._q(cur, f"UPDATE zs_users SET {', '.join(sets)} WHERE id = ?", params + [u["id"]])
+                u = self._one(self._q(cur, "SELECT * FROM zs_users WHERE id = ?", (u["id"],)))
+            return u
+        return self._run(fn)
+
+    def legacy_users(self):
+        """Ana hesaba bağlanmamış eski /zs kullanıcıları (eşleştirme ekranı için)."""
+        rows = self._run(lambda cur: self._rows(self._q(
+            cur, "SELECT * FROM zs_users WHERE account_username IS NULL ORDER BY active DESC, display_name")))
+        return [self._public_user(u) for u in rows]
+
+    _USAGE_SQL = ("(SELECT COUNT(*) FROM zs_tasks WHERE created_by = {u} OR assignee_id = {u}) + "
+                  "(SELECT COUNT(*) FROM zs_members WHERE user_id = {u}) + "
+                  "(SELECT COUNT(*) FROM zs_events WHERE actor_id = {u}) + "
+                  "(SELECT COUNT(*) FROM zs_reminders WHERE user_id = {u} OR created_by = {u})")
+
+    # Ana hesaptan kendiliğinden açılan satırın parola özeti boştur; eski /zs kullanıcısınınki doludur.
+    _AUTO_PW = "{}"
+
+    def used_accounts(self):
+        """Eşleştirmede seçilemeyen ana hesaplar: eski bir kullanıcıya bağlanmış ya da İş Listesi'nde
+        izi (iş/olay/hatırlatıcı) olanlar. Yalnız girip hiçbir şey yapmamış hesabın boş satırı devralınır."""
+        q = (f"SELECT u.account_username FROM zs_users u WHERE u.account_username IS NOT NULL "
+             f"AND (u.pw_hash <> ? OR {self._USAGE_SQL.format(u='u.id')} > 0)")
+        return {r[0] for r in self._run(lambda cur: self._q(cur, q, (self._AUTO_PW,)).fetchall())}
+
+    def link_account(self, user_id, account_username, office_id):
+        """Eski /zs kullanıcısını ana hesaba bağlar; görev geçmişi, Telegram ve cihaz kayıtları kalır.
+        Kullanıcının açtığı ya da kendisine atanmış büro'suz işler (alt işleriyle) o büroya geçer.
+        Ana hesap İş Listesi'ne önceden girip boş bir satır açtıysa o satır silinir; satırda iz
+        varsa birleştirme yapılmaz (hata)."""
+        def fn(cur):
+            u = self._one(self._q(cur, "SELECT * FROM zs_users WHERE id = ?", (user_id,)))
+            if not u:
+                raise ZsError("Kullanıcı bulunamadı.")
+            if u["account_username"]:
+                raise ZsError("Bu kullanıcı zaten bir ana hesaba bağlı.")
+            other = self._one(self._q(cur, "SELECT * FROM zs_users WHERE account_username = ?", (account_username,)))
+            if other:
+                oid = other["id"]
+                used = self._q(cur, "SELECT " + self._USAGE_SQL.format(u="?"), (oid,) * 6).fetchone()[0]
+                if used or other["pw_hash"] != self._AUTO_PW:
+                    raise ZsError(f"{account_username} İş Listesi'nde zaten kullanılmış; eşleştirilemez.")
+                for q in ("DELETE FROM zs_push_subs WHERE user_id = ?", "DELETE FROM zs_telegram WHERE user_id = ?",
+                          "DELETE FROM zs_tg_codes WHERE user_id = ?", "DELETE FROM zs_seen WHERE user_id = ?",
+                          "DELETE FROM zs_sso_codes WHERE user_id = ?", "DELETE FROM zs_users WHERE id = ?"):
+                    self._q(cur, q, (oid,))
+            self._q(cur, "UPDATE zs_users SET account_username = ?, office_id = ?, sess_epoch = sess_epoch + 1 "
+                         "WHERE id = ?", (account_username, office_id, user_id))
+            self._q(cur, "UPDATE zs_tasks SET office_id = ? WHERE office_id IS NULL AND parent_id IS NULL "
+                         "AND (created_by = ? OR assignee_id = ? OR id IN (SELECT task_id FROM zs_members WHERE user_id = ? AND role = 'assignee'))",
+                    (office_id, user_id, user_id, user_id))
+            self._q(cur, "UPDATE zs_tasks SET office_id = (SELECT p.office_id FROM zs_tasks p WHERE p.id = zs_tasks.parent_id) "
+                         "WHERE parent_id IS NOT NULL AND office_id IS NULL")
+            return self._public_user(self._one(self._q(cur, "SELECT * FROM zs_users WHERE id = ?", (user_id,))))
+        return self._run(fn)
+
+    # ── masaüstünden web'e tek kullanımlık geçiş kodu ─────────────────────────────────
+    def sso_code_new(self, user_id, ttl=60):
+        import secrets
+        code = secrets.token_urlsafe(24)
+
+        def fn(cur):
+            self._q(cur, "DELETE FROM zs_sso_codes WHERE expires_at < ?", (_now(),))
+            self._q(cur, "INSERT INTO zs_sso_codes (code, user_id, expires_at) VALUES (?, ?, ?)",
+                    (code, user_id, _now() + ttl))
+        self._run(fn)
+        return code
+
+    def sso_code_use(self, code):
+        """Kodu tüketir; geçerliyse kullanıcı kimliği, değilse None."""
+        def fn(cur):
+            r = self._one(self._q(cur, "SELECT * FROM zs_sso_codes WHERE code = ?", (code,)))
+            self._q(cur, "DELETE FROM zs_sso_codes WHERE code = ?", (code,))
+            return r["user_id"] if r and r["expires_at"] >= _now() else None
+        return self._run(fn)
 
     def create_user(self, username, display_name, password, role="user"):
         username = (username or "").strip().lower()
@@ -384,6 +543,8 @@ class ZsStore:
         iş bulunan ana işi görür."""
         if not root:
             return False
+        if (root.get("office_id") or "") != office_of(user):
+            return False                    # başka büronun işi
         if root.get("is_private"):
             return root["created_by"] == user["id"]
         if user["role"] == "admin" or root["assignee_id"] == user["id"]:
@@ -416,28 +577,32 @@ class ZsStore:
         cut = self._run(lambda cur: self._cutoffs(cur, [root_id], viewer_id)).get(root_id)
         return bool(cut and item_id <= cut[kind])
 
-    def list_tree(self, user, filtre="benim"):
+    def list_tree(self, user, filtre="benim", dosya_id=None):
         """Ana işleri alt işleriyle (ve sayılarla) döndürür; özel işler ve devirde gizlenen
-        kayıtlar bu kullanıcıya göre süzülür."""
+        kayıtlar bu kullanıcıya göre süzülür. Yalnız kullanıcının bürosu; dosya_id verilirse
+        yalnız o UYAP dosyasına bağlı işler."""
         uid = user["id"]
-        priv = "(is_private = 0 OR created_by = ?)"
+        # Her sorgunun başı: büro (+ isteğe bağlı dosya) + özel iş süzgeci.
+        base = "parent_id IS NULL AND COALESCE(office_id, '') = ? AND (is_private = 0 OR created_by = ?)"
+        bparams = [office_of(user), uid]
+        if dosya_id:
+            base += " AND dosya_id = ?"
+            bparams.append(str(dosya_id))
 
         def fn(cur):
             mine = ("(assignee_id = ? OR id IN (SELECT parent_id FROM zs_tasks WHERE parent_id IS NOT NULL "
                     "AND assignee_id = ?) OR id IN (SELECT task_id FROM zs_members WHERE user_id = ?))")
+            sel = f"SELECT * FROM zs_tasks WHERE {base}"
+            order = " ORDER BY sort_order, id"
             if filtre == "onay" and user["role"] == "admin":
-                roots = self._rows(self._q(cur, f"SELECT * FROM zs_tasks WHERE parent_id IS NULL AND status = 'onayda' "
-                                                f"AND {priv} ORDER BY sort_order, id", (uid,)))
+                roots = self._rows(self._q(cur, sel + " AND status = 'onayda'" + order, bparams))
             elif filtre == "onay":
-                roots = self._rows(self._q(cur, f"SELECT * FROM zs_tasks WHERE parent_id IS NULL AND status = 'onayda' "
-                                                f"AND {priv} AND {mine} ORDER BY sort_order, id", (uid, uid, uid, uid)))
+                roots = self._rows(self._q(cur, sel + f" AND status = 'onayda' AND {mine}" + order,
+                                           bparams + [uid, uid, uid]))
             elif filtre == "tumu" and user["role"] == "admin":
-                roots = self._rows(self._q(cur, f"SELECT * FROM zs_tasks WHERE parent_id IS NULL AND {priv} "
-                                                "ORDER BY sort_order, id", (uid,)))
+                roots = self._rows(self._q(cur, sel + order, bparams))
             else:
-                roots = self._rows(self._q(
-                    cur, f"SELECT * FROM zs_tasks WHERE parent_id IS NULL AND {priv} AND {mine} "
-                         "ORDER BY sort_order, id", (uid, uid, uid, uid)))
+                roots = self._rows(self._q(cur, sel + f" AND {mine}" + order, bparams + [uid, uid, uid]))
             if not roots:
                 return []
             ids = [r["id"] for r in roots]
@@ -536,7 +701,7 @@ class ZsStore:
                 raise ZsError("Kişi yalnız ana işe eklenebilir.")
             if t["is_private"]:
                 raise ZsError("Özel işe kişi eklenemez; önce görünür yapın ya da devredin.")
-            uid = self._check_assignee(cur, user_id)
+            uid = self._check_assignee(cur, user_id, actor)
             if uid is None:
                 raise ZsError("Kişi seçin.")
             roles = self._roles(cur, task_id, t["assignee_id"])
@@ -642,7 +807,7 @@ class ZsStore:
                     raise ZsError("İş zaten görünür.")
                 to = t["assignee_id"]
             else:
-                to = self._check_assignee(cur, to_user_id)
+                to = self._check_assignee(cur, to_user_id, actor)
                 if to == t["assignee_id"] and not t["is_private"]:
                     raise ZsError("İş zaten bu kişide.")
 
@@ -676,24 +841,25 @@ class ZsStore:
             v = self._q(cur, "SELECT MAX(sort_order) FROM zs_tasks WHERE parent_id IS NULL").fetchone()[0]
         return int(v or 0) + 1
 
-    def _check_assignee(self, cur, assignee_id):
+    def _check_assignee(self, cur, assignee_id, actor):
         if assignee_id is None:
             return None
-        u = self._one(self._q(cur, "SELECT id, active FROM zs_users WHERE id = ?", (assignee_id,)))
-        if not u or not u["active"]:
+        u = self._one(self._q(cur, "SELECT id, active, office_id FROM zs_users WHERE id = ?", (assignee_id,)))
+        if not u or not u["active"] or (u["office_id"] or "") != office_of(actor):
             raise ZsError("Atanacak kullanıcı bulunamadı ya da kapalı.")
         return int(assignee_id)
 
     def create_task(self, actor, title, parent_id=None, description="", assignee_id=None, due_at=None,
-                    private=False, priority=1):
+                    private=False, priority=1, dosya=None):
         title = (title or "").strip()
         if not title:
             raise ZsError("Başlık boş olamaz.")
         if priority not in PRIORITIES:
             raise ZsError("Geçersiz öncelik.")
+        dosya = clean_dosya(dosya) if not parent_id else None   # dosya bağı yalnız ana işte
 
         def fn(cur):
-            aid = self._check_assignee(cur, assignee_id)
+            aid = self._check_assignee(cur, assignee_id, actor)
             if parent_id:
                 p = self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (parent_id,)))
                 if not p or p["parent_id"]:
@@ -704,12 +870,15 @@ class ZsStore:
                 aid = actor["id"]
             now = _now()
             status = "acik"
+            d = dosya or {}
             tid = self._insert(cur, "INSERT INTO zs_tasks (parent_id, title, description, assignee_id, created_by, "
-                                    "due_at, status, sort_order, created_at, updated_at, is_private, priority) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    "due_at, status, sort_order, created_at, updated_at, is_private, priority, office_id, "
+                                    f"{', '.join(DOSYA_FIELDS)}) "
+                                    f"VALUES ({', '.join('?' * (13 + len(DOSYA_FIELDS)))})",
                                (parent_id, title[:300], (description or "")[:5000], aid, actor["id"], due_at,
                                 status, self._next_sort(cur, parent_id), now, now,
-                                1 if (private and not parent_id) else 0, 1 if parent_id else priority))
+                                1 if (private and not parent_id) else 0, 1 if parent_id else priority,
+                                office_of(actor) or None, *(d.get(k) for k in DOSYA_FIELDS)))
             root = parent_id or tid
             self._event(cur, root, actor["id"], "created", title=title[:300], sub=bool(parent_id))
             if aid:
@@ -740,8 +909,14 @@ class ZsStore:
                 if t["parent_id"] or fields["priority"] not in PRIORITIES:
                     raise ZsError("Öncelik yalnız ana işte ve Acil/Normal/Düşük olabilir.")
                 sets.append("priority = ?"); params.append(fields["priority"])
+            if "dosya" in fields:
+                if t["parent_id"]:
+                    raise ZsError("UYAP dosyası yalnız ana işe bağlanır.")
+                d = clean_dosya(fields["dosya"]) or {}      # boş/None → bağ kaldırılır
+                for k in DOSYA_FIELDS:
+                    sets.append(f"{k} = ?"); params.append(d.get(k))
             if "assignee_id" in fields:
-                aid = self._check_assignee(cur, fields["assignee_id"])
+                aid = self._check_assignee(cur, fields["assignee_id"], actor)
                 root = t if not t["parent_id"] else self._one(self._q(
                     cur, "SELECT * FROM zs_tasks WHERE id = ?", (t["parent_id"],)))
                 if root["is_private"] and aid not in (None, root["created_by"]):
@@ -764,7 +939,7 @@ class ZsStore:
                 self._q(cur, f"UPDATE zs_tasks SET {', '.join(sets)} WHERE id = ?", params + [task_id])
                 if t["parent_id"]:
                     self._q(cur, "UPDATE zs_tasks SET updated_at = ? WHERE id = ?", (now, t["parent_id"]))
-                changed = [k for k in ("title", "description", "due_at", "priority") if k in fields]
+                changed = [k for k in ("title", "description", "due_at", "priority", "dosya") if k in fields]
                 if changed:
                     self._event(cur, root_id, actor["id"], "edited", title=t["title"], fields=changed)
             return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
@@ -776,7 +951,8 @@ class ZsStore:
                                            "ORDER BY sort_order, id", (t["parent_id"],)))
         else:
             sibs = self._rows(self._q(cur, "SELECT id, sort_order FROM zs_tasks WHERE parent_id IS NULL "
-                                           "ORDER BY sort_order, id"))
+                                           "AND COALESCE(office_id, '') = ? ORDER BY sort_order, id",
+                                      (t["office_id"] or "",)))
         ids = [s["id"] for s in sibs]
         i = ids.index(t["id"])
         j = i + direction
@@ -874,20 +1050,21 @@ class ZsStore:
         return self._run(fn)
 
     # ── rapor ham verisi (hesap zs_rapor.py'de) ──────────────────────────────────────
-    def report_source(self, viewer_id):
-        """Ana işler (özel işlerden yalnız izleyicinin kendi açtıkları) + ek atananlar + akış olayları."""
-        vis = "(t.is_private = 0 OR t.created_by = ?)"
+    def report_source(self, viewer_id, office=""):
+        """Ana işler (izleyicinin bürosu; özel işlerden yalnız kendi açtıkları) + ek atananlar + akış olayları."""
+        vis = "(t.is_private = 0 OR t.created_by = ?) AND COALESCE(t.office_id, '') = ?"
+        vp = (viewer_id, office or "")
 
         def fn(cur):
             tasks = self._rows(self._q(cur, "SELECT t.id, t.title, t.assignee_id, t.created_at, t.due_at, t.status, "
                                             f"t.submitted_at, t.is_private FROM zs_tasks t WHERE t.parent_id IS NULL AND {vis}",
-                                       (viewer_id,)))
+                                       vp))
             members = self._q(cur, "SELECT m.task_id, m.user_id FROM zs_members m JOIN zs_tasks t ON t.id = m.task_id "
-                                   f"WHERE m.role = 'assignee' AND {vis} ORDER BY m.id", (viewer_id,)).fetchall()
+                                   f"WHERE m.role = 'assignee' AND {vis} ORDER BY m.id", vp).fetchall()
             events = self._rows(self._q(cur, "SELECT e.task_id, e.actor_id, e.kind, e.created_at FROM zs_events e "
                                              f"JOIN zs_tasks t ON t.id = e.task_id WHERE t.parent_id IS NULL AND {vis} "
                                              "AND e.kind IN ('submitted', 'approved', 'rejected', 'completed', 'reopened') "
-                                             "ORDER BY e.id", (viewer_id,)))
+                                             "ORDER BY e.id", vp))
             return {"tasks": tasks, "members": [tuple(m) for m in members], "events": events}
         return self._run(fn)
 
@@ -1064,13 +1241,23 @@ class ZsStore:
             cur, "SELECT u.* FROM zs_telegram t JOIN zs_users u ON u.id = t.user_id "
                  "WHERE t.chat_id = ? AND u.active = 1", (chat_id,))))
 
-    def tg_user_by_username(self, username):
+    def tg_user_by_username(self, username, office=None):
+        """office verilirse yalnız o büronun kullanıcısı aranır ('' = eski /zs havuzu)."""
         uname = _tg_uname(username)
         if not uname:
             return None
-        return self._run(lambda cur: self._one(self._q(
-            cur, "SELECT u.* FROM zs_telegram t JOIN zs_users u ON u.id = t.user_id "
-                 "WHERE t.tg_username = ? AND u.active = 1", (uname,))))
+        q, params = ("SELECT u.* FROM zs_telegram t JOIN zs_users u ON u.id = t.user_id "
+                     "WHERE t.tg_username = ? AND u.active = 1"), [uname]
+        if office is not None:
+            q += " AND COALESCE(u.office_id, '') = ?"
+            params.append(office)
+        return self._run(lambda cur: self._one(self._q(cur, q, params)))
+
+    def is_linked(self, user_id) -> bool:
+        """Kullanıcı ana hesaba bağlı mı (bildirim bağlantısı hangi arayüze gitsin)?"""
+        r = self._run(lambda cur: self._q(cur, "SELECT account_username FROM zs_users WHERE id = ?",
+                                          (user_id,)).fetchone())
+        return bool(r and r[0])
 
     def tg_touch(self, chat_id, username):
         """Bağlı kişinin Telegram kullanıcı adını tazeler (sonradan değiştirmiş/eklemiş olabilir)."""
@@ -1117,9 +1304,13 @@ class ZsStore:
         Ayrıca etkin yöneticiler (işe özel onay yetkilisi yoksa onay bildirimleri onlara)."""
         def fn(cur):
             ev = self._rows(self._q(cur, "SELECT e.id, e.task_id, e.actor_id, e.kind, e.detail, e.created_at, "
-                                         "t.title, t.is_private, t.created_by, t.assignee_id, t.due_at "
+                                         "t.title, t.is_private, t.created_by, t.assignee_id, t.due_at, t.office_id "
                                          "FROM zs_events e JOIN zs_tasks t ON t.id = e.task_id "
                                          "WHERE e.id > ? ORDER BY e.id", (after_id,)))
+            # Onay bildirimi işin bürosunun yöneticilerine gider (eski /zs işleri → eski havuzun yöneticileri).
+            by_office = {}
+            for uid, off in self._q(cur, "SELECT id, office_id FROM zs_users WHERE role = 'admin' AND active = 1").fetchall():
+                by_office.setdefault(off or "", []).append(uid)
             roles = {}
             for e in ev:
                 try:
@@ -1129,7 +1320,8 @@ class ZsStore:
                 if e["task_id"] not in roles:
                     roles[e["task_id"]] = self._roles(cur, e["task_id"], e["assignee_id"])
                 e.update(roles[e["task_id"]])
-            admins = [r[0] for r in self._q(cur, "SELECT id FROM zs_users WHERE role = 'admin' AND active = 1").fetchall()]
+                e["admins"] = by_office.get(e.pop("office_id") or "", [])
+            admins = by_office.get("", [])
             active = {r[0]: r[1] for r in self._q(cur, "SELECT id, display_name FROM zs_users WHERE active = 1").fetchall()}
             return ev, admins, active
         return self._run(fn)

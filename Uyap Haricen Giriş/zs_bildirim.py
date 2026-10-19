@@ -65,7 +65,7 @@ def build_messages(events, admins, names):
             continue
         d, k, t = e["detail"], e["kind"], e["title"]
         who = names.get(e["actor_id"], "Biri")
-        deciders = e["approvers"] or admins
+        deciders = e["approvers"] or e.get("admins", admins)
         if k == "assigned":
             sub = d.get("title") and d.get("title") != t
             add(d.get("assignee_id"), e, "Size yeni bir iş atandı",
@@ -211,7 +211,12 @@ class Notifier:
         if self.test_sink is not None:
             self.test_sink.append((uid, m))
             return
-        url = f"/zs#is-{m['task_id']}" if m.get("task_id") else "/zs"
+        # Ana hesaba bağlı kişi yeni arayüzü (/is-listesi), eski /zs kullanıcısı eskisini açar.
+        try:
+            base = "/is-listesi" if await asyncio.to_thread(self.store.is_linked, uid) else "/zs"
+        except Exception:
+            base = "/zs"
+        url = f"{base}#is-{m['task_id']}" if m.get("task_id") else base
         jobs = []
         if self.vapid_key:
             subs = await asyncio.to_thread(self.store.push_list, [uid])

@@ -39,6 +39,7 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 from .p2p_wire import Reassembler, send_message, load_ice_servers, fetch_ice_servers, HEARTBEAT_INTERVAL, AGENT_PREFIX
 from .yerel_kapi import tarayici_reddi
 from . import lan_tls
+from . import is_listesi
 from . import uyap_proxy as _yp  # yerel jeton + tek kullanımlık tarayıcı girişi (ofisle AYNI mekanizma)
 
 _YEREL_ADRESLER = {"127.0.0.1", "::1", "localhost"}
@@ -439,11 +440,21 @@ def make_app(tunnel: Tunnel):
                 "Location": _yp._guvenli_hedef(request.query.get("hedef", "/giris")), "Cache-Control": "no-store"})
             resp.set_cookie(_yp.YEREL_CEREZ, _yp.GW_BROWSER_SECRET, httponly=True, samesite="Strict", path="/")
             return resp
+        if request.rel_url.path == is_listesi.DOSYA_AC_PATH and request.method == "GET":
+            # Yerel yetki aranmaz (çerez çapraz-site gezinmede gelmez); sayfa yalnız yönlendirir.
+            return web.Response(body=is_listesi.DOSYA_AC_SAYFASI, content_type="text/html", charset="utf-8",
+                                headers={"Cache-Control": "no-store"})
         if not _yerel_yetki(request):
             if request.method in ("GET", "HEAD") and "text/html" in request.headers.get("Accept", ""):
                 return _yerel_giris_sayfasi()
             return web.Response(status=403, text="Yerel yetki gerekli: program jetonu ya da 'Tarayıcıyı Aç'.")
         body = await request.read()
+        # İş Listesi köprüsü: tünele girmez, BU bilgisayarda giriş yapan kişinin hesabıyla
+        # cokluuyap.com'a gider (ofis ajanı isteği kimin yaptığını bilemez).
+        if is_listesi.is_path(request.rel_url.path):
+            st, hdr, out = await is_listesi.handle(request.method, request.rel_url.path,
+                                                  request.rel_url.query_string, body)
+            return web.Response(status=st, body=out, headers=hdr)
         host = request.headers.get("Host", "127.0.0.1:8800")
         path = request.rel_url.path.lstrip("/")
         query = request.rel_url.query_string

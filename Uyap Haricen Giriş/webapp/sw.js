@@ -25,6 +25,8 @@ function isVendorRoute(p) {
     p === "/satin-al" || p.startsWith("/satin-al/") ||
     p === "/owner" || p.startsWith("/owner/") ||
     p === "/zs" || p.startsWith("/zs/") ||  // İş Takip: kendi uygulaması, tünele girmez
+    p === "/is-listesi" || p.startsWith("/is-listesi/") ||  // İş Listesi: aynı uygulamanın yeni arayüzü
+    p === "/__uyap_kisi__/is-listesi/ac" ||  // Eski ofis uygulamalarının İş Listesi bağlantısı
     p === "/robots.txt" || p === "/sitemap.xml" ||
     p.startsWith("/odeme/") ||
     p.startsWith("/api/")
