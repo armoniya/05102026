@@ -147,22 +147,15 @@ zorunludur. Yeniden açma, devir gibi işlemler İş Listesi'nde kalır.
 
 ### Sağ tık menüsü
 
-UYAP sayfalarında sağ tık, tarayıcının uzun menüsü yerine sade bir CokluUyap menüsü açar
-(`uyap_proxy.py`, "Sağ tık menüsü"). Yazı alanlarında, kendi pencerelerimizde ve **Shift / Ctrl + sağ
-tık**ta tarayıcının menüsü açılır.
+UYAP'ta **icra dosyası kartında** sağ tık, tarayıcının uzun menüsü yerine sade bir CokluUyap menüsü
+açar (`uyap_proxy.py`, "Sağ tık menüsü"). Şimdilik tek madde var: **Dosya bilgilerini kopyala**.
+"İzmir 15. İcra Dairesi 2025/123" gibi birim adı ve dosya numarası tek tıkla panoya kopyalanır;
+menünün başlığında da kopyalanacak metin görünür. Başka her yerde (diğer dosya türleri, kart dışı,
+yazı alanları) ve **Shift / Ctrl + sağ tık**ta tarayıcının menüsü açılır.
 
-| Nerede | Maddeler |
-|---|---|
-| Evrak ağacında belge | Bu belgeye iş bağla · Belgenin işi · İndirme seçimine ekle/çıkar · Bu belgeyi indir |
-| Dosya kartında | (türe özgü maddeler + Hızlı iş) · İş Ata · Bu dosyanın işleri · Kopyala: birim + dosya no · Tüm evrakı indir |
-| Ana sayfa bildirimi | Bu bildirimden iş aç |
-| Her yerde | Kopyala (seçili metin) · Bağlantıyı yeni sekmede aç · İşlerim · Geri · Sayfayı yenile |
-
-**Dosya türüne göre menü:** `DOSYA_TURLERI` (arabuluculuk, icra, ceza, idare, hukuk, diğer) dosya türü
-açıklamasından, yoksa birim adından türü bulur. Her tür kendi `hizliIsler` (şablon adları) ve
-`maddeler(c)` listesini taşır; menünün ortak kısmı türden bağımsızdır. Şimdilik yalnız icrada hızlı
-işler var (Tebligat / Kesinleşme / Takyidat kontrol, Haciz talepleri); diğer türlerin maddeleri
-birlikte belirlenecek. İleride şablonlara `dosya_turu` alanı eklenip hızlı işler oradan gelebilir.
+**Dosya türüne göre menü:** `DOSYA_TURLERI` (arabuluculuk, icra, ceza, idare, hukuk; eşleşmezse diğer)
+dosya türü açıklamasından, yoksa birim adından türü bulur. Her türün `menu(c)` işlevi kendi maddelerini
+verir; yalnız icranınki tanımlı. Diğer türlerin menüsü maddeleri belirlenince eklenecek.
 
 ---
 
