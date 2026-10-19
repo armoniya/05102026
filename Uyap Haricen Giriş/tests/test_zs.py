@@ -1225,9 +1225,12 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(hdr["Location"].endswith("&sekme=sablonlar"))
             st, _, _ = await k.handle("DELETE", f"/__uyap_kisi__/is-listesi/sablonlar/{sid}", "", b"")
             self.assertEqual(st, 200)
-            # UYAP'tan onaya gönderme: yalnız gonder/basla/tamamla; onaylama köprüden yapılamaz.
+            # UYAP'tan onaya gönderme; onaylanacak durumda olmayan iş onaylanamaz, bilinmeyen eylem 400.
             st, _, out = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{t['id']}/durum", "",
                                         json.dumps({"action": "onayla"}).encode())
+            self.assertEqual(st, 400)
+            st, _, out = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{t['id']}/durum", "",
+                                        json.dumps({"action": "yeniden_ac"}).encode())
             self.assertEqual(st, 400)
             ben = json.loads((await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b""))[2])["me"]["id"]
             kendi = json.loads((await k.handle("POST", "/__uyap_kisi__/is-listesi/tasks", "", json.dumps(
@@ -1254,6 +1257,25 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(onay[aktar["id"]]["ext_pending"])
             self.assertEqual(onay[aktar["id"]]["status"], "acik")
             self.assertIn(kendi["id"], onay)                                 # onaya gönderilen de orada
+            self.assertEqual((onay[aktar["id"]]["ext"]["reason"], onay[aktar["id"]]["ext"]["new_due"]),
+                             ("Sonuç düşmedi", 1800090000))
+            self.assertEqual(onay[kendi["id"]]["submit_note"], "Tebliğ edilmiş")
+            # Yan panelden karar (yönetici): aktarmayı kabul, onaya gönderileni reddet (gerekçe zorunlu) / onayla.
+            kar = f"/__uyap_kisi__/is-listesi/ek-sure/{onay[aktar['id']]['ext']['id']}/karar"
+            st, _, _ = await k.handle("POST", kar, "", json.dumps({"approve": "evet"}).encode())
+            self.assertEqual(st, 400)
+            st, _, out = await k.handle("POST", kar, "", json.dumps({"approve": True}).encode())
+            self.assertEqual((st, json.loads(out)["extension"]["status"]), (200, "kabul"))
+            dy = f"/__uyap_kisi__/is-listesi/tasks/{kendi['id']}/durum"
+            st, _, _ = await k.handle("POST", dy, "", json.dumps({"action": "reddet", "reason": " "}).encode())
+            self.assertEqual(st, 400)
+            st, _, out = await k.handle("POST", dy, "", json.dumps({"action": "reddet", "reason": "Eksik"}).encode())
+            self.assertEqual((st, json.loads(out)["task"]["status"]), (200, "devam"))
+            await k.handle("POST", dy, "", json.dumps({"action": "gonder"}).encode())
+            st, _, out = await k.handle("POST", dy, "", json.dumps({"action": "onayla"}).encode())
+            self.assertEqual((st, json.loads(out)["task"]["status"]), (200, "onaylandi"))
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=onay", b"")
+            self.assertEqual(json.loads(out)["tasks"], [])
             # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.
             self.acc.bump_sess_epoch("ahmet@kemal")
             st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")

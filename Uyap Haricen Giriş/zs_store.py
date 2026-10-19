@@ -738,8 +738,18 @@ class ZsStore:
                                 [uid] + ids).fetchall())
             members = self._q(cur, f"SELECT task_id, user_id, role FROM zs_members WHERE task_id IN ({marks}) "
                                    "ORDER BY id", ids).fetchall()
-            pend = {r[0] for r in self._q(cur, f"SELECT task_id FROM zs_extensions WHERE task_id IN ({marks}) "
-                                                "AND status = 'bekliyor'", ids).fetchall()}
+            # Karar bekleyen ek süre / aktarma talebi ve onaya gönderme notu: UYAP'taki yan panel
+            # İş Listesi'ne gitmeden onaylayabilsin diye.
+            pend = {r["task_id"]: r for r in self._rows(self._q(
+                cur, f"SELECT id, task_id, requester_id, old_due, new_due, reason, created_at FROM zs_extensions "
+                     f"WHERE task_id IN ({marks}) AND status = 'bekliyor'", ids))}
+            onayda = [r["id"] for r in roots if r["status"] == "onayda"]
+            gnot = {}
+            if onayda:
+                om = ",".join("?" * len(onayda))
+                for tid, body in self._q(cur, f"SELECT task_id, body FROM zs_notes WHERE task_id IN ({om}) "
+                                              "AND body LIKE 'Onaya gönderme notu: %' ORDER BY id", onayda).fetchall():
+                    gnot[tid] = body[len("Onaya gönderme notu: "):]
             rem = dict(self._q(cur, f"SELECT task_id, MIN(remind_at) FROM zs_reminders WHERE user_id = ? AND sent_at IS NULL "
                                     f"AND task_id IN ({marks}) GROUP BY task_id", [uid] + ids).fetchall())
             by_parent = {}
@@ -755,6 +765,8 @@ class ZsStore:
                 r["assignees"] = [r["assignee_id"]] if r["assignee_id"] else []
                 r["approvers"] = []
                 r["ext_pending"] = r["id"] in pend
+                r["ext"] = pend.get(r["id"])
+                r["submit_note"] = gnot.get(r["id"])
                 r["reminder_at"] = rem.get(r["id"])
             idx = {r["id"]: r for r in roots}
             for tid, muid, role in members:

@@ -135,8 +135,13 @@ Kurallar:
 ## 5. Onay
 
 İşi atanan kişi UYAP'tan çıkmadan **Onaya gönder** der (dosya kartındaki mor bantta ve sağdaki
-iş panelinde). İsteğe bağlı not yazılır (kontrol sonucu). Yönetici / onay yetkilisi İş Listesi'nde
-onaylar ya da gerekçeyle reddeder (iş "devam"a döner). Özel işler onaya gitmez, "Tamamla" ile kapanır.
+iş panelinde). İsteğe bağlı not yazılır (kontrol sonucu). Yönetici / onay yetkilisi onaylar ya da
+gerekçeyle reddeder (iş "devam"a döner). Özel işler onaya gitmez, "Tamamla" ile kapanır.
+
+Karar UYAP'tan çıkmadan da verilir: sağdaki iş panelinde (**Onay bekleyen**) ve dosya kartı bandında
+onay yetkilisine **Onayla / Reddet** ile **Aktarımı kabul et / reddet** düğmeleri görünür. Satırda
+gönderenin notu ("Kontrol: olumlu …") ya da aktarma talebinin tarihi ve nedeni yazar; ret gerekçesi
+zorunludur. Yeniden açma, devir gibi işlemler İş Listesi'nde kalır.
 
 ---
 
@@ -158,4 +163,5 @@ onaylar ya da gerekçeyle reddeder (iş "devam"a döner). Özel işler onaya git
 - API (`/is-listesi/api`): `GET /sablonlar` → `{hazir, buro}`, `POST /sablonlar`, `POST /sablonlar/{id}` (düzenle),
   `DELETE /sablonlar/{id}`; ertesi güne aktarma mevcut `POST /tasks/{id}/ek-sure` ucunu kullanır
 - Masaüstü köprüsü (`/__uyap_kisi__/is-listesi`): `GET/POST /sablonlar`, `POST/DELETE /sablonlar/{id}`,
-  `POST /tasks/{id}/durum` (yalnız `gonder`, `basla`, `tamamla`), `POST /tasks/{id}/ek-sure` (talep; karar yok)
+  `POST /tasks/{id}/durum` (`gonder`, `basla`, `tamamla`, `onayla`, `reddet`), `POST /tasks/{id}/ek-sure` (talep),
+  `POST /ek-sure/{id}/karar` (kabul / ret); görev listesinde `ext` (bekleyen talep) ve `submit_note`
