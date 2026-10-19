@@ -137,7 +137,9 @@ _ADDED_COLS = {
                  ("office_id", "TEXT"), ("dosya_id", "TEXT"), ("birim_id", "TEXT"), ("birim_adi", "TEXT"),
                  ("dosya_no", "TEXT"), ("dosya_tur", "TEXT"),
                  # UYAP'ın dosya kartını açmak için kartın kendi verisi (JSON; türleri korunur).
-                 ("dosya_uyap", "TEXT")),
+                 ("dosya_uyap", "TEXT"),
+                 # Dosyadaki belirli bir belgeye bağlı iş (UYAP evrakId + ağaçtaki adı).
+                 ("evrak_id", "TEXT"), ("evrak_adi", "TEXT")),
     "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
     # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
     "zs_telegram": (("tg_username", "TEXT"),),
@@ -149,9 +151,10 @@ _POST_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS zs_users_account ON zs_users(account_username) "
     "WHERE account_username IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS zs_tasks_office_dosya ON zs_tasks(office_id, dosya_id)",
+    "CREATE INDEX IF NOT EXISTS zs_tasks_office_birim_dosya ON zs_tasks(office_id, birim_id, dosya_no)",
 )
 # UYAP dosya alanları (görevde).
-DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap")
+DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap", "evrak_id", "evrak_adi")
 # UYAP'ın dosya kartı (dosya-sorgula-popup) bu alanlarla açılır — UYAP'ın kendi arama sonucundan
 # kartı açarken verdiği nesneyle aynı anahtarlar.
 UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod", "dosyaTurKodAciklama",
@@ -164,8 +167,9 @@ def office_of(user) -> str:
 
 
 def clean_dosya(d):
-    """{dosya_id, birim_id, birim_adi, dosya_no, dosya_tur, uyap: {kart verisi}} → temizlenmiş sözlük;
-    dosya_id yoksa None. uyap'tan yalnız UYAP_KART_ALANLARI'ndaki düz değerler (metin/sayı) alınır."""
+    """{dosya_id, birim_id, birim_adi, dosya_no, dosya_tur, evrak_id, evrak_adi, uyap: {kart verisi}} →
+    temizlenmiş sözlük; dosya_id yoksa None. uyap'tan yalnız UYAP_KART_ALANLARI'ndaki düz değerler
+    (metin/sayı) alınır. evrak_id isteğe bağlı: iş dosyanın o belgesine bağlanır."""
     if not isinstance(d, dict):
         return None
     out = {k: (str(d.get(k) or "").strip()[:200] or None) for k in DOSYA_FIELDS if k != "dosya_uyap"}
@@ -173,6 +177,8 @@ def clean_dosya(d):
     kart = {k: (v[:200] if isinstance(v, str) else v) for k, v in (u.items() if isinstance(u, dict) else ())
             if k in UYAP_KART_ALANLARI and isinstance(v, (str, int, float)) and not isinstance(v, bool)}
     out["dosya_uyap"] = json.dumps(kart, ensure_ascii=False) if kart.get("dosyaId") else None
+    if not out["evrak_id"]:
+        out["evrak_adi"] = None
     return out if out["dosya_id"] else None
 
 # Gizlenebilen türler: (zs_transfers bayrağı, kesim sütunu)
@@ -577,15 +583,19 @@ class ZsStore:
         cut = self._run(lambda cur: self._cutoffs(cur, [root_id], viewer_id)).get(root_id)
         return bool(cut and item_id <= cut[kind])
 
-    def list_tree(self, user, filtre="benim", dosya_id=None):
+    def list_tree(self, user, filtre="benim", dosya_id=None, dosya_key=None):
         """Ana işleri alt işleriyle (ve sayılarla) döndürür; özel işler ve devirde gizlenen
-        kayıtlar bu kullanıcıya göre süzülür. Yalnız kullanıcının bürosu; dosya_id verilirse
-        yalnız o UYAP dosyasına bağlı işler."""
+        kayıtlar bu kullanıcıya göre süzülür. Yalnız kullanıcının bürosu; dosya_key=(birim_id,
+        dosya_no) verilirse yalnız o UYAP dosyasına bağlı işler. UYAP'ın dosyaId'si oturuma bağlı
+        (her girişte değişir) — kalıcı eşleştirme birim + dosya no ile; dosya_id eski istemciler için."""
         uid = user["id"]
         # Her sorgunun başı: büro (+ isteğe bağlı dosya) + özel iş süzgeci.
         base = "parent_id IS NULL AND COALESCE(office_id, '') = ? AND (is_private = 0 OR created_by = ?)"
         bparams = [office_of(user), uid]
-        if dosya_id:
+        if dosya_key:
+            base += " AND birim_id = ? AND dosya_no = ?"
+            bparams += [str(dosya_key[0]), str(dosya_key[1])]
+        elif dosya_id:
             base += " AND dosya_id = ?"
             bparams.append(str(dosya_id))
 

@@ -949,6 +949,22 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Dosyasız iş"}))
         lst = await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu&dosya_id=987654"))
         self.assertEqual([x["id"] for x in lst["tasks"]], [t["id"]])
+        self.assertIsNone(t["evrak_id"])
+        # UYAP dosyaId'si oturumla değişir: birim + dosya no ile eşleşme kimlik farklı olsa da bulur.
+        lst = await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu&dosya_id=yeni-oturum-kimligi"
+                                           "&birim_id=1001&dosya_no=2026/1234"))
+        self.assertEqual([x["id"] for x in lst["tasks"]], [t["id"]])
+        lst = await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu&birim_id=1001&dosya_no=2026/9999"))
+        self.assertEqual(lst["tasks"], [])
+        # Belgeye bağlı iş: evrak_id + adı saklanır (evrak ağacında mor görünür); evrak_id'siz ad atılır.
+        b = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Bilirkişi raporuna itiraz", "dosya": dict(self.DOSYA, evrak_id="55501", evrak_adi="Bilirkişi Raporu")})))["task"]
+        self.assertEqual((b["dosya_id"], b["evrak_id"], b["evrak_adi"]), ("987654", "55501", "Bilirkişi Raporu"))
+        b2 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "y", "dosya": dict(self.DOSYA, evrak_adi="sahipsiz ad")})))["task"]
+        self.assertEqual((b2["evrak_id"], b2["evrak_adi"]), (None, None))
+        await self.j(await ahmet.delete(f"/is-listesi/api/tasks/{b['id']}", headers=H))
+        await self.j(await ahmet.delete(f"/is-listesi/api/tasks/{b2['id']}", headers=H))
         # Başka büro: görmez, kendi kişisi olmayana atayamaz.
         zeynep = await self.login("deniz", "zeynep")
         self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/tasks?filtre=tumu")))["tasks"], [])
@@ -1053,6 +1069,10 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(me["me"]["account_username"], "ahmet@kemal")
         other = await self.client()
         self.assertEqual((await other.get(k["url"], allow_redirects=False)).status, 401)
+        # ?is=<id> ile geçiş doğrudan o işe gider; sayı olmayan değer yok sayılır.
+        for ek, hedef in ((f"&is={t['id']}", f"/is-listesi#is-{t['id']}"), ("&is=x'><b>", "url=/is-listesi'")):
+            k2 = await self.j(await c.post("/is-listesi/api/sso-kod", headers=auth, json={}))
+            self.assertIn(hedef, await (await (await self.client()).get(k2["url"] + ek, allow_redirects=False)).text())
         # Ana hesap epoch'u değişince jeton da düşer.
         self.acc.bump_sess_epoch("ahmet@kemal")
         self.assertEqual((await c.get("/is-listesi/api/me", headers=auth)).status, 401)
@@ -1116,11 +1136,21 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((st, t["status"], t["dosya_id"]), (200, "acik", "987654"))
             st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "dosya_id=987654", b"")
             self.assertEqual([x["id"] for x in json.loads(out)["tasks"]], [t["id"]])
-            st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "", b"")
+            # Sağdaki iş paneli: dosyasız liste (varsayılan "benim" — iş Mehmet'te, Ahmet'in değil;
+            # yönetici "tümü"nde görür); bilinmeyen süzgeç reddedilir.
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "", b"")
+            self.assertEqual((st, json.loads(out)["tasks"]), (200, []))
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=tumu", b"")
+            self.assertEqual((st, [x["id"] for x in json.loads(out)["tasks"]]), (200, [t["id"]]))
+            st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=hepsi", b"")
             self.assertEqual(st, 400)
             st, hdr, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/ac", "", b"")
             self.assertEqual(st, 303)
             self.assertTrue(hdr["Location"].startswith(base + "/is-listesi/sso?kod="))
+            st, hdr, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/ac", f"is={t['id']}", b"")
+            self.assertTrue(hdr["Location"].endswith(f"&is={t['id']}"))
+            st, hdr, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/ac", "is=1%26x%3D2", b"")
+            self.assertNotIn("&is", hdr["Location"])
             st, _, _ = await k.handle("DELETE", "/__uyap_kisi__/is-listesi/tasks", "", b"")
             self.assertEqual(st, 404)
             # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.

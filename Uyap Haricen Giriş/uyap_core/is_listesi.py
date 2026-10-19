@@ -10,9 +10,10 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
 (istemcide home_client, ofiste uyap_proxy) işlenir — kimlik o bilgisayarda giriş yapan kişidir.
 
     GET  /__uyap_kisi__/is-listesi/me                → {me, people, office}
-    GET  /__uyap_kisi__/is-listesi/tasks?dosya_id=…  → bu dosyaya bağlı işler (görebildikleri)
+    GET  /__uyap_kisi__/is-listesi/tasks?birim_id=…&dosya_no=…[&dosya_id=…]  → bu dosyaya bağlı işler
+    GET  /__uyap_kisi__/is-listesi/tasks?filtre=…    → sağdaki iş paneli: benim | onay | tumu
     POST /__uyap_kisi__/is-listesi/tasks             {title, description, assignee_id, due_at, priority, dosya}
-    GET  /__uyap_kisi__/is-listesi/ac                → 303 → cokluuyap.com'da şifresiz oturum (tek kullanımlık kod)
+    GET  /__uyap_kisi__/is-listesi/ac[?is=<id>]      → 303 → cokluuyap.com'da şifresiz oturum (tek kullanımlık kod)
 
 Kimlik uyap_app girişinde configure() ile verilir, çıkışta clear() ile silinir. Jeton bellekte
 tutulur, süresi dolmadan yenilenir; sunucu 401 dönerse bir kez yeniden alınır.
@@ -134,10 +135,23 @@ async def handle(method, path, query, body):
             from urllib.parse import parse_qs, urlencode
             q = parse_qs(query or "")
             dosya_id = (q.get("dosya_id") or [""])[0][:200]
-            if not dosya_id:
-                return _err(400, "Dosya kimliği gerekli.")
-            # Yönetici büronun tüm işlerini, kullanıcı kendisininkileri görür (sunucu süzer).
-            return _json(*await _call("GET", "tasks", urlencode({"filtre": "tumu", "dosya_id": dosya_id})))
+            birim = (q.get("birim_id") or [""])[0][:200]
+            dosya_no = (q.get("dosya_no") or [""])[0][:200]
+            if dosya_id or (birim and dosya_no):
+                # Yönetici büronun tüm işlerini, kullanıcı kendisininkileri görür (sunucu süzer).
+                # Kalıcı anahtar birim + dosya no (UYAP dosyaId'si oturumla değişir); dosya_id de
+                # gönderilir: birim/no'yu tanımayan eski sunucu dosyaya göre süzmeye devam etsin.
+                p = {"filtre": "tumu"}
+                if dosya_id:
+                    p["dosya_id"] = dosya_id
+                if birim and dosya_no:
+                    p.update(birim_id=birim, dosya_no=dosya_no)
+                return _json(*await _call("GET", "tasks", urlencode(p)))
+            # Dosyasız: sağdaki iş paneli (benim / onay / tümü — "tümü" yalnız yöneticide geniş).
+            filtre = (q.get("filtre") or ["benim"])[0]
+            if filtre not in ("benim", "onay", "tumu"):
+                return _err(400, "Geçersiz süzgeç.")
+            return _json(*await _call("GET", "tasks", urlencode({"filtre": filtre})))
         if sub == "tasks" and method == "POST":
             try:
                 d = json.loads(body or b"{}")
@@ -151,7 +165,10 @@ async def handle(method, path, query, body):
             status, d = await _call("POST", "sso-kod", body={})
             if status != 200 or not d.get("url"):
                 return _err(status if status >= 400 else 502, d.get("error") or "İş Listesi açılamadı.")
-            return 303, {"Location": _cfg["base"] + d["url"], "Cache-Control": "no-store",
+            from urllib.parse import parse_qs
+            task = (parse_qs(query or "").get("is") or [""])[0]
+            extra = f"&is={task}" if task.isdigit() and len(task) < 12 else ""
+            return 303, {"Location": _cfg["base"] + d["url"] + extra, "Cache-Control": "no-store",
                          "Referrer-Policy": "no-referrer"}, b""
     except _Fail as e:
         return _err(e.status, str(e))

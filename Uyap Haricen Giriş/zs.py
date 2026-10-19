@@ -732,7 +732,11 @@ async def api_tasks(request, user):
     if filtre not in ("benim", "onay", "tumu"):
         filtre = "benim"
     dosya_id = (request.query.get("dosya_id") or "").strip()[:200] or None
-    return _json({"ok": True, "tasks": await _db(C.store.list_tree, user, filtre, dosya_id)})
+    # Kalıcı dosya anahtarı: birim + dosya no (UYAP dosyaId'si oturumla değişir).
+    birim = (request.query.get("birim_id") or "").strip()[:200]
+    dosya_no = (request.query.get("dosya_no") or "").strip()[:200]
+    key = (birim, dosya_no) if birim and dosya_no else None
+    return _json({"ok": True, "tasks": await _db(C.store.list_tree, user, filtre, dosya_id, key)})
 
 
 @_api()
@@ -1473,9 +1477,12 @@ async def sso_get(request):
                  error=None if ok else "Kod geçersiz ya da süresi dolmuş.")
     if not ok:
         return _login_page("Geçiş bağlantısının süresi dolmuş; giriş yapın.", status=401, p=NEW)
+    # ?is=<id>: UYAP'taki iş panelinden tıklanan iş doğrudan açılsın.
+    task = request.query.get("is") or ""
+    target = f"{NEW}#is-{int(task)}" if task.isdigit() and len(task) < 12 else NEW
     page = (f"<!doctype html><html lang='tr'><head><meta charset='utf-8'>"
-            f"<meta http-equiv='refresh' content='0;url={NEW}'><title>İş Listesi</title></head>"
-            f"<body><a href='{NEW}'>İş Listesi'ni aç</a></body></html>")
+            f"<meta http-equiv='refresh' content='0;url={target}'><title>İş Listesi</title></head>"
+            f"<body><a href='{target}'>İş Listesi'ni aç</a></body></html>")
     resp = web.Response(text=page, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
     _set_session(resp, NEW, user)
