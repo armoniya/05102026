@@ -691,6 +691,7 @@ function renderDetail() {
         h("dt", {}, "Son tarih"), h("dd", {}, t.due_at ? dueChip(t) : h("span", { class: "muted" }, "—")),
         t.dosya_id ? [h("dt", {}, "UYAP dosyası"), h("dd", {}, dosyaText(t) || t.dosya_id,
           t.dosya_tur ? h("span", { class: "small muted" }, ` · ${t.dosya_tur}`) : null,
+          t.taraf_adi ? h("div", { class: "small" }, `Taraf: ${t.taraf_adi}`) : null,
           t.evrak_id ? h("div", { class: "small" }, `Belge: ${t.evrak_adi || t.evrak_id}`) : null,
           h("div", {}, h("a", { class: "btn-ghost sm", href: uyaptaAcUrl(t), target: "_blank", rel: "noopener noreferrer",
             title: "Bu bilgisayardaki CokluUyap'ta (127.0.0.1:8800) UYAP'ın dosya kartını açar", style: "margin-top:6px;display:inline-flex" },

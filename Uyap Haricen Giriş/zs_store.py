@@ -127,6 +127,12 @@ _SCHEMA = [
     # Masaüstünden (CokluUyap) web'e şifresiz geçiş: tek kullanımlık, kısa ömürlü kod.
     """CREATE TABLE IF NOT EXISTS zs_sso_codes (
         code TEXT PRIMARY KEY, user_id BIGINT NOT NULL, expires_at BIGINT NOT NULL)""",
+    # Büro iş şablonları (hazır olanlar kodda: HAZIR_SABLONLAR). Model: "yapılacak iş.md".
+    """CREATE TABLE IF NOT EXISTS zs_templates (
+        id {pk}, office_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+        due_days INTEGER, priority INTEGER NOT NULL DEFAULT 1, taraf TEXT, action TEXT,
+        created_by BIGINT, created_at BIGINT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS zs_templates_office ON zs_templates(office_id)",
 ]
 
 # Sonradan eklenen sütunlar: tablo → ((sütun, tür), ...)
@@ -139,7 +145,9 @@ _ADDED_COLS = {
                  # UYAP'ın dosya kartını açmak için kartın kendi verisi (JSON; türleri korunur).
                  ("dosya_uyap", "TEXT"),
                  # Dosyadaki belirli bir belgeye bağlı iş (UYAP evrakId + ağaçtaki adı).
-                 ("evrak_id", "TEXT"), ("evrak_adi", "TEXT")),
+                 ("evrak_id", "TEXT"), ("evrak_adi", "TEXT"),
+                 # İşin yapıldığı taraf (dosya kartının taraf listesinden; ör. borçlulardan biri).
+                 ("taraf_adi", "TEXT")),
     "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
     # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
     "zs_telegram": (("tg_username", "TEXT"),),
@@ -154,11 +162,37 @@ _POST_INDEXES = (
     "CREATE INDEX IF NOT EXISTS zs_tasks_office_birim_dosya ON zs_tasks(office_id, birim_id, dosya_no)",
 )
 # UYAP dosya alanları (görevde).
-DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap", "evrak_id", "evrak_adi")
+DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap", "evrak_id", "evrak_adi",
+                "taraf_adi")
 # UYAP'ın dosya kartı (dosya-sorgula-popup) bu alanlarla açılır — UYAP'ın kendi arama sonucundan
 # kartı açarken verdiği nesneyle aynı anahtarlar.
 UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod", "dosyaTurKodAciklama",
                       "dosyaDurum", "dosyaDurumKod", "birimTuru3")
+
+# Hazır iş şablonları (her büroya açık, değiştirilemez). Büro şablonları zs_templates'te.
+# taraf: işin bir tarafa yapılıp yapılmadığı (borclu | alacakli | herhangi | None).
+# action: önerilen UYAP aksiyonu (Aşama 3, henüz yürütülmez) — bkz. "yapılacak iş.md".
+HAZIR_SABLONLAR = (
+    {"id": "h-tebligat", "title": "Tebligat kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
+     "description": "Safahat / tebligat barkodundan tebliğ sonucunu kontrol et.", "action": "ekran:safahat"},
+    {"id": "h-odeme-emri", "title": "Ödeme emri kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
+     "description": "Ödeme emrinin gönderilip gönderilmediğini kontrol et.", "action": "ekran:evrak"},
+    {"id": "h-kesinlesme", "title": "Kesinleşme kontrol", "due_days": 7, "priority": 1, "taraf": "borclu",
+     "description": "Takibin borçlu yönünden kesinleşip kesinleşmediğini kontrol et.", "action": "ekran:safahat"},
+    {"id": "h-takyidat", "title": "Takyidat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "Araç / tapu takyidat sorgu sonucunu kontrol et.", "action": "sorgu:takyidat"},
+    {"id": "h-barkod", "title": "Barkod takip", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "PTT barkodunda tebligatın son durumunu kontrol et.", "action": None},
+    {"id": "h-21-2", "title": "21/2 akıbet kontrol", "due_days": 5, "priority": 1, "taraf": "borclu",
+     "description": "21/2 tebligatın akıbetini kontrol et.", "action": "ekran:safahat"},
+    {"id": "h-reddiyat", "title": "Reddiyat kontrol", "due_days": 2, "priority": 1, "taraf": None,
+     "description": "Reddiyatın hesaba geçip geçmediğini kontrol et.", "action": None},
+    {"id": "h-tahsilat", "title": "Tahsilat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "Tahsilatı kontrol et, müvekkile bildir.", "action": None},
+    {"id": "h-aranacak", "title": "Borçlu aranacak", "due_days": 1, "priority": 1, "taraf": "borclu",
+     "description": "Borçluya ulaş, sonucu nota yaz.", "action": None},
+)
+TEMPLATE_TARAF = ("borclu", "alacakli", "herhangi")
 
 
 def office_of(user) -> str:
@@ -167,7 +201,7 @@ def office_of(user) -> str:
 
 
 def clean_dosya(d):
-    """{dosya_id, birim_id, birim_adi, dosya_no, dosya_tur, evrak_id, evrak_adi, uyap: {kart verisi}} →
+    """{dosya_id, birim_id, birim_adi, dosya_no, dosya_tur, evrak_id, evrak_adi, taraf_adi, uyap: {kart verisi}} →
     temizlenmiş sözlük; dosya_id yoksa None. uyap'tan yalnız UYAP_KART_ALANLARI'ndaki düz değerler
     (metin/sayı) alınır. evrak_id isteğe bağlı: iş dosyanın o belgesine bağlanır."""
     if not isinstance(d, dict):
@@ -1435,6 +1469,56 @@ class ZsStore:
         return self._run(lambda cur: self._rows(self._q(
             cur, "SELECT * FROM zs_reminders WHERE task_id IS NULL AND (user_id = ? OR created_by = ?) "
                  "AND (sent_at IS NULL OR remind_at >= ?) ORDER BY remind_at, id", (viewer["id"], viewer["id"], since))))
+
+    # ── iş şablonları ────────────────────────────────────────────────────────────────
+    def list_templates(self, user):
+        """{hazir: [...], buro: [...]} — büro şablonları kullanıcının bürosununkiler (ada göre)."""
+        def fn(cur):
+            return self._rows(self._q(cur, "SELECT t.*, u.display_name AS created_by_name FROM zs_templates t "
+                                           "LEFT JOIN zs_users u ON u.id = t.created_by "
+                                           "WHERE COALESCE(t.office_id, '') = ? ORDER BY LOWER(t.title), t.id",
+                                      (office_of(user),)))
+        return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": self._run(fn)}
+
+    def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None):
+        title = " ".join((title or "").split())[:200]
+        if not title:
+            raise ZsError("Şablon adı yazın.")
+        if due_days is not None and not 0 <= int(due_days) <= 365:
+            raise ZsError("Süre 0–365 gün olmalı.")
+        if priority not in PRIORITIES:
+            raise ZsError("Geçersiz öncelik.")
+        taraf = taraf if taraf in TEMPLATE_TARAF else None
+        action = (str(action).strip()[:100] or None) if action else None
+
+        def fn(cur):
+            n = self._q(cur, "SELECT COUNT(*) FROM zs_templates WHERE COALESCE(office_id, '') = ?",
+                        (office_of(user),)).fetchone()[0]
+            if n >= 200:
+                raise ZsError("Bir büroda en çok 200 şablon olabilir.")
+            if self._q(cur, "SELECT 1 FROM zs_templates WHERE COALESCE(office_id, '') = ? AND LOWER(title) = LOWER(?)",
+                       (office_of(user), title)).fetchone():
+                raise ZsError("Bu adla bir şablon zaten var.")
+            tid = self._insert(cur, "INSERT INTO zs_templates (office_id, title, description, due_days, priority, "
+                                    "taraf, action, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                               (office_of(user) or None, title, (description or "").strip()[:2000],
+                                None if due_days is None else int(due_days), priority, taraf, action,
+                                user["id"], _now()))
+            return self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,)))
+        return self._run(fn)
+
+    def delete_template(self, user, template_id):
+        """Şablonu ekleyen ya da büro yöneticisi siler."""
+        def fn(cur):
+            t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ? AND COALESCE(office_id, '') = ?",
+                                  (template_id, office_of(user))))
+            if not t:
+                raise ZsError("Şablon bulunamadı.")
+            if user["role"] != "admin" and t["created_by"] != user["id"]:
+                raise ZsError("Şablonu yalnız ekleyen ya da yönetici silebilir.")
+            self._q(cur, "DELETE FROM zs_templates WHERE id = ?", (template_id,))
+            return t
+        return self._run(fn)
 
     def get_reminder(self, rid):
         return self._run(lambda cur: self._one(self._q(cur, "SELECT * FROM zs_reminders WHERE id = ?", (rid,))))

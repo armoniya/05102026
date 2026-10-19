@@ -1,0 +1,126 @@
+# Yapılacak İş — "Kontrol et, aksiyon al" modeli
+
+Bu belge İş Listesi'ndeki işlerin, UYAP dosya kartından açılan **iş türleri (şablonlar)** üzerinden
+nasıl tanımlanacağını ve bir işin "kontrol → karar → aksiyon → onay" akışıyla nasıl kapanacağını
+anlatır. Aşama 1 bu sürümde yapıldı; sonraki aşamalar bu modele göre eklenecek.
+
+---
+
+## 1. Temel fikir
+
+Büroda işlerin çoğu aynı kalıptadır: *bir şeyi kontrol et, sonuca göre UYAP'ta bir işlem yap*.
+
+```
+İŞ ATANIR ──► KONTROL ──► KARAR ──► AKSİYON ──► ONAYA GÖNDER ──► ONAY
+(şablon +     (UYAP'ta     (olumlu /   (UYAP işlemi   (atanan kişi)    (yönetici /
+ taraf +       neye         olumsuz /   ya da yeni                      onay yetkilisi)
+ belge)        bakılacak)   bekliyor)   takip işi)
+```
+
+- **İş türü (şablon)** işin ne olduğunu, ne kadar sürede yapılacağını, neyin kontrol edileceğini ve
+  sonuca göre hangi aksiyonların önerileceğini tanımlar.
+- **Taraf**: icra dosyasında birden çok borçlu olabilir; iş, dosya kartının taraf listesinden
+  seçilen kişiye bağlanır (başlık "HAMZA OĞUZ – Tebligat kontrol" gibi oluşur).
+- **Belge**: iş, evrak ağacındaki bir belgeye bağlanabilir (ağaçta mor görünür).
+- **Aksiyon**: UYAP'ta yapılacak işlem. Sistem hiçbir talebi kendiliğinden **göndermez**; ilgili
+  UYAP ekranını açar ve bildiği alanları doldurur. İmza ve gönderme her zaman kullanıcıdadır.
+
+---
+
+## 2. İş türü (şablon)
+
+İki kaynaktan gelir:
+
+| Kaynak | Kim tanımlar | Nerede durur |
+|---|---|---|
+| **Hazır** | Uygulama ile gelir | Sunucu kodu (`zs_store.HAZIR_SABLONLAR`), değiştirilemez |
+| **Büro** | Bürodaki her kullanıcı ekler; ekleyen ya da yönetici siler | Veritabanı (`zs_templates`, büroya özel) |
+
+Alanlar:
+
+| Alan | Açıklama | Örnek |
+|---|---|---|
+| `title` | İş adı (başlığın taraf adından sonraki kısmı) | Tebligat kontrol |
+| `description` | İşe varsayılan açıklama / kontrol talimatı | Safahat'tan tebligat barkodunu ve sonucunu kontrol et |
+| `due_days` | Son tarih: bugünden kaç gün sonra (boş = tarih yok) | 3 |
+| `priority` | 0 düşük, 1 normal, 2 acil | 1 |
+| `taraf` | İş bir tarafa mı yapılır (`borclu`, `alacakli`, `herhangi`, boş) | borclu |
+| `action` | Önerilen UYAP aksiyonu anahtarı (Aşama 3) | `talep:adres_arastirmasi` |
+
+Kullanıcı İş Ata penceresinde şablona tıklayınca başlık, açıklama, son tarih ve öncelik dolar;
+dilediği gibi değiştirip kaydeder. Formdaki değerler **"Şablon olarak kaydet"** ile büroya yeni
+şablon olarak eklenebilir.
+
+---
+
+## 3. Kontrol ve karar (Aşama 2)
+
+Her iş türü bir **kontrol sorusu** ve olası **sonuçlar** taşır. Kullanıcı işi bitirirken sonucu seçer;
+sonuca bağlı **sonraki iş** önerilir (tek tıkla açılır, aynı dosya/taraf/belgeyle).
+
+| İş türü | Kontrol | Olumlu → | Olumsuz → | Bekliyor → |
+|---|---|---|---|---|
+| Tebligat kontrol | Tebligat tebliğ edildi mi? | Kesinleşme kontrol (+7 gün) | Adres araştırması / 21-2 tebligat talebi | Aynı iş, +3 gün |
+| Ödeme emri kontrol | Ödeme emri gönderildi mi? | Tebligat kontrol (+10 gün) | Ödeme emri yeniden gönder | +3 gün |
+| Kesinleşme kontrol | Takip kesinleşti mi? | Haciz talepleri (SGK, banka, araç, tapu) | Tebligat kontrol | +3 gün |
+| Takyidat kontrol | Araç/tapu takyidat sonucu geldi mi? | Haciz / yakalama talebi | Başka mal varlığı sorgusu | +2 gün |
+| Barkod takip | PTT barkodunda son durum | Tebligat kontrol | Adres araştırması | +2 gün |
+| 21/2 akıbet kontrol | 21/2 tebligatın akıbeti | Kesinleşme kontrol | Yeni adres / ilanen tebligat | +5 gün |
+| Reddiyat / tahsilat kontrol | Para hesaba geçti mi? | Müvekkile bildirim | Muhasebe ile görüş | +2 gün |
+| Borçlu aranacak | Borçluya ulaşıldı mı? | Ödeme planı notu | Tekrar ara (+2 gün) | — |
+
+Sonuç ve karar işe **not** olarak yazılır ("Kontrol: olumsuz — tebligat iade, adres yetersiz").
+Böylece onaylayan kişi neye bakıldığını görür.
+
+---
+
+## 4. UYAP aksiyonları (Aşama 3)
+
+Aksiyon, şablona ve kontrol sonucuna bağlı **önerilen UYAP işlemi**dir. Türler:
+
+| Tür | Ne yapar | Örnek anahtar |
+|---|---|---|
+| `ekran` | Dosya kartında ilgili sekmeyi açar | `ekran:safahat`, `ekran:evrak` |
+| `sorgu` | UYAP sorgu ekranını açar (sorgu ücretlidir; kullanıcı onaylar) | `sorgu:takyidat`, `sorgu:sgk`, `sorgu:banka` |
+| `talep` | Evrak Gönderme → Talep ekranını açar, talep türünü ve tarafı seçer | `talep:adres_arastirmasi`, `talep:maas_haczi`, `talep:arac_haczi` |
+| `is` | Aynı dosyada yeni takip işi açar | `is:tebligat_kontrol` |
+
+Kurallar:
+
+1. **Hiçbir talep otomatik gönderilmez, imzalanmaz.** Sistem ekranı açar ve bildiği alanları
+   (dosya, taraf, talep türü) doldurur. Kontrol edip "Gönder"e basmak kullanıcıdadır.
+2. Ücretli sorgularda (takyidat, SGK vb.) sorgu bakiyesi gösterilir, kullanıcı onaylamadan sorgu
+   yapılmaz.
+3. Yapılan aksiyon işe not düşer ("Talep hazırlandı: Adres araştırması — HAMZA OĞUZ"). UYAP'ın
+   gönderim sonucu (evrak no) okunabiliyorsa o da eklenir.
+4. Aksiyonu sonradan değişebilecek UYAP ekranlarına bağlamak kırılgandır; her aksiyon, ekran
+   bulunamazsa "Elle yapın: Evrak Gönderme → Talep → Adres Araştırması" yönergesine düşer.
+
+---
+
+## 5. Onay
+
+İşi atanan kişi UYAP'tan çıkmadan **Onaya gönder** der (dosya kartındaki mor bantta ve sağdaki
+iş panelinde). İsteğe bağlı not yazılır (kontrol sonucu). Yönetici / onay yetkilisi İş Listesi'nde
+onaylar ya da gerekçeyle reddeder (iş "devam"a döner). Özel işler onaya gitmez, "Tamamla" ile kapanır.
+
+---
+
+## 6. Aşamalar
+
+| Aşama | İçerik | Durum |
+|---|---|---|
+| 1 | Hazır + büro şablonları, "Şablon olarak kaydet", taraf seçimi, süre düğmeleri, UYAP'tan onaya gönderme, bildirimden iş, bugün özeti | **Yapıldı** |
+| 2 | Kontrol sonucu (olumlu / olumsuz / bekliyor) + sonraki iş önerisi; şablonda sonuç dalları | Planlandı |
+| 3 | UYAP aksiyonları (`ekran`, `sorgu`, `talep`, `is`) — ekranı açıp doldurma | Planlandı |
+| 4 | Otomatik kontrol: uygun işlerde (barkod, safahat) sorguyu sistem yapar, sonucu işe not düşer; karar yine kullanıcıda | Fikir |
+
+---
+
+## 7. Veri (Aşama 1)
+
+- `zs_templates`: `id, office_id, title, description, due_days, priority, taraf, action, created_by, created_at`
+- `zs_tasks`: mevcut dosya alanlarına ek `taraf_adi` (işin yapıldığı taraf)
+- API (`/is-listesi/api`): `GET /sablonlar` → `{hazir, buro}`, `POST /sablonlar`, `DELETE /sablonlar/{id}`
+- Masaüstü köprüsü (`/__uyap_kisi__/is-listesi`): `GET/POST /sablonlar`, `DELETE /sablonlar/{id}`,
+  `POST /tasks/{id}/durum` (yalnız `gonder`, `basla`, `tamamla`)

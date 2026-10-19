@@ -1775,6 +1775,77 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     }
     function ac() { isAc(null); }
 
+    // Kişinin kendisi + büro kişileri (/me): bant ve paneldeki "Onaya gönder" için; 5 dk saklanır.
+    let benZamani = 0;
+    async function beniGetir(zorla) {
+        if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await api('/me'); benZamani = Date.now(); }
+        return ben;
+    }
+
+    // ── UYAP'tan çıkmadan işi bitirme: "Onaya gönder" (özel işte "Tamamla") ──
+    // Yalnız işe atanan kişi, açık / devam eden ana işi onaya gönderir (sunucu da denetler).
+    function isAtanan(t) {
+        const kim = t.assignees && t.assignees.length ? t.assignees : [t.assignee_id];
+        return !!ben && kim.indexOf(ben.me.id) >= 0;
+    }
+    function kapanisEylemi(t) {
+        if (!ben || t.parent_id || (t.status !== 'acik' && t.status !== 'devam')) return null;
+        if (t.is_private) return t.created_by === ben.me.id ? 'tamamla' : null;
+        return isAtanan(t) ? 'gonder' : null;
+    }
+    function kapanisDugmesi(t, sinif) {
+        const ey = kapanisEylemi(t);
+        if (!ey) return null;
+        const b = el('button', null, ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder');
+        b.type = 'button';
+        b.className = sinif;
+        b.title = ey === 'tamamla' ? 'Özel işi tamamla' : 'İşi yaptım: onaylanmak üzere gönder';
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); kapanisPenceresi(t, ey); });
+        return b;
+    }
+    function kapanisPenceresi(t, ey) {
+        kur();
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', ey === 'tamamla' ? 'İşi tamamla' : 'Onaya gönder'));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', kapat);
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        kutu.appendChild(el('div', 'margin-top:4px;font-weight:600;word-break:break-word;', t.title));
+        const yer = [t.birim_adi, t.dosya_no].filter(Boolean).join(' ');
+        if (yer) kutu.appendChild(el('div', 'color:#cbd5e1;', yer + (t.evrak_adi ? ' · Belge: ' + t.evrak_adi : '')));
+        mesajEl = el('div', 'margin-top:8px;color:#fca5a5;');
+        kutu.appendChild(mesajEl);
+        const not = el('textarea'); not.rows = 3; not.maxLength = 2000;
+        not.placeholder = 'Kontrol sonucu / yapılan işlem (isteğe bağlı)';
+        kutu.appendChild(alan('Not', not));
+        kutu.appendChild(dugme(ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder', '#16a34a', async function(b) {
+            b.disabled = true;
+            mesajEl.textContent = '';
+            try {
+                await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: ey, reason: not.value }) });
+                mesajEl.style.color = '#86efac';
+                mesajEl.textContent = ey === 'tamamla' ? 'İş tamamlandı.' : 'İş onaya gönderildi.';
+                isleriTazele();
+                setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 900);
+            } catch (e) {
+                mesajEl.style.color = '#fca5a5';
+                mesajEl.textContent = 'Gönderilemedi: ' + e.message;
+                b.disabled = false;
+            }
+        }));
+        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
+        setTimeout(function() { not.focus(); }, 0);
+    }
+    // İş açılınca / durumu değişince: kart bandı, belge işaretleri ve panel yeniden çekilir.
+    function isleriTazele() {
+        Object.keys(dosyaIsleri).forEach(function(k) { delete dosyaIsleri[k]; });
+        panelYenile();
+    }
+
     // ── Pencere ──
     let ort, kutu, mesajEl;
     function kur() {
@@ -1799,7 +1870,20 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '.uyap-belge-is:hover{background:#4338ca}' +
             '.uyap-belge-is.bos{display:none;background:transparent;color:#6d28d9;border:1px dashed #a78bfa}' +
             '.dx-treeview-item:hover > .uyap-belge-is.bos{display:inline-block}' +
-            '.uyap-belge-is.bos:hover{background:#ede9fe}';
+            '.uyap-belge-is.bos:hover{background:#ede9fe}' +
+            '.uyap-is-uyari-satir{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin-top:2px}' +
+            '.uyap-is-uyari-kucuk{padding:1px 9px;border:1px solid #6366f1;border-radius:999px;background:#fff;color:#4338ca;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer}' +
+            '.uyap-is-uyari-kucuk:hover{background:#e0e7ff}' +
+            // İş Ata penceresi: şablon / süre çipleri.
+            '#uyap-isata .ia-cip{display:inline-block;margin:4px 4px 0 0;padding:3px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.22);background:transparent;color:#e5e7eb;cursor:pointer;font-family:inherit;font-size:12px;line-height:1.4}' +
+            '#uyap-isata .ia-cip:hover{background:rgba(255,255,255,0.08)}' +
+            '#uyap-isata .ia-cip.buro{border-color:rgba(167,139,250,0.65)}' +
+            '#uyap-isata .ia-cip.sec{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
+            '#uyap-isata .ia-sil{margin-left:6px;opacity:.6}' +
+            '#uyap-isata .ia-sil:hover,#uyap-isata .ia-sil.emin{opacity:1;color:#fca5a5}' +
+            // UYAP ana sayfası "Bildirimler": bildirimin dosyasına iş.
+            '.uyap-bildirim-is{margin-left:8px;padding:1px 9px;border:1px solid #a78bfa;border-radius:999px;background:#ede9fe;color:#5b21b6;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap}' +
+            '.uyap-bildirim-is:hover{background:#ddd6fe}';
         document.head.appendChild(stil);
         ort =el('div', 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,0.45);display:none;align-items:flex-start;justify-content:center;padding-top:8vh;');
         ort.addEventListener('click', function(ev) { if (ev.target === ort) kapat(); });
@@ -1812,7 +1896,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     function kapat() { if (ort) ort.style.display = 'none'; }
 
     // kart: dosya kartı (evrak ağacından belge seçimi için); evrakId: belge satırından açıldıysa seçili gelir.
-    async function pencereAc(d, kart, evrakId) {
+    // on: formun ön doldurması {sablon (adı), baslik, aciklama} — ör. bildirimden açılınca.
+    async function pencereAc(d, kart, evrakId, on) {
         kur();
         if (!kutu) return;
         kutu.innerHTML = '';
@@ -1833,9 +1918,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         kutu.appendChild(formYeri);
         liste.appendChild(el('div', 'color:#9ca3af;', 'Yükleniyor…'));
         try {
-            ben = await api('/me');   // her açılışta: büroya eklenen/silinen kişiler hemen yansısın
+            await beniGetir(true);   // her açılışta: büroya eklenen/silinen kişiler hemen yansısın
             await listeyiYukle(liste, d);
-            formYeri.appendChild(formKur(d, liste, kart, evrakId));
+            formYeri.appendChild(formKur(d, liste, kart, evrakId, on || {}));
         } catch (e) {
             liste.innerHTML = '';
             mesajEl.textContent = e.message;
@@ -1861,9 +1946,52 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const kim = (t.assignees && t.assignees.length ? t.assignees : [t.assignee_id]).filter(Boolean).map(kisiAdi).join(', ');
             s.appendChild(el('div', 'color:#cbd5e1;', [DURUM[t.status] || t.status, kim, t.due_at ? 'Son: ' + tarih(t.due_at) : '']
                 .filter(Boolean).join(' · ')));
+            if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
             if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+            const kb = kapanisDugmesi(t, 'ia-cip sec');
+            if (kb) s.appendChild(kb);
             liste.appendChild(s);
         });
+    }
+
+    // ── İş şablonları: hazır (sunucu kodunda) + büronun eklediği; 5 dk saklanır ──
+    let sablonlar = null, sablonZamani = 0;
+    async function sablonlariGetir(zorla) {
+        if (zorla || !sablonlar || Date.now() - sablonZamani > 300000) {
+            const j = await api('/sablonlar');
+            sablonlar = { hazir: j.hazir || [], buro: j.buro || [] };
+            sablonZamani = Date.now();
+        }
+        return sablonlar;
+    }
+    function kucukHarf(s) { return String(s || '').toLocaleLowerCase('tr-TR').replace(/\s+/g, ' ').trim(); }
+
+    // ── Dosyanın tarafları (UYAP "Taraf Bilgileri" ucu): borçlular önce ──
+    function rolSirasi(rol) { return /borçlu/i.test(rol) ? 0 : /alacakl/i.test(rol) ? 2 : 1; }
+    async function dosyaTaraflari(d) {
+        const j = await uyapPost('dosya_taraf_bilgileri_brd.ajx', { dosyaId: d.dosyaId });
+        return (Array.isArray(j) ? j : []).filter(function(x) { return x && x.adi; })
+            .map(function(x) { return { adi: String(x.adi).replace(/\s+/g, ' ').trim(), rol: String(x.rol || '').trim() }; })
+            .sort(function(a, b) { return rolSirasi(a.rol) - rolSirasi(b.rol); });
+    }
+    // UYAP adları büyük harf: "HAMZA OĞUZ" → "Hamza Oğuz" (iş başlığında).
+    function adDuzelt(s) {
+        return kucukHarf(s).replace(/(^|[\s.\-\/(])(\S)/g, function(m, a, b) { return a + b.toLocaleUpperCase('tr-TR'); });
+    }
+
+    // ── Son tarih düğmeleri: bugünden n gün sonrası, saat 17:00 ──
+    const SURELER = [[0, 'Bugün'], [1, 'Yarın'], [3, '3 gün'], [7, '1 hafta'], [15, '15 gün'], [30, '1 ay']];
+    function gunSonra(n) {
+        const t = new Date();
+        t.setDate(t.getDate() + n);
+        const p = function(x) { return String(x).padStart(2, '0'); };
+        return t.getFullYear() + '-' + p(t.getMonth() + 1) + '-' + p(t.getDate()) + 'T17:00';
+    }
+    function kacGunSonra(v) {
+        if (!v) return null;
+        const a = new Date(); a.setHours(0, 0, 0, 0);
+        const b = new Date(v); b.setHours(0, 0, 0, 0);
+        return Math.max(0, Math.round((b - a) / 86400000));
     }
 
     // Belgenin kalıcı anahtarı: UYAP'ın evrakId'si de dosyaId gibi şifreli ve oturuma bağlı; işe
@@ -1901,10 +2029,34 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return l;
     }
 
-    function formKur(d, liste, kart, evrakId) {
+    function formKur(d, liste, kart, evrakId, on) {
         const f = el('div', 'margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12);');
         f.appendChild(el('div', 'font-weight:700;', 'Yeni iş'));
-        const baslik = el('input'); baslik.maxLength = 300; baslik.placeholder = 'Ne yapılacak?';
+        // Şablonlar: tıklayınca iş adı, açıklama, süre, öncelik ve (gerekirse) taraf dolar.
+        const sablonAra = el('input'); sablonAra.placeholder = 'Şablonlarda ara…'; sablonAra.maxLength = 100;
+        const sablonYeri = el('div', 'max-height:110px;overflow:auto;margin-top:2px;');
+        const sablonKutu = el('div', '');
+        let sablonKaydet = null;                    // "Şablon olarak kaydet" (aşağıda kurulur)
+        sablonKutu.appendChild(alan('Şablon', sablonAra));
+        sablonKutu.appendChild(sablonYeri);
+        f.appendChild(sablonKutu);
+        // Taraf: iş dosyadaki bir kişiye yapılır (birden çok borçlu olabilir); başlığın başına adı gelir.
+        const taraf = el('select');
+        let taraflar = [];
+        const tarafYok = el('option', null, '— Taraf seçilmedi —'); tarafYok.value = ''; taraf.appendChild(tarafYok);
+        const baslik = el('input'); baslik.maxLength = 300; baslik.placeholder = 'Ne yapılacak? (ör. Tebligat kontrol)';
+        const onizleme = el('div', 'margin-top:3px;color:#a5b4fc;word-break:break-word;');
+        function tamBaslik() {
+            const ad = taraf.value !== '' && taraflar[Number(taraf.value)] ? adDuzelt(taraflar[Number(taraf.value)].adi) : '';
+            const is = baslik.value.trim();
+            return ad && is ? ad + ' – ' + is : is;
+        }
+        function onizle() {
+            const t = tamBaslik();
+            onizleme.textContent = t && t !== baslik.value.trim() ? 'Kaydedilecek başlık: ' + t : '';
+        }
+        baslik.addEventListener('input', onizle);
+        taraf.addEventListener('change', onizle);
         const aciklama = el('textarea'); aciklama.rows = 3; aciklama.maxLength = 5000;
         const kisi = el('select');
         const admin = ben.me.role === 'admin';
@@ -1917,15 +2069,128 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         // Üye yalnız kendine iş açar (sunucu da böyle uygular).
         if (!admin) { kisi.disabled = true; kisi.title = 'Başkasına iş yalnız yönetici atayabilir'; }
         const son = el('input'); son.type = 'datetime-local';
+        // Süre düğmeleri: son tarihi bugünden n gün sonrası 17:00 yapar; seçilen gün şablona da yazılır.
+        let secilenGun = null;
+        const sureYeri = el('div', '');
+        const sureDugmeleri = SURELER.map(function(s) {
+            const b = el('button', null, s[1]);
+            b.type = 'button';
+            b.className = 'ia-cip';
+            b.addEventListener('click', function(ev) { ev.stopPropagation(); sureSec(s[0]); });
+            sureYeri.appendChild(b);
+            return b;
+        });
+        function sureSec(n) {
+            secilenGun = n;
+            son.value = n == null ? '' : gunSonra(n);
+            sureDugmeleri.forEach(function(b, i) { b.classList.toggle('sec', SURELER[i][0] === n); });
+        }
+        son.addEventListener('input', function() {
+            secilenGun = kacGunSonra(son.value);
+            sureDugmeleri.forEach(function(b, i) { b.classList.toggle('sec', SURELER[i][0] === secilenGun); });
+        });
         const oncelik = el('select');
         [['1', 'Normal'], ['2', 'Acil'], ['0', 'Düşük']].forEach(function(x) {
             const o = el('option', null, x[1]); o.value = x[0]; oncelik.appendChild(o);
         });
-        f.appendChild(alan('Başlık', baslik));
+        const tarafAlani = alan('Taraf', taraf);
+        tarafAlani.style.display = 'none';            // taraf listesi gelince görünür
+        f.appendChild(tarafAlani);
+        f.appendChild(alan('İş', baslik));
+        f.appendChild(onizleme);
         f.appendChild(alan('Açıklama', aciklama));
         f.appendChild(alan('Atanacak kişi', kisi));
-        f.appendChild(alan('Son tarih', son));
+        const sonAlani = alan('Son tarih', son);
+        sonAlani.appendChild(sureYeri);
+        f.appendChild(sonAlani);
         f.appendChild(alan('Öncelik', oncelik));
+
+        if (on.baslik) baslik.value = on.baslik;
+        if (on.aciklama) aciklama.value = on.aciklama;
+        let sonSablonAciklamasi = '';
+        let seciliSablon = null;
+        function sablonUygula(s) {
+            seciliSablon = s;
+            baslik.value = s.title;
+            // Elle yazılmış (ya da bildirimden gelen) açıklama korunur; boşsa / önceki şablonunsa değişir.
+            if (!aciklama.value.trim() || aciklama.value === sonSablonAciklamasi) aciklama.value = s.description || '';
+            else if (s.description && aciklama.value.indexOf(s.description) < 0) aciklama.value = s.description + '\n' + aciklama.value;
+            sonSablonAciklamasi = s.description || '';
+            if (s.due_days != null) sureSec(Number(s.due_days));
+            oncelik.value = String(s.priority == null ? 1 : s.priority);
+            if (s.taraf === 'borclu' && taraf.value === '') {
+                const i = taraflar.findIndex(function(x) { return rolSirasi(x.rol) === 0; });
+                if (i >= 0) taraf.value = String(i);
+            }
+            sablonlariCiz();
+            onizle();
+            baslik.focus();
+        }
+        function sablonlariCiz() {
+            sablonYeri.innerHTML = '';
+            if (!sablonlar) return;
+            const q = kucukHarf(sablonAra.value);
+            const uygun = function(s) { return !q || kucukHarf(s.title).indexOf(q) >= 0; };
+            const benimMi = function(s) { return ben && (ben.me.role === 'admin' || s.created_by === ben.me.id); };
+            sablonlar.hazir.filter(uygun).concat(sablonlar.buro.filter(uygun)).forEach(function(s) {
+                const buro = typeof s.id === 'number';
+                const b = el('button', null, s.title);
+                b.type = 'button';
+                b.className = 'ia-cip' + (buro ? ' buro' : '') + (seciliSablon && seciliSablon.id === s.id ? ' sec' : '');
+                b.title = [s.description, s.due_days != null ? s.due_days + ' gün' : '',
+                           buro ? 'Büro şablonu' + (s.created_by_name ? ' · ' + s.created_by_name : '') : 'Hazır şablon']
+                    .filter(Boolean).join('\n');
+                b.addEventListener('click', function(ev) { ev.stopPropagation(); sablonUygula(s); });
+                if (buro && benimMi(s)) {
+                    // Silme iki tıklamalı: × → "sil?" → sil (tarayıcı onay penceresi açılmaz).
+                    const x = el('span', null, '×');
+                    x.className = 'ia-sil';
+                    x.title = 'Şablonu sil';
+                    x.addEventListener('click', async function(ev) {
+                        ev.stopPropagation();
+                        if (!x.classList.contains('emin')) {
+                            x.classList.add('emin'); x.textContent = 'sil?';
+                            setTimeout(function() { x.classList.remove('emin'); x.textContent = '×'; }, 3000);
+                            return;
+                        }
+                        try {
+                            await api('/sablonlar/' + s.id, { method: 'DELETE' });
+                            if (seciliSablon && seciliSablon.id === s.id) seciliSablon = null;
+                            await sablonlariGetir(true);
+                            sablonlariCiz();
+                        } catch (e) { mesajEl.textContent = 'Şablon silinemedi: ' + e.message; }
+                    });
+                    b.appendChild(x);
+                }
+                sablonYeri.appendChild(b);
+            });
+            if (!sablonYeri.children.length) sablonYeri.appendChild(el('div', 'color:#9ca3af;margin-top:4px;', 'Eşleşen şablon yok.'));
+        }
+        sablonAra.addEventListener('input', sablonlariCiz);
+        sablonlariGetir().then(function() {
+            sablonlariCiz();
+            if (on.sablon) {
+                const s = sablonlar.hazir.concat(sablonlar.buro).find(function(x) { return x.title === on.sablon; });
+                if (s) sablonUygula(s);
+            }
+        }).catch(function() {                     // sunucuda şablon ucu yok (güncellenmemiş): bölüm gizlenir
+            sablonKutu.style.display = 'none';
+            if (sablonKaydet) sablonKaydet.style.display = 'none';
+        });
+        dosyaTaraflari(d).then(function(l) {
+            taraflar = l;
+            l.forEach(function(x, i) {
+                const o = el('option', null, x.adi + (x.rol ? ' (' + x.rol + ')' : ''));
+                o.value = String(i);
+                taraf.appendChild(o);
+            });
+            if (!l.length) return;
+            tarafAlani.style.display = '';
+            // Varsayılan: ilk borçlu (işlerin çoğu borçluya yapılır); taraf seçmemek de mümkün.
+            const i = l.findIndex(function(x) { return rolSirasi(x.rol) === 0; });
+            if (i >= 0) taraf.value = String(i);
+            onizle();
+        }).catch(function() {});
         // Belge: iş dosyanın belirli bir evrakına bağlanabilir (evrak ağacında mor görünür).
         const evraklar = kartEvraklari(kart);
         const belge = el('select');
@@ -1938,12 +2203,13 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         });
         if (evraklar.length) f.appendChild(alan('Belge', belge));
         f.appendChild(dugme('Kaydet', '#4f46e5', async function(b) {
-            if (!baslik.value.trim()) { mesajEl.textContent = 'Başlık yazın.'; baslik.focus(); return; }
+            if (!baslik.value.trim()) { mesajEl.textContent = 'Ne yapılacağını yazın ya da bir şablon seçin.'; baslik.focus(); return; }
             b.disabled = true;
             mesajEl.textContent = '';
+            const tarafSecili = taraf.value !== '' ? taraflar[Number(taraf.value)] : null;
             try {
                 await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                    title: baslik.value, description: aciklama.value,
+                    title: tamBaslik(), description: aciklama.value,
                     assignee_id: admin ? Number(kisi.value) : null,
                     due_at: son.value ? Math.floor(new Date(son.value).getTime() / 1000) : null,
                     priority: Number(oncelik.value),
@@ -1951,18 +2217,44 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                              birim_adi: d.birimAdi || '', dosya_no: d.dosyaNo || '', dosya_tur: d.dosyaTurKodAciklama || '',
                              evrak_id: belge.value || null,
                              evrak_adi: belge.value ? belge.options[belge.selectedIndex].textContent : null,
+                             taraf_adi: tarafSecili ? adDuzelt(tarafSecili.adi) : null,
                              uyap: kartAlanlari(d) } }) });
-                baslik.value = ''; aciklama.value = ''; son.value = '';
+                baslik.value = ''; aciklama.value = ''; sureSec(null);
+                seciliSablon = null; sonSablonAciklamasi = ''; sablonlariCiz(); onizle();
                 mesajEl.style.color = '#86efac';
                 mesajEl.textContent = 'İş açıldı.';
                 setTimeout(function() { if (mesajEl) { mesajEl.textContent = ''; mesajEl.style.color = '#fca5a5'; } }, 3000);
-                panelYenile();
+                isleriTazele();
                 await listeyiYukle(liste, d);
             } catch (e) {
                 mesajEl.style.color = '#fca5a5';
                 mesajEl.textContent = 'İş açılamadı: ' + e.message;
             } finally { b.disabled = false; }
         }));
+        // Formdaki iş adı / açıklama / süre / öncelik büroya yeni şablon olur (taraf adı şablona girmez).
+        sablonKaydet = f.appendChild(dugme('Şablon olarak kaydet', 'rgba(124,58,237,0.85)', async function(b) {
+            const ad = baslik.value.trim();
+            if (!ad) { mesajEl.textContent = 'Şablon için "İş" alanını doldurun.'; baslik.focus(); return; }
+            b.disabled = true;
+            const ts = taraf.value !== '' ? taraflar[Number(taraf.value)] : null;
+            try {
+                await api('/sablonlar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    title: ad, description: aciklama.value,
+                    due_days: secilenGun != null ? secilenGun : kacGunSonra(son.value),
+                    priority: Number(oncelik.value),
+                    taraf: ts ? (rolSirasi(ts.rol) === 0 ? 'borclu' : rolSirasi(ts.rol) === 2 ? 'alacakli' : 'herhangi') : null }) });
+                await sablonlariGetir(true);
+                seciliSablon = sablonlar.buro.find(function(x) { return kucukHarf(x.title) === kucukHarf(ad); }) || null;
+                sablonlariCiz();
+                mesajEl.style.color = '#86efac';
+                mesajEl.textContent = 'Şablon kaydedildi: ' + ad;
+                setTimeout(function() { if (mesajEl) { mesajEl.textContent = ''; mesajEl.style.color = '#fca5a5'; } }, 3000);
+            } catch (e) {
+                mesajEl.style.color = '#fca5a5';
+                mesajEl.textContent = 'Şablon kaydedilemedi: ' + e.message;
+            } finally { b.disabled = false; }
+        }));
+        if (sablonKutu.style.display === 'none') sablonKaydet.style.display = 'none';
         f.appendChild(dugme('İş Listesi\'nde aç', 'rgba(255,255,255,0.15)', ac));
         f.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
         setTimeout(function() { baslik.focus(); }, 0);
@@ -2129,6 +2421,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '#uyap-ispanel .ip-is.acil{border-left-color:#f87171}' +
             '#uyap-ispanel .ip-dosya{margin-top:5px;padding:3px 8px;border-radius:6px;border:1px solid rgba(129,140,248,0.5);background:rgba(79,70,229,0.18);color:#c7d2fe;cursor:pointer;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}' +
             '#uyap-ispanel .ip-dosya:hover{background:rgba(79,70,229,0.35)}' +
+            '#uyap-ispanel .ip-onay{flex:none;margin-top:5px;padding:3px 10px;border:0;border-radius:6px;background:#16a34a;color:#fff;font-size:11px;font-weight:600;cursor:pointer}' +
+            '#uyap-ispanel .ip-onay:hover{background:#15803d}' +
             '#uyap-ispanel .ip-link{background:none;border:0;padding:0;color:#a5b4fc;cursor:pointer;font-size:12px;text-decoration:underline}' +
             '#uyap-issekme{position:fixed;right:0;top:45%;z-index:2147483644;padding:12px 7px;border:0;border-radius:10px 0 0 10px;cursor:pointer;' +
             'background:#4f46e5;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;writing-mode:vertical-rl;' +
@@ -2243,7 +2537,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (dosya) dosyaIsleri[dosya.id] = { t: Date.now(), isler: isler };
             if (filtre !== anahtar()) { tekrar = true; return; }   // bu arada süzgeç değişti → yeniden
             pnl.isler = isler;
-            if (filtre === 'benim') rozet(pnl.isler.filter(function(t) { return !BITTI[t.status]; }).length);
+            if (filtre === 'benim') {
+                const ak = pnl.isler.filter(function(t) { return !BITTI[t.status]; });
+                const simdi = Date.now() / 1000;
+                rozet(ak.length, ak.some(function(t) { return t.due_at && t.due_at < simdi && t.status !== 'onayda'; }));
+            }
             listeCiz();
         } catch (e) {
             rozet(0);
@@ -2257,9 +2555,13 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
     }
 
-    function rozet(n) {
+    // Gecikmiş işi varsa sayı kırmızı.
+    function rozet(n, gecikmis) {
         pnl.rozet.textContent = n > 99 ? '99+' : String(n);
         pnl.rozet.style.display = n ? '' : 'none';
+        pnl.rozet.style.background = gecikmis ? '#dc2626' : '';
+        pnl.rozet.style.color = gecikmis ? '#fff' : '';
+        pnl.sekme.title = gecikmis ? 'İşlerim — gecikmiş iş var' : 'İşlerim';
     }
 
     // Sıra: Acil önce, sonra son tarihi yakın olan; tarihsizler sonda.
@@ -2279,7 +2581,37 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             g.appendChild(el('div', 'margin-top:12px;color:#9ca3af;',
                 pnl.dosya ? 'Bu dosyada bitmemiş iş yok.' : pnl.filtre === 'onay' ? 'Onay bekleyen iş yok.' : 'Bitmemiş iş yok.'));
         }
-        aktif.concat(pnl.bittiGoster ? biten : []).forEach(function(t) { g.appendChild(isSatiri(t, simdi)); });
+        // Bugün özeti: gecikmiş / bugün / sonra / onayda grupları (onay süzgecinde hepsi onayda: grupsuz).
+        const gun = new Date(); gun.setHours(23, 59, 59, 999);
+        const gunSonu = gun.getTime() / 1000;
+        const grup = function(t) {
+            if (t.status === 'onayda') return 'onayda';
+            if (t.due_at && t.due_at < simdi) return 'gecikmis';
+            if (t.due_at && t.due_at <= gunSonu) return 'bugun';
+            return 'sonra';
+        };
+        const GRUPLAR = [['gecikmis', 'Gecikmiş', '#fca5a5'], ['bugun', 'Bugün', '#fdba74'],
+                         ['sonra', 'Sonra', '#cbd5e1'], ['onayda', 'Onay bekliyor', '#a5b4fc']];
+        const sayilar = {};
+        aktif.forEach(function(t) { sayilar[grup(t)] = (sayilar[grup(t)] || 0) + 1; });
+        const grupla = pnl.filtre !== 'onay' || pnl.dosya;
+        if (grupla && aktif.length) {
+            const ozet = el('div', 'display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:8px;font-weight:600;');
+            GRUPLAR.forEach(function(x) {
+                if (sayilar[x[0]]) ozet.appendChild(el('span', 'color:' + x[2] + ';', x[1] + ': ' + sayilar[x[0]]));
+            });
+            g.appendChild(ozet);
+            GRUPLAR.forEach(function(x) {
+                const l = aktif.filter(function(t) { return grup(t) === x[0]; });
+                if (!l.length) return;
+                g.appendChild(el('div', 'margin-top:12px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:' + x[2] + ';',
+                                 x[1] + ' (' + l.length + ')'));
+                l.forEach(function(t) { g.appendChild(isSatiri(t, simdi)); });
+            });
+        } else {
+            aktif.forEach(function(t) { g.appendChild(isSatiri(t, simdi)); });
+        }
+        (pnl.bittiGoster ? biten : []).forEach(function(t) { g.appendChild(isSatiri(t, simdi)); });
         if (biten.length) {
             const b = el('button', 'margin-top:10px;', pnl.bittiGoster ? 'Bitmiş işleri gizle' : 'Bitmiş ' + biten.length + ' işi göster');
             b.type = 'button';
@@ -2307,15 +2639,20 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 (gecikti ? 'Gecikti: ' : 'Son: ') + tarih(t.due_at)));
         }
         s.appendChild(meta);
+        if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
         if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+        const alt2 = el('div', 'display:flex;align-items:center;gap:6px;min-width:0;');
         if (t.dosya_id) {
             const d = el('button', null, [t.birim_adi, t.dosya_no].filter(Boolean).join(' ') || 'UYAP dosyası');
             d.type = 'button';
             d.className = 'ip-dosya';
             d.title = 'Dosya kartını aç' + (t.dosya_tur ? ' · ' + t.dosya_tur : '');
             d.addEventListener('click', function(ev) { ev.stopPropagation(); dosyaKartiAc(t); });
-            s.appendChild(d);
+            alt2.appendChild(d);
         }
+        const kb = kapanisDugmesi(t, 'ip-onay');
+        if (kb) alt2.appendChild(kb);
+        if (alt2.children.length) s.appendChild(alt2);
         return s;
     }
 
@@ -2345,8 +2682,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         if (k && (k.yukleniyor || Date.now() - k.t < DOSYA_TAZE)) return k;
         const yeni = { t: k ? k.t : 0, isler: k ? k.isler : [], yukleniyor: true };
         dosyaIsleri[a] = yeni;
-        dosyaninIsleri(d)
-            .then(function(isler) { dosyaIsleri[a] = { t: Date.now(), isler: isler }; })
+        // Kişi bilgisi bantta "Onaya gönder" düğmesi için (işe atanan mıyım?).
+        Promise.all([dosyaninIsleri(d), beniGetir().catch(function() { return null; })])
+            .then(function(r) { dosyaIsleri[a] = { t: Date.now(), isler: r[0] }; })
             .catch(function() { dosyaIsleri[a] = { t: Date.now(), isler: yeni.isler }; });  // köprü kapalı: sessiz
         return yeni;
     }
@@ -2421,7 +2759,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const goster = isler.length > 0 && !!UYARI_SEKMELERI[seciliSekme(kart)];
         band.style.display = goster ? '' : 'none';
         if (!goster) return;
-        const imza = isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title; }).join('|');
+        const imza = (ben ? ben.me.id : '') + '#' + isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title; }).join('|');
         if (band.getAttribute('data-imza') === imza) return;
         band.setAttribute('data-imza', imza);
         band.innerHTML = '';
@@ -2429,13 +2767,19 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         sol.appendChild(el('div', 'font-weight:700;', 'Bu dosyada ' + isler.length + ' yapılacak iş var'));
         const liste = el('div', 'margin-top:2px;');
         isler.slice().sort(sirala).slice(0, 3).forEach(function(t) {
+            const satir = el('div', null);
+            satir.className = 'uyap-is-uyari-satir';
             const a = el('span', null, (t.priority === 2 ? 'Acil · ' : '') + t.title + (t.evrak_adi ? ' (belge: ' + t.evrak_adi + ')' : ''));
             a.className = 'uyap-is-uyari-is';
             a.title = 'İş Listesi\'nde aç';
             a.addEventListener('click', function(ev) { ev.stopPropagation(); isAc(t.id); });
-            liste.appendChild(a);
+            satir.appendChild(a);
+            if (t.status === 'onayda') satir.appendChild(el('span', 'font-size:11px;opacity:.8;', 'onayda'));
+            const kb = kapanisDugmesi(t, 'uyap-is-uyari-kucuk');
+            if (kb) satir.appendChild(kb);
+            liste.appendChild(satir);
         });
-        if (isler.length > 3) liste.appendChild(el('span', 'opacity:.8;', '+' + (isler.length - 3) + ' iş daha'));
+        if (isler.length > 3) liste.appendChild(el('div', 'opacity:.8;', '+' + (isler.length - 3) + ' iş daha'));
         sol.appendChild(liste);
         band.appendChild(sol);
         const b = el('button', null, isler.length === 1 ? 'İşi aç' : 'İşleri göster');
@@ -2497,9 +2841,64 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         });
     }
 
+    // ── UYAP ana sayfası "Bildirimler": dosyaya ilişkin bildirimden tek tıkla iş ──
+    // Bildirim yalnız birim adı + dosya no taşır ("İzmir 15. İcra Dairesi Biriminde Bulunan 2025/2025
+    // İcra Dosyası Borç Tahsilatı Yapılmıştır."). Birim kimliği avukatın dosya birimleri listesinden
+    // (avukat_dosya_birimler.ajx), güncel dosya kimliği Dosya Sorgulama'dan (tazeKart) bulunur.
+    const BILDIRIM_RE = /^(.+?) Biriminde Bulunan (\d{4}\/\d+) /;
+    let birimHaritasi = null;
+    async function birimIdBul(ad) {
+        if (!birimHaritasi) {
+            const l = await uyapPost('avukat_dosya_birimler.ajx', {});
+            const h = {};
+            (Array.isArray(l) ? l : []).forEach(function(b) { if (b && b.birimAdi && b.birimId) h[kucukHarf(b.birimAdi)] = String(b.birimId); });
+            if (Object.keys(h).length) birimHaritasi = h;
+            else return null;
+        }
+        return birimHaritasi[kucukHarf(ad)] || null;
+    }
+    function bildirimDugmeleri() {
+        document.querySelectorAll('.main-page-notifications li.notify-item:not([data-isbildirim])').forEach(function(li) {
+            const metinEl = li.querySelector('.icon-list-text');
+            const metin = metinEl ? (metinEl.getAttribute('aria-label') || metinEl.textContent || '').trim() : '';
+            if (!metin) return;                       // henüz çizilmedi: sonraki turda
+            li.setAttribute('data-isbildirim', '1');
+            const m = BILDIRIM_RE.exec(metin);
+            if (!m) return;
+            const bas = li.querySelector('.icon-list-baslik');
+            const b = el('button', null, '+ İş');
+            b.type = 'button';
+            b.className = 'uyap-bildirim-is';
+            b.title = 'Bu bildirimin dosyasına iş ata';
+            b.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                ev.preventDefault();
+                bildirimdenIs(m[1].trim(), m[2], (bas ? bas.textContent : '').replace(/\s*-\s*$/, '').trim(), metin);
+            });
+            (bas || li).appendChild(b);
+        });
+    }
+    async function bildirimdenIs(birimAdi, dosyaNo, baslik, metin) {
+        kur();
+        kutu.replaceChildren(el('div', 'color:#cbd5e1;', 'Dosya bulunuyor: ' + birimAdi + ' ' + dosyaNo + '…'));
+        ort.style.display = 'flex';
+        try {
+            const birimId = await birimIdBul(birimAdi);
+            if (!birimId) throw new Error('Birim bulunamadı: ' + birimAdi);
+            const d = await tazeKart({ birimId: birimId, dosyaNo: dosyaNo, birimAdi: birimAdi,
+                                       birimTuru3: /icra dairesi/i.test(birimAdi) ? '1101' : undefined });
+            if (!d) throw new Error('Dosya UYAP\'ta bulunamadı: ' + birimAdi + ' ' + dosyaNo);
+            const sablon = /tahsilat/i.test(baslik) ? 'Tahsilat kontrol' : /reddiyat/i.test(baslik) ? 'Reddiyat kontrol' : '';
+            pencereAc(d, null, null, { sablon: sablon, baslik: sablon ? '' : baslik, aciklama: metin });
+        } catch (e) {
+            kutu.replaceChildren(el('div', 'color:#fca5a5;', e.message), dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+        }
+    }
+
     // ── Kart düğmesi + sabit "İş Listesi" düğmesi ──
     function kartlariTara() {
         bekleyenDosyaAc();
+        if (document.body) { kur(); bildirimDugmeleri(); }
         if (!window.__uyapKartVerisi) return;
         kur();
         document.querySelectorAll('.dosya-sorgula-popup .dx-popup-title').forEach(function(baslik) {

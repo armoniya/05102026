@@ -13,12 +13,17 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
     GET  /__uyap_kisi__/is-listesi/tasks?birim_id=…&dosya_no=…[&dosya_id=…]  → bu dosyaya bağlı işler
     GET  /__uyap_kisi__/is-listesi/tasks?filtre=…    → sağdaki iş paneli: benim | onay | tumu
     POST /__uyap_kisi__/is-listesi/tasks             {title, description, assignee_id, due_at, priority, dosya}
+    POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla, reason}  → onaya gönder vb.
+    GET  /__uyap_kisi__/is-listesi/sablonlar         → {hazir, buro} iş şablonları
+    POST /__uyap_kisi__/is-listesi/sablonlar         {title, description, due_days, priority, taraf}
+    DELETE /__uyap_kisi__/is-listesi/sablonlar/<id>
     GET  /__uyap_kisi__/is-listesi/ac[?is=<id>]      → 303 → cokluuyap.com'da şifresiz oturum (tek kullanımlık kod)
 
 Kimlik uyap_app girişinde configure() ile verilir, çıkışta clear() ile silinir. Jeton bellekte
 tutulur, süresi dolmadan yenilenir; sunucu 401 dönerse bir kez yeniden alınır.
 """
 
+import re
 import json
 import time
 import asyncio
@@ -102,6 +107,15 @@ class _Fail(Exception):
         self.status = status
 
 
+def _obj(body):
+    """İstek gövdesi JSON nesnesi ise sözlük, değilse None."""
+    try:
+        d = json.loads(body or b"{}")
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
 def _safe_json(r):
     try:
         d = r.json()
@@ -153,14 +167,32 @@ async def handle(method, path, query, body):
                 return _err(400, "Geçersiz süzgeç.")
             return _json(*await _call("GET", "tasks", urlencode({"filtre": filtre})))
         if sub == "tasks" and method == "POST":
-            try:
-                d = json.loads(body or b"{}")
-            except ValueError:
-                return _err(400, "Geçersiz istek verisi.")
-            if not isinstance(d, dict):
+            d = _obj(body)
+            if d is None:
                 return _err(400, "Geçersiz istek verisi.")
             keep = {k: d[k] for k in ("title", "description", "assignee_id", "due_at", "priority", "dosya") if k in d}
             return _json(*await _call("POST", "tasks", body=keep))
+        # İş şablonları (hazır + büro): İş Ata penceresi listeler, "Şablon olarak kaydet" ekler.
+        if sub == "sablonlar" and method == "GET":
+            return _json(*await _call("GET", "sablonlar"))
+        if sub == "sablonlar" and method == "POST":
+            d = _obj(body)
+            if d is None:
+                return _err(400, "Geçersiz istek verisi.")
+            keep = {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf") if k in d}
+            return _json(*await _call("POST", "sablonlar", body=keep))
+        m = re.fullmatch(r"sablonlar/(\d{1,12})", sub)
+        if m and method == "DELETE":
+            return _json(*await _call("DELETE", f"sablonlar/{m.group(1)}"))
+        # UYAP'tan çıkmadan işi ilerletme: onaya gönder (özel işte tamamla) / başla. Onaylama ve
+        # reddetme bilerek yok — onlar İş Listesi'nde, işin tüm kaydı görülerek yapılır.
+        m = re.fullmatch(r"tasks/(\d{1,12})/durum", sub)
+        if m and method == "POST":
+            d = _obj(body)
+            if d is None or d.get("action") not in ("gonder", "basla", "tamamla"):
+                return _err(400, "Geçersiz işlem.")
+            return _json(*await _call("POST", f"tasks/{m.group(1)}/durum",
+                                      body={"action": d["action"], "reason": str(d.get("reason") or "")[:2000]}))
         if sub == "ac" and method == "GET":
             status, d = await _call("POST", "sso-kod", body={})
             if status != 200 or not d.get("url"):

@@ -1000,6 +1000,39 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         t3 = (await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t['id']}", headers=H, json={"dosya": None})))["task"]
         self.assertIsNone(t3["dosya_id"]); self.assertIsNone(t3["dosya_uyap"])
 
+    async def test_is_sablonlari_ve_taraf(self):
+        """Hazır + büro şablonları: her kullanıcı ekler, ekleyen / yönetici siler, büroya özel."""
+        ahmet = await self.login("kemal", "ahmet")
+        mehmet = await self.login("kemal", "mehmet")
+        s = await self.j(await mehmet.get("/is-listesi/api/sablonlar"))
+        self.assertIn("Tebligat kontrol", [x["title"] for x in s["hazir"]])
+        self.assertEqual(s["buro"], [])
+        m = (await self.j(await mehmet.post("/is-listesi/api/sablonlar", headers=H, json={
+            "title": "  Haciz   ihbarnamesi kontrol ", "description": "89/1", "due_days": 10, "priority": 2,
+            "taraf": "borclu", "action": "talep:x"})))["template"]
+        self.assertEqual((m["title"], m["due_days"], m["priority"], m["taraf"]), ("Haciz ihbarnamesi kontrol", 10, 2, "borclu"))
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": "haciz ihbarnamesi KONTROL"}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": " "}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": "x", "due_days": 999}), 400)
+        a = (await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": "Yönetici şablonu",
+                                                                                       "taraf": "kotu"})))["template"]
+        self.assertIsNone(a["taraf"])
+        buro = (await self.j(await mehmet.get("/is-listesi/api/sablonlar")))["buro"]
+        self.assertEqual([x["title"] for x in buro], ["Haciz ihbarnamesi kontrol", "Yönetici şablonu"])
+        # Başka büro görmez / silemez; üye yalnız kendininkini, yönetici hepsini siler.
+        zeynep = await self.login("deniz", "zeynep")
+        self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/sablonlar")))["buro"], [])
+        await self.j(await zeynep.delete(f"/is-listesi/api/sablonlar/{m['id']}", headers=H), 400)
+        await self.j(await mehmet.delete(f"/is-listesi/api/sablonlar/{a['id']}", headers=H), 400)
+        await self.j(await ahmet.delete(f"/is-listesi/api/sablonlar/{m['id']}", headers=H))
+        await self.j(await mehmet.delete(f"/is-listesi/api/sablonlar/{a['id']}", headers=H), 400)
+        self.assertEqual([x["title"] for x in (await self.j(await ahmet.get("/is-listesi/api/sablonlar")))["buro"]],
+                         ["Yönetici şablonu"])
+        # İşin yapıldığı taraf dosya bağıyla saklanır.
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Hamza Oğuz – Tebligat kontrol", "dosya": dict(self.DOSYA, taraf_adi="Hamza Oğuz")})))["task"]
+        self.assertEqual(t["taraf_adi"], "Hamza Oğuz")
+
     async def test_eski_kullanici_ve_owner_yeni_arayuze_giremez(self):
         c = await self.client()
         r = await c.post("/is-listesi/login", data={"office_code": "", "username": "ali", "password": PW},
@@ -1153,6 +1186,28 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("&is", hdr["Location"])
             st, _, _ = await k.handle("DELETE", "/__uyap_kisi__/is-listesi/tasks", "", b"")
             self.assertEqual(st, 404)
+            # Şablonlar: listele / ekle / sil.
+            st, _, out = await k.handle("POST", "/__uyap_kisi__/is-listesi/sablonlar", "",
+                                        json.dumps({"title": "Köprü şablonu", "due_days": 3}).encode())
+            sid = json.loads(out)["template"]["id"]
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/sablonlar", "", b"")
+            self.assertEqual([x["title"] for x in json.loads(out)["buro"]], ["Köprü şablonu"])
+            st, _, _ = await k.handle("DELETE", f"/__uyap_kisi__/is-listesi/sablonlar/{sid}", "", b"")
+            self.assertEqual(st, 200)
+            # UYAP'tan onaya gönderme: yalnız gonder/basla/tamamla; onaylama köprüden yapılamaz.
+            st, _, out = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{t['id']}/durum", "",
+                                        json.dumps({"action": "onayla"}).encode())
+            self.assertEqual(st, 400)
+            ben = json.loads((await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b""))[2])["me"]["id"]
+            kendi = json.loads((await k.handle("POST", "/__uyap_kisi__/is-listesi/tasks", "", json.dumps(
+                {"title": "Ahmet'in işi", "assignee_id": ben, "dosya": self.DOSYA}).encode()))[2])["task"]
+            st, _, out = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{kendi['id']}/durum", "",
+                                        json.dumps({"action": "gonder", "reason": "Tebliğ edilmiş"}).encode())
+            self.assertEqual((st, json.loads(out)["task"]["status"]), (200, "onayda"))
+            # Başkasına atanmış işi (Mehmet'in) Ahmet onaya gönderemez — sunucu reddeder.
+            st, _, _ = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{t['id']}/durum", "",
+                                      json.dumps({"action": "gonder"}).encode())
+            self.assertEqual(st, 400)
             # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.
             self.acc.bump_sess_epoch("ahmet@kemal")
             st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")
