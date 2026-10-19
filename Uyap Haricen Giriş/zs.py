@@ -1011,7 +1011,8 @@ async def api_template_create(request, user):
     d = await _body(request)
     pr = _opt_int(d.get("priority"))
     t = await _db(C.store.create_template, user, d.get("title"), d.get("description") or "",
-                  _opt_int(d.get("due_days")), 1 if pr is None else pr, d.get("taraf"), d.get("action"))
+                  _opt_int(d.get("due_days")), 1 if pr is None else pr, d.get("taraf"), d.get("action"),
+                  d.get("kontrol"), d.get("sonuclar"))
     return _json({"ok": True, "template": t})
 
 
@@ -1022,7 +1023,7 @@ async def api_template_update(request, user):
     pr = _opt_int(d.get("priority"))
     t = await _db(C.store.update_template, user, int(request.match_info["id"]), d.get("title"),
                   d.get("description") or "", _opt_int(d.get("due_days")), 1 if pr is None else pr,
-                  d.get("taraf"), d.get("action"))
+                  d.get("taraf"), d.get("action"), d.get("kontrol"), d.get("sonuclar"))
     return _json({"ok": True, "template": t})
 
 

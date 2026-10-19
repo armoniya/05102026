@@ -1030,6 +1030,20 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={"title": "yönetici ŞABLONU"}), 400)
         await self.j(await ahmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={"title": "Haciz ihbarnamesi 89/1",
                                                                                             "due_days": 7}))
+        # Aşama 2: kontrol sorusu + sonuç dalları (hazırlarda kodda, büroda JSON).
+        teb = next(x for x in s["hazir"] if x["title"] == "Tebligat kontrol")
+        self.assertEqual((teb["kontrol"], teb["sonuclar"]["olumlu"], teb["sonuclar"]["bekliyor"]),
+                         ("Tebligat tebliğ edildi mi?", {"baslik": "Kesinleşme kontrol", "gun": 7}, {"baslik": None, "gun": 3}))
+        u = (await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={
+            "title": "Haciz ihbarnamesi 89/1", "kontrol": "  Cevap   geldi mi? ",
+            "sonuclar": {"olumlu": {"baslik": " Haciz talepleri ", "gun": "2"}, "olumsuz": {"baslik": "", "gun": None},
+                         "bekliyor": {"gun": 5}, "baska": {"baslik": "x"}}})))["template"]
+        self.assertEqual((u["kontrol"], u["sonuclar"]), ("Cevap geldi mi?", {
+            "olumlu": {"baslik": "Haciz talepleri", "gun": 2}, "olumsuz": None, "bekliyor": {"baslik": None, "gun": 5}}))
+        await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={
+            "title": "Haciz ihbarnamesi 89/1", "sonuclar": {"olumlu": {"gun": 999}}}), 400)
+        buro = (await self.j(await mehmet.get("/is-listesi/api/sablonlar")))["buro"]
+        self.assertEqual(next(x for x in buro if x["id"] == m["id"])["sonuclar"]["bekliyor"], {"baslik": None, "gun": 5})
         # Başka büro görmez / silemez; üye yalnız kendininkini, yönetici hepsini siler.
         zeynep = await self.login("deniz", "zeynep")
         self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/sablonlar")))["buro"], [])
@@ -1225,6 +1239,21 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             st, _, _ = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{t['id']}/durum", "",
                                       json.dumps({"action": "gonder"}).encode())
             self.assertEqual(st, 400)
+            # "Ertesi güne aktar": not zorunlu ek süre talebi; karar bekleyen iş onay listesine düşer.
+            aktar = json.loads((await k.handle("POST", "/__uyap_kisi__/is-listesi/tasks", "", json.dumps(
+                {"title": "Aktarılacak", "assignee_id": ben, "due_at": 1800000000, "dosya": self.DOSYA}).encode()))[2])["task"]
+            yol = f"/__uyap_kisi__/is-listesi/tasks/{aktar['id']}/ek-sure"
+            st, _, _ = await k.handle("POST", yol, "", json.dumps({"new_due": "yarın", "reason": "x"}).encode())
+            self.assertEqual(st, 400)
+            st, _, _ = await k.handle("POST", yol, "", json.dumps({"new_due": 1800090000, "reason": " "}).encode())
+            self.assertEqual(st, 400)
+            st, _, out = await k.handle("POST", yol, "", json.dumps({"new_due": 1800090000, "reason": "Sonuç düşmedi"}).encode())
+            self.assertEqual((st, json.loads(out)["extension"]["status"]), (200, "bekliyor"))
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=onay", b"")
+            onay = {x["id"]: x for x in json.loads(out)["tasks"]}
+            self.assertTrue(onay[aktar["id"]]["ext_pending"])
+            self.assertEqual(onay[aktar["id"]]["status"], "acik")
+            self.assertIn(kendi["id"], onay)                                 # onaya gönderilen de orada
             # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.
             self.acc.bump_sess_epoch("ahmet@kemal")
             st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")

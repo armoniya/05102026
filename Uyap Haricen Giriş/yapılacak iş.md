@@ -2,7 +2,7 @@
 
 Bu belge İş Listesi'ndeki işlerin, UYAP dosya kartından açılan **iş türleri (şablonlar)** üzerinden
 nasıl tanımlanacağını ve bir işin "kontrol → karar → aksiyon → onay" akışıyla nasıl kapanacağını
-anlatır. Aşama 1 bu sürümde yapıldı; sonraki aşamalar bu modele göre eklenecek.
+anlatır. Aşama 1 ve 2 yapıldı; sonraki aşamalar bu modele göre eklenecek.
 
 ---
 
@@ -77,8 +77,34 @@ sonuca bağlı **sonraki iş** önerilir (tek tıkla açılır, aynı dosya/tara
 | Reddiyat / tahsilat kontrol | Para hesaba geçti mi? | Müvekkile bildirim | Muhasebe ile görüş | +2 gün |
 | Borçlu aranacak | Borçluya ulaşıldı mı? | Ödeme planı notu | Tekrar ara (+2 gün) | — |
 
-Sonuç ve karar işe **not** olarak yazılır ("Kontrol: olumsuz — tebligat iade, adres yetersiz").
-Böylece onaylayan kişi neye bakıldığını görür.
+Ek hazır şablonlar (zincirin devamı): **Adres araştırması** (kontrollü), **Haciz talepleri**,
+**Müvekkile bildirim**. Tabloda şablonu olmayan sonraki işler (ör. "İlanen tebligat talebi") yalnız
+başlık + süre olarak açılır.
+
+Nasıl çalışır (UYAP'ta **Onaya gönder** penceresi):
+
+1. İşin şablonu başlıktan bulunur ("Hamza Oğuz – Tebligat kontrol" → *Tebligat kontrol*).
+2. Şablonun kontrol sorusu sorulur; **Olumlu / Olumsuz / Bekliyor** seçilir (kontrol sorusu olan
+   şablonda seçim zorunlu, şablonsuz işte isteğe bağlı).
+3. Seçime göre **Sonraki işi aç** kutusu dolar (iş adı + gün; değiştirilebilir, kapatılabilir).
+   "Bekliyor" aynı işi N gün sonraya önerir.
+4. Gönderince iş onaya gider; sonraki iş aynı dosya, taraf ve belgeyle açılır (yöneticide aynı
+   kişiye, üyede kendine). Özel işlerde sonraki iş önerilmez.
+
+Sonuç ve karar işe **not** olarak yazılır ("Onaya gönderme notu: Kontrol: olumsuz (Tebligat tebliğ
+edildi mi?) — tebligat iade, adres yetersiz — Sonraki iş: Adres araştırması"). Böylece onaylayan
+kişi neye bakıldığını görür.
+
+Büro şablonlarının kontrol sorusu ve dalları İş Listesi → **Şablonlar**'da düzenlenir
+(`kontrol`, `sonuclar = {olumlu|olumsuz|bekliyor: {baslik, gun}}`; boş başlık = aynı iş).
+
+### Ertesi güne aktar
+
+İş bugün yetişmiyorsa atanan kişi UYAP'tan **Ertesi güne aktar** der: yeni tarih (varsayılan: son
+tarihten — geçmişse bugünden — sonraki iş günü 17:00) ve **zorunlu not** girilir. Bu bir ek süre
+talebidir: yönetici / onay yetkilisi İş Listesi'nde kabul ederse son tarih değişir, reddederse
+eski tarih kalır. Karar bekleyen talepler **Onay bekleyenler** listesine düşer; UYAP'ta işin
+yanında "aktarım onayda" görünür.
 
 ---
 
@@ -119,16 +145,17 @@ onaylar ya da gerekçeyle reddeder (iş "devam"a döner). Özel işler onaya git
 | Aşama | İçerik | Durum |
 |---|---|---|
 | 1 | Hazır + büro şablonları, "Şablon olarak kaydet", taraf seçimi, süre düğmeleri, UYAP'tan onaya gönderme, bildirimden iş, bugün özeti | **Yapıldı** |
-| 2 | Kontrol sonucu (olumlu / olumsuz / bekliyor) + sonraki iş önerisi; şablonda sonuç dalları | Planlandı |
+| 2 | Kontrol sonucu (olumlu / olumsuz / bekliyor) + sonraki iş önerisi; şablonda sonuç dalları; Ertesi güne aktar (yönetici onaylı) | **Yapıldı** |
 | 3 | UYAP aksiyonları (`ekran`, `sorgu`, `talep`, `is`) — ekranı açıp doldurma | Planlandı |
 | 4 | Otomatik kontrol: uygun işlerde (barkod, safahat) sorguyu sistem yapar, sonucu işe not düşer; karar yine kullanıcıda | Fikir |
 
 ---
 
-## 7. Veri (Aşama 1)
+## 7. Veri (Aşama 1–2)
 
-- `zs_templates`: `id, office_id, title, description, due_days, priority, taraf, action, created_by, created_at`
+- `zs_templates`: `id, office_id, title, description, due_days, priority, taraf, action, kontrol, sonuclar (JSON), created_by, created_at`
 - `zs_tasks`: mevcut dosya alanlarına ek `taraf_adi` (işin yapıldığı taraf)
-- API (`/is-listesi/api`): `GET /sablonlar` → `{hazir, buro}`, `POST /sablonlar`, `DELETE /sablonlar/{id}`
-- Masaüstü köprüsü (`/__uyap_kisi__/is-listesi`): `GET/POST /sablonlar`, `DELETE /sablonlar/{id}`,
-  `POST /tasks/{id}/durum` (yalnız `gonder`, `basla`, `tamamla`)
+- API (`/is-listesi/api`): `GET /sablonlar` → `{hazir, buro}`, `POST /sablonlar`, `POST /sablonlar/{id}` (düzenle),
+  `DELETE /sablonlar/{id}`; ertesi güne aktarma mevcut `POST /tasks/{id}/ek-sure` ucunu kullanır
+- Masaüstü köprüsü (`/__uyap_kisi__/is-listesi`): `GET/POST /sablonlar`, `POST/DELETE /sablonlar/{id}`,
+  `POST /tasks/{id}/durum` (yalnız `gonder`, `basla`, `tamamla`), `POST /tasks/{id}/ek-sure` (talep; karar yok)

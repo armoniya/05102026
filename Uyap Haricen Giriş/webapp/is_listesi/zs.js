@@ -1269,17 +1269,40 @@ async function renderUsers(shown) {
 // ── iş şablonları (UYAP'ta "İş Ata" penceresinde seçilir; model: "yapılacak iş.md") ──
 const TARAF = { borclu: "Borçlu", alacakli: "Alacaklı", herhangi: "Herhangi taraf" };
 const canEditTpl = (t) => typeof t.id === "number" && (isAdmin() || t.created_by === S.me.id);
-function templateForm(t, done) {
+// Kontrol sonucu → sonraki iş (Aşama 2). baslik boş = aynı iş yeniden (ör. "bekliyor" → +3 gün).
+const SONUC = { olumlu: "Olumlu", olumsuz: "Olumsuz", bekliyor: "Bekliyor" };
+function sonucText(t) {
+  const r = t.sonuclar || {};
+  return Object.keys(SONUC).filter((k) => r[k]).map((k) =>
+    `${SONUC[k]} → ${r[k].baslik || "aynı iş"}${r[k].gun != null ? ` (+${r[k].gun} gün)` : ""}`).join(" · ");
+}
+function templateForm(t, done, titles) {
   const title = h("input", { value: t ? t.title : "", maxlength: 200, placeholder: "ör. Haciz ihbarnamesi kontrol" });
   const due = h("input", { type: "number", min: 0, max: 365, value: t && t.due_days != null ? t.due_days : "", placeholder: "Yok" });
   const prio = h("select", {}, [1, 2, 0].map((p) => h("option", { value: p, selected: (t ? t.priority : 1) === p }, PRIO[p])));
   const taraf = h("select", {}, h("option", { value: "" }, "Taraf yok"),
     Object.entries(TARAF).map(([k, l]) => h("option", { value: k, selected: !!t && t.taraf === k }, l)));
   const desc = h("textarea", { rows: 2, maxlength: 2000, placeholder: "Ne kontrol edilecek, ne yapılacak? (iş açılınca açıklamaya yazılır)" }, t ? t.description : "");
+  const kontrol = h("input", { value: t && t.kontrol ? t.kontrol : "", maxlength: 300, placeholder: "ör. Tebligat tebliğ edildi mi? (boş: sonuç sorulmaz)" });
+  const listId = `tpl-titles-${t ? t.id : "yeni"}`;
+  const dal = {};
+  const dallar = Object.keys(SONUC).map((k) => {
+    const r = (t && t.sonuclar && t.sonuclar[k]) || {};
+    dal[k] = { baslik: h("input", { value: r.baslik || "", maxlength: 200, list: listId, style: "flex:1;min-width:0",
+                                     placeholder: k === "bekliyor" ? "Boş: aynı iş yeniden" : "Sonraki iş (boş: öneri yok)" }),
+               gun: h("input", { type: "number", min: 0, max: 365, value: r.gun != null ? r.gun : "", placeholder: "gün", style: "width:100%" }) };
+    return h("label", {}, `${SONUC[k]} →`, h("div", { class: "row", style: "gap:6px;flex-wrap:nowrap" }, dal[k].baslik,
+      h("span", { style: "flex:0 0 72px;display:flex" }, dal[k].gun)));
+  });
   const save = act(async () => {
+    const sonuclar = {};
+    for (const k of Object.keys(SONUC)) {
+      const b = dal[k].baslik.value.trim(), g = dal[k].gun.value;
+      sonuclar[k] = b || g !== "" ? { baslik: b || null, gun: g === "" ? null : Number(g) } : null;
+    }
     await api("POST", t ? `/is-listesi/api/sablonlar/${t.id}` : "/is-listesi/api/sablonlar", {
       title: title.value, description: desc.value, due_days: due.value === "" ? null : Number(due.value),
-      priority: Number(prio.value), taraf: taraf.value || null });
+      priority: Number(prio.value), taraf: taraf.value || null, kontrol: kontrol.value, sonuclar });
     toast(t ? "Şablon güncellendi." : "Şablon eklendi.", true); await done();
   });
   title.addEventListener("keydown", (e) => { if (e.key === "Enter") save(e); if (e.key === "Escape" && t) done(); });
@@ -1287,6 +1310,9 @@ function templateForm(t, done) {
     h("div", { class: "form-grid" }, h("label", {}, "İş", title), h("label", {}, "Süre (gün)", due),
       h("label", {}, "Öncelik", prio), h("label", {}, "Taraf", taraf)),
     h("label", { class: "lbl", style: "margin-bottom:12px" }, "Açıklama", desc),
+    h("label", { class: "lbl", style: "margin-bottom:8px" }, "Kontrol sorusu (işi bitirirken sorulur)", kontrol),
+    h("div", { class: "form-grid" }, dallar),
+    h("datalist", { id: listId }, (titles || []).map((x) => h("option", { value: x }))),
     h("div", { class: "row" }, h("button", { type: "button", class: t ? "btn sm" : "btn", onclick: save }, t ? null : icon("plus"), t ? "Kaydet" : "Ekle"),
       t ? h("button", { type: "button", class: "btn-ghost sm", onclick: () => done() }, "Vazgeç")
         : h("span", { class: "small muted" }, "Süre: iş açılınca son tarih bugünden bu kadar gün sonra 17:00 olur. Taraf “Borçlu” ise dosyanın ilk borçlusu seçilir.")));
@@ -1297,9 +1323,12 @@ async function renderTemplates() {
   const d = await api("GET", "/is-listesi/api/sablonlar");
   if (S.view !== "sablonlar") return;
   const q = h("input", { type: "search", placeholder: "Şablonlarda ara…", value: S.tq || "" });
+  const titles = d.hazir.concat(d.buro).map((t) => t.title);
   const tbody = h("tbody");
   const cells = (t) => [
-    h("td", {}, h("b", {}, t.title), t.description ? h("div", { class: "small muted" }, t.description) : null),
+    h("td", {}, h("b", {}, t.title), t.description ? h("div", { class: "small muted" }, t.description) : null,
+      t.kontrol ? h("div", { class: "small" }, `❓ ${t.kontrol}`) : null,
+      sonucText(t) ? h("div", { class: "small muted" }, sonucText(t)) : null),
     h("td", {}, t.due_days != null ? `${t.due_days} gün` : "—"),
     h("td", {}, h("span", { class: "tag" + (t.priority === 2 ? " off" : "") }, PRIO[t.priority])),
     h("td", {}, TARAF[t.taraf] || "—"),
@@ -1308,7 +1337,7 @@ async function renderTemplates() {
     const k = (S.tq || "").toLocaleLowerCase("tr");
     const rows = d.buro.filter((t) => !k || t.title.toLocaleLowerCase("tr").includes(k)).map((t) => {
       const tr = h("tr", {}, cells(t), h("td", { style: "text-align:right" }, canEditTpl(t) ? h("div", { class: "row", style: "justify-content:flex-end" },
-        h("button", { type: "button", class: "btn-ghost sm", onclick: () => tr.replaceChildren(h("td", { colspan: 6 }, templateForm(t, renderTemplates))) },
+        h("button", { type: "button", class: "btn-ghost sm", onclick: () => tr.replaceChildren(h("td", { colspan: 6 }, templateForm(t, renderTemplates, titles))) },
           icon("edit"), "Düzenle"),
         confirmBtn("Sil", async () => { await api("DELETE", `/is-listesi/api/sablonlar/${t.id}`); toast("Şablon silindi.", true); await renderTemplates(); },
           "btn-ghost sm")) : null));
@@ -1321,7 +1350,7 @@ async function renderTemplates() {
   draw();
   const head = h("tr", {}, ["İş", "Süre", "Öncelik", "Taraf", "Ekleyen", ""].map((l) => h("th", {}, l)));
   $("list").replaceChildren(
-    h("div", { class: "card" }, h("h3", {}, "Yeni şablon"), templateForm(null, renderTemplates)),
+    h("div", { class: "card" }, h("h3", {}, "Yeni şablon"), templateForm(null, renderTemplates, titles)),
     h("div", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
       h("div", { class: "row", style: "justify-content:space-between;flex-wrap:wrap;padding:6px 6px 8px" },
         h("b", {}, `Büro şablonları (${d.buro.length})`), h("label", { class: "search" }, icon("search"), q)),

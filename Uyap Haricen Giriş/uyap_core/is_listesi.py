@@ -14,8 +14,9 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
     GET  /__uyap_kisi__/is-listesi/tasks?filtre=…    → sağdaki iş paneli: benim | onay | tumu
     POST /__uyap_kisi__/is-listesi/tasks             {title, description, assignee_id, due_at, priority, dosya}
     POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla, reason}  → onaya gönder vb.
+    POST /__uyap_kisi__/is-listesi/tasks/<id>/ek-sure {new_due, reason}  → "Ertesi güne aktar" (yönetici onaylar)
     GET  /__uyap_kisi__/is-listesi/sablonlar         → {hazir, buro} iş şablonları
-    POST /__uyap_kisi__/is-listesi/sablonlar         {title, description, due_days, priority, taraf}
+    POST /__uyap_kisi__/is-listesi/sablonlar         {title, description, due_days, priority, taraf, kontrol, sonuclar}
     POST /__uyap_kisi__/is-listesi/sablonlar/<id>    {title, description, due_days, priority, taraf}  → düzenle
     DELETE /__uyap_kisi__/is-listesi/sablonlar/<id>
     GET  /__uyap_kisi__/is-listesi/ac[?is=<id> | ?sekme=sablonlar]  → 303 → cokluuyap.com'da şifresiz oturum
@@ -119,7 +120,7 @@ def _obj(body):
 
 
 def _sablon_alanlari(d):
-    return {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf") if k in d}
+    return {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf", "kontrol", "sonuclar") if k in d}
 
 
 def _safe_json(r):
@@ -203,6 +204,15 @@ async def handle(method, path, query, body):
                 return _err(400, "Geçersiz işlem.")
             return _json(*await _call("POST", f"tasks/{m.group(1)}/durum",
                                       body={"action": d["action"], "reason": str(d.get("reason") or "")[:2000]}))
+        # "Ertesi güne aktar": son tarihi ileri alma talebi (gerekçe zorunlu); yönetici / onay yetkilisi
+        # İş Listesi'nde kabul eder ya da reddeder. Karar köprüden verilemez.
+        m = re.fullmatch(r"tasks/(\d{1,12})/ek-sure", sub)
+        if m and method == "POST":
+            d = _obj(body)
+            if d is None or not isinstance(d.get("new_due"), int) or isinstance(d.get("new_due"), bool):
+                return _err(400, "Geçersiz istek verisi.")
+            return _json(*await _call("POST", f"tasks/{m.group(1)}/ek-sure",
+                                      body={"new_due": d["new_due"], "reason": str(d.get("reason") or "")[:2000]}))
         if sub == "ac" and method == "GET":
             status, d = await _call("POST", "sso-kod", body={})
             if status != 200 or not d.get("url"):

@@ -1803,12 +1803,40 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         b.addEventListener('click', function(ev) { ev.stopPropagation(); kapanisPenceresi(t, ey); });
         return b;
     }
-    function kapanisPenceresi(t, ey) {
+    // "Ertesi güne aktar": son tarihi bir iş günü ileri alma talebi. Not zorunlu; yönetici / onay
+    // yetkilisi İş Listesi'nde kabul edince tarih değişir (sunucudaki ek süre talebi akışı).
+    function aktarDugmesi(t, sinif) {
+        if (kapanisEylemi(t) !== 'gonder') return null;
+        if (t.ext_pending) {
+            const s = el('span', 'font-size:11px;opacity:.85;', 'aktarım onayda');
+            s.title = 'Ertesi güne aktarma / ek süre talebi yöneticinin kararını bekliyor';
+            return s;
+        }
+        const b = el('button', null, 'Ertesi güne aktar');
+        b.type = 'button';
+        b.className = sinif;
+        b.title = 'Son tarihi bir iş günü ileri almak için yöneticiden onay iste (not zorunlu)';
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); aktarPenceresi(t); });
+        return b;
+    }
+    function tarihGirdisi(d) {
+        const p = function(x) { return String(x).padStart(2, '0'); };
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+    // Son tarih (geçmişse bugün) + 1 iş günü, 17:00; cumartesi / pazar atlanır.
+    function ertesiIsGunu(dueTs) {
+        const d = new Date(Math.max(dueTs ? dueTs * 1000 : 0, Date.now()));
+        d.setDate(d.getDate() + 1);
+        while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+        d.setHours(17, 0, 0, 0);
+        return d;
+    }
+    function pencereBasi(baslik, t) {
         kur();
         kutu.innerHTML = '';
         ort.style.display = 'flex';
         const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
-        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', ey === 'tamamla' ? 'İşi tamamla' : 'Onaya gönder'));
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', baslik));
         const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
         x.addEventListener('click', kapat);
         ust.appendChild(x);
@@ -1818,19 +1846,30 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         if (yer) kutu.appendChild(el('div', 'color:#cbd5e1;', yer + (t.evrak_adi ? ' · Belge: ' + t.evrak_adi : '')));
         mesajEl = el('div', 'margin-top:8px;color:#fca5a5;');
         kutu.appendChild(mesajEl);
+    }
+    function aktarPenceresi(t) {
+        pencereBasi('Ertesi güne aktar', t);
+        kutu.appendChild(el('div', 'margin-top:6px;color:#cbd5e1;', 'Şu anki son tarih: ' + (t.due_at ? tarih(t.due_at) : 'yok')));
+        const yeni = el('input'); yeni.type = 'datetime-local';
+        yeni.value = tarihGirdisi(ertesiIsGunu(t.due_at));
+        kutu.appendChild(alan('Yeni son tarih', yeni));
         const not = el('textarea'); not.rows = 3; not.maxLength = 2000;
-        not.placeholder = 'Kontrol sonucu / yapılan işlem (isteğe bağlı)';
+        not.placeholder = 'Neden aktarılıyor? (zorunlu — ör. tebligat sonucu henüz düşmedi)';
         kutu.appendChild(alan('Not', not));
-        kutu.appendChild(dugme(ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder', '#16a34a', async function(b) {
+        kutu.appendChild(el('div', 'margin-top:6px;color:#9ca3af;font-size:11px;',
+            'Talep yöneticiye / onay yetkilisine gider; kabul edilince son tarih değişir.'));
+        kutu.appendChild(dugme('Onaya gönder', '#4f46e5', async function(b) {
+            if (!not.value.trim()) { mesajEl.textContent = 'Aktarma nedenini yazın.'; not.focus(); return; }
+            if (!yeni.value) { mesajEl.textContent = 'Yeni tarihi seçin.'; yeni.focus(); return; }
             b.disabled = true;
             mesajEl.textContent = '';
             try {
-                await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: ey, reason: not.value }) });
+                await api('/tasks/' + t.id + '/ek-sure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ new_due: Math.floor(new Date(yeni.value).getTime() / 1000), reason: not.value }) });
                 mesajEl.style.color = '#86efac';
-                mesajEl.textContent = ey === 'tamamla' ? 'İş tamamlandı.' : 'İş onaya gönderildi.';
+                mesajEl.textContent = 'Aktarma talebi onaya gönderildi.';
                 isleriTazele();
-                setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 900);
+                setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 1100);
             } catch (e) {
                 mesajEl.style.color = '#fca5a5';
                 mesajEl.textContent = 'Gönderilemedi: ' + e.message;
@@ -1839,6 +1878,136 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }));
         kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
         setTimeout(function() { not.focus(); }, 0);
+    }
+
+    // ── Kontrol sonucu → sonraki iş (model: "yapılacak iş.md" §3) ──
+    const SONUC = [['olumlu', 'Olumlu'], ['olumsuz', 'Olumsuz'], ['bekliyor', 'Bekliyor']];
+    // İşin şablonu: başlık "Taraf Adı – Tebligat kontrol" ya da yalnız "Tebligat kontrol".
+    function isAdi(t) {
+        const i = t.title.lastIndexOf(' – ');
+        return i >= 0 ? t.title.slice(i + 3) : t.title;
+    }
+    function sablonBul(ad) {
+        if (!sablonlar || !ad) return null;
+        const k = kucukHarf(ad);
+        return sablonlar.hazir.concat(sablonlar.buro).find(function(s) { return kucukHarf(s.title) === k; }) || null;
+    }
+    function kapanisPenceresi(t, ey) {
+        pencereBasi(ey === 'tamamla' ? 'İşi tamamla' : 'Onaya gönder', t);
+        const sonucYeri = el('div', '');
+        const sonrakiYeri = el('div', 'display:none;margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
+        kutu.appendChild(sonucYeri);
+        kutu.appendChild(sonrakiYeri);
+        const not = el('textarea'); not.rows = 3; not.maxLength = 1800;
+        not.placeholder = 'Ne görüldü / ne yapıldı? (isteğe bağlı — ör. tebligat iade, adres yetersiz)';
+        kutu.appendChild(alan('Not', not));
+
+        let sablon = null, sonuc = null;
+        // Sonraki iş: aynı dosya / taraf / belgeyle, işi atanan kişiye; özel işte önerilmez.
+        const ac_ = el('input'); ac_.type = 'checkbox'; ac_.style.cssText = 'width:auto;margin:0 6px 0 0;vertical-align:middle;';
+        const sAd = el('input'); sAd.maxLength = 200; sAd.placeholder = 'Sonraki iş (ör. Kesinleşme kontrol)';
+        const sGun = el('input'); sGun.type = 'number'; sGun.min = '0'; sGun.max = '365'; sGun.placeholder = 'gün';
+        sAd.addEventListener('input', function() { ac_.checked = !!sAd.value.trim(); });
+        if (!t.is_private) {
+            const satir = el('label', 'display:flex;align-items:center;font-weight:600;cursor:pointer;');
+            satir.appendChild(ac_);
+            satir.appendChild(document.createTextNode('Sonraki işi aç'));
+            sonrakiYeri.appendChild(satir);
+            const ikili = el('div', 'display:flex;gap:6px;align-items:flex-end;');
+            const a1 = el('div', 'flex:1;min-width:0;'); a1.appendChild(sAd);
+            const a2 = el('div', 'flex:0 0 76px;'); a2.appendChild(sGun);
+            ikili.appendChild(a1); ikili.appendChild(a2);
+            sonrakiYeri.appendChild(ikili);
+            sonrakiYeri.appendChild(el('div', 'margin-top:3px;font-size:11px;color:#9ca3af;',
+                'Aynı dosya' + (t.taraf_adi ? ', taraf (' + t.taraf_adi + ')' : '') + (t.evrak_adi ? ', belge' : '') +
+                ' ile açılır; süre bugünden gün sayısıdır (17:00).'));
+            sonrakiYeri.style.display = '';
+        }
+        function sonucSec(k) {
+            sonuc = sonuc === k ? null : k;
+            Array.prototype.forEach.call(sonucYeri.querySelectorAll('.ia-cip'), function(b) {
+                b.classList.toggle('sec', b.getAttribute('data-k') === sonuc);
+            });
+            const dal = sonuc && sablon && sablon.sonuclar ? sablon.sonuclar[sonuc] : null;
+            if (dal) {
+                const ad = dal.baslik || (sablon ? sablon.title : isAdi(t));
+                const hedef = sablonBul(ad);
+                sAd.value = ad;
+                sGun.value = dal.gun != null ? String(dal.gun) : hedef && hedef.due_days != null ? String(hedef.due_days) : '';
+                ac_.checked = true;
+            } else if (sonuc && !sablon) {
+                // Şablonsuz işte öneri yok; "bekliyor" aynı işi 3 gün sonraya önerir.
+                if (sonuc === 'bekliyor' && !sAd.value) { sAd.value = isAdi(t); sGun.value = '3'; ac_.checked = true; }
+            } else {
+                sAd.value = ''; sGun.value = ''; ac_.checked = false;
+            }
+        }
+        function sonucCiz() {
+            sonucYeri.innerHTML = '';
+            const soru = sablon && sablon.kontrol;
+            sonucYeri.appendChild(el('div', 'margin-top:8px;font-weight:600;', soru ? soru : 'Kontrol sonucu (isteğe bağlı)'));
+            SONUC.forEach(function(x) {
+                const b = el('button', null, x[1]);
+                b.type = 'button';
+                b.className = 'ia-cip';
+                b.setAttribute('data-k', x[0]);
+                const dal = sablon && sablon.sonuclar && sablon.sonuclar[x[0]];
+                if (dal) b.title = 'Sonraki iş: ' + (dal.baslik || 'aynı iş') + (dal.gun != null ? ' (+' + dal.gun + ' gün)' : '');
+                b.addEventListener('click', function(ev) { ev.stopPropagation(); sonucSec(x[0]); });
+                sonucYeri.appendChild(b);
+            });
+        }
+        sonucCiz();
+        sablonlariGetir().then(function() {
+            sablon = sablonBul(isAdi(t));
+            sonucCiz();
+        }).catch(function() {});
+
+        kutu.appendChild(dugme(ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder', '#16a34a', async function(b) {
+            if (sablon && sablon.kontrol && !sonuc) { mesajEl.textContent = 'Kontrol sonucunu seçin: olumlu, olumsuz ya da bekliyor.'; return; }
+            const sonraki = ac_.checked && sAd.value.trim() && !t.is_private;
+            b.disabled = true;
+            mesajEl.textContent = '';
+            const etiket = sonuc ? SONUC.find(function(x) { return x[0] === sonuc; })[1].toLocaleLowerCase('tr-TR') : '';
+            const neden = [sonuc ? 'Kontrol: ' + etiket + (sablon && sablon.kontrol ? ' (' + sablon.kontrol + ')' : '') : '',
+                           not.value.trim(), sonraki ? 'Sonraki iş: ' + sAd.value.trim() : ''].filter(Boolean).join(' — ');
+            try {
+                await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: ey, reason: neden }) });
+            } catch (e) {
+                mesajEl.style.color = '#fca5a5';
+                mesajEl.textContent = 'Gönderilemedi: ' + e.message;
+                b.disabled = false;
+                return;
+            }
+            let ek = '';
+            if (sonraki) {
+                try { ek = ' Sonraki iş açıldı: ' + (await sonrakiIsiAc(t, sAd.value.trim(), sGun.value)); }
+                catch (e) { ek = ' Sonraki iş açılamadı: ' + e.message; }
+            }
+            mesajEl.style.color = ek.indexOf('açılamadı') >= 0 ? '#fcd34d' : '#86efac';
+            mesajEl.textContent = (ey === 'tamamla' ? 'İş tamamlandı.' : 'İş onaya gönderildi.') + ek;
+            isleriTazele();
+            if (ek.indexOf('açılamadı') < 0) setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 1300);
+        }));
+        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
+    }
+    // Biten işin dosya / taraf / belge bağıyla yeni iş; şablonu varsa açıklama, öncelik ondan.
+    async function sonrakiIsiAc(t, ad, gun) {
+        const s = sablonBul(ad);
+        const n = gun === '' || gun == null ? (s && s.due_days != null ? s.due_days : null) : Number(gun);
+        let uyap = null;
+        try { uyap = t.dosya_uyap ? JSON.parse(t.dosya_uyap) : null; } catch (e) {}
+        const baslik = t.taraf_adi ? t.taraf_adi + ' – ' + ad : ad;
+        await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            title: baslik, description: s ? s.description || '' : '',
+            assignee_id: ben && ben.me.role === 'admin' ? (t.assignee_id || null) : null,
+            due_at: n == null ? null : Math.floor(new Date(gunSonra(n)).getTime() / 1000),
+            priority: s && s.priority != null ? s.priority : (t.priority == null ? 1 : t.priority),
+            dosya: t.dosya_id ? { dosya_id: String(t.dosya_id), birim_id: t.birim_id || '', birim_adi: t.birim_adi || '',
+                                  dosya_no: t.dosya_no || '', dosya_tur: t.dosya_tur || '', evrak_id: t.evrak_id || null,
+                                  evrak_adi: t.evrak_adi || null, taraf_adi: t.taraf_adi || null, uyap: uyap } : null }) });
+        return baslik + (n == null ? '' : ' (' + gunSonra(n).slice(8, 10) + '.' + gunSonra(n).slice(5, 7) + ')');
     }
     // İş açılınca / durumu değişince: kart bandı, belge işaretleri ve panel yeniden çekilir.
     function isleriTazele() {
@@ -1951,6 +2120,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
             const kb = kapanisDugmesi(t, 'ia-cip sec');
             if (kb) s.appendChild(kb);
+            const ab = aktarDugmesi(t, 'ia-cip');
+            if (ab) s.appendChild(ab);
             liste.appendChild(s);
         });
     }
@@ -2467,6 +2638,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '#uyap-ispanel .ip-dosya:hover{background:rgba(79,70,229,0.35)}' +
             '#uyap-ispanel .ip-onay{flex:none;margin-top:5px;padding:3px 10px;border:0;border-radius:6px;background:#16a34a;color:#fff;font-size:11px;font-weight:600;cursor:pointer}' +
             '#uyap-ispanel .ip-onay:hover{background:#15803d}' +
+            '#uyap-ispanel .ip-aktar{flex:none;margin-top:5px;padding:3px 10px;border:1px solid rgba(255,255,255,0.25);border-radius:6px;background:transparent;color:#e5e7eb;font-size:11px;font-weight:600;cursor:pointer}' +
+            '#uyap-ispanel .ip-aktar:hover{background:rgba(255,255,255,0.08)}' +
             '#uyap-ispanel .ip-link{background:none;border:0;padding:0;color:#a5b4fc;cursor:pointer;font-size:12px;text-decoration:underline}' +
             '#uyap-issekme{position:fixed;right:0;top:45%;z-index:2147483644;padding:12px 7px;border:0;border-radius:10px 0 0 10px;cursor:pointer;' +
             'background:#4f46e5;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;writing-mode:vertical-rl;' +
@@ -2696,6 +2869,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
         const kb = kapanisDugmesi(t, 'ip-onay');
         if (kb) alt2.appendChild(kb);
+        const ab = aktarDugmesi(t, 'ip-aktar');
+        if (ab) alt2.appendChild(ab);
         if (alt2.children.length) s.appendChild(alt2);
         return s;
     }
@@ -2803,7 +2978,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const goster = isler.length > 0 && !!UYARI_SEKMELERI[seciliSekme(kart)];
         band.style.display = goster ? '' : 'none';
         if (!goster) return;
-        const imza = (ben ? ben.me.id : '') + '#' + isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title; }).join('|');
+        const imza = (ben ? ben.me.id : '') + '#' + isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title + ':' + (t.ext_pending ? 1 : 0); }).join('|');
         if (band.getAttribute('data-imza') === imza) return;
         band.setAttribute('data-imza', imza);
         band.innerHTML = '';
@@ -2821,6 +2996,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (t.status === 'onayda') satir.appendChild(el('span', 'font-size:11px;opacity:.8;', 'onayda'));
             const kb = kapanisDugmesi(t, 'uyap-is-uyari-kucuk');
             if (kb) satir.appendChild(kb);
+            const ab = aktarDugmesi(t, 'uyap-is-uyari-kucuk');
+            if (ab) satir.appendChild(ab);
             liste.appendChild(satir);
         });
         if (isler.length > 3) liste.appendChild(el('div', 'opacity:.8;', '+' + (isler.length - 3) + ' iş daha'));

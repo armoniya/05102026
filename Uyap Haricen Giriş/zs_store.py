@@ -149,6 +149,8 @@ _ADDED_COLS = {
                  # İşin yapıldığı taraf (dosya kartının taraf listesinden; ör. borçlulardan biri).
                  ("taraf_adi", "TEXT")),
     "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
+    # Aşama 2: kontrol sorusu + sonuç dalları (JSON, bkz. TEMPLATE_SONUCLAR).
+    "zs_templates": (("kontrol", "TEXT"), ("sonuclar", "TEXT")),
     # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
     "zs_telegram": (("tg_username", "TEXT"),),
     # Ana CokluUyap hesabına bağ (ahmet@ofis) + o hesabın bürosu. Boşsa eski /zs kullanıcısı.
@@ -172,27 +174,89 @@ UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod"
 # Hazır iş şablonları (her büroya açık, değiştirilemez). Büro şablonları zs_templates'te.
 # taraf: işin bir tarafa yapılıp yapılmadığı (borclu | alacakli | herhangi | None).
 # action: önerilen UYAP aksiyonu (Aşama 3, henüz yürütülmez) — bkz. "yapılacak iş.md".
+# kontrol + sonuclar (Aşama 2): iş bitirilirken sorulan soru ve sonuca göre önerilen sonraki iş
+# {olumlu|olumsuz|bekliyor: {baslik, gun}}; baslik None = aynı iş yeniden (ör. bekliyor → +3 gün).
+def _sonuc(olumlu=None, olumsuz=None, bekliyor=None):
+    def one(x):
+        if x is None:
+            return None
+        if isinstance(x, int):
+            return {"baslik": None, "gun": x}
+        return {"baslik": x[0], "gun": x[1]}
+    return {"olumlu": one(olumlu), "olumsuz": one(olumsuz), "bekliyor": one(bekliyor)}
+
+
 HAZIR_SABLONLAR = (
     {"id": "h-tebligat", "title": "Tebligat kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
-     "description": "Safahat / tebligat barkodundan tebliğ sonucunu kontrol et.", "action": "ekran:safahat"},
+     "description": "Safahat / tebligat barkodundan tebliğ sonucunu kontrol et.", "action": "ekran:safahat",
+     "kontrol": "Tebligat tebliğ edildi mi?",
+     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("Adres araştırması", 2), 3)},
     {"id": "h-odeme-emri", "title": "Ödeme emri kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
-     "description": "Ödeme emrinin gönderilip gönderilmediğini kontrol et.", "action": "ekran:evrak"},
+     "description": "Ödeme emrinin gönderilip gönderilmediğini kontrol et.", "action": "ekran:evrak",
+     "kontrol": "Ödeme emri gönderildi mi?",
+     "sonuclar": _sonuc(("Tebligat kontrol", 10), ("Ödeme emri yeniden gönder", 1), 3)},
     {"id": "h-kesinlesme", "title": "Kesinleşme kontrol", "due_days": 7, "priority": 1, "taraf": "borclu",
-     "description": "Takibin borçlu yönünden kesinleşip kesinleşmediğini kontrol et.", "action": "ekran:safahat"},
+     "description": "Takibin borçlu yönünden kesinleşip kesinleşmediğini kontrol et.", "action": "ekran:safahat",
+     "kontrol": "Takip kesinleşti mi?",
+     "sonuclar": _sonuc(("Haciz talepleri", 2), ("Tebligat kontrol", 3), 3)},
     {"id": "h-takyidat", "title": "Takyidat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "Araç / tapu takyidat sorgu sonucunu kontrol et.", "action": "sorgu:takyidat"},
+     "description": "Araç / tapu takyidat sorgu sonucunu kontrol et.", "action": "sorgu:takyidat",
+     "kontrol": "Borçlu adına araç / taşınmaz var mı?",
+     "sonuclar": _sonuc(("Haciz / yakalama talebi", 2), ("Mal varlığı sorgusu", 3), 2)},
     {"id": "h-barkod", "title": "Barkod takip", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "PTT barkodunda tebligatın son durumunu kontrol et.", "action": None},
+     "description": "PTT barkodunda tebligatın son durumunu kontrol et.", "action": None,
+     "kontrol": "Barkodda teslim görünüyor mu?",
+     "sonuclar": _sonuc(("Tebligat kontrol", 3), ("Adres araştırması", 2), 2)},
     {"id": "h-21-2", "title": "21/2 akıbet kontrol", "due_days": 5, "priority": 1, "taraf": "borclu",
-     "description": "21/2 tebligatın akıbetini kontrol et.", "action": "ekran:safahat"},
+     "description": "21/2 tebligatın akıbetini kontrol et.", "action": "ekran:safahat",
+     "kontrol": "21/2 tebligat tebliğ edildi mi?",
+     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("İlanen tebligat talebi", 2), 5)},
     {"id": "h-reddiyat", "title": "Reddiyat kontrol", "due_days": 2, "priority": 1, "taraf": None,
-     "description": "Reddiyatın hesaba geçip geçmediğini kontrol et.", "action": None},
+     "description": "Reddiyatın hesaba geçip geçmediğini kontrol et.", "action": None,
+     "kontrol": "Reddiyat hesaba geçti mi?",
+     "sonuclar": _sonuc(("Müvekkile bildirim", 1), ("Muhasebe ile görüş", 1), 2)},
     {"id": "h-tahsilat", "title": "Tahsilat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "Tahsilatı kontrol et, müvekkile bildir.", "action": None},
+     "description": "Tahsilatı kontrol et, müvekkile bildir.", "action": None,
+     "kontrol": "Tahsilat hesaba geçti mi?",
+     "sonuclar": _sonuc(("Müvekkile bildirim", 1), ("Muhasebe ile görüş", 1), 2)},
     {"id": "h-aranacak", "title": "Borçlu aranacak", "due_days": 1, "priority": 1, "taraf": "borclu",
-     "description": "Borçluya ulaş, sonucu nota yaz.", "action": None},
+     "description": "Borçluya ulaş, sonucu nota yaz.", "action": None,
+     "kontrol": "Borçluya ulaşıldı mı?",
+     "sonuclar": _sonuc(("Ödeme planı takibi", 7), 2, None)},
+    {"id": "h-adres", "title": "Adres araştırması", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "MERNİS / SGK / GSM adres araştırması yap, yeni adrese tebligat çıkar.",
+     "action": "talep:adres_arastirmasi",
+     "kontrol": "Yeni adres bulundu mu?",
+     "sonuclar": _sonuc(("Tebligat kontrol", 10), ("İlanen tebligat talebi", 2), 3)},
+    {"id": "h-haciz", "title": "Haciz talepleri", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "SGK, banka, araç ve tapu haciz taleplerini hazırla.", "action": None,
+     "kontrol": None, "sonuclar": _sonuc()},
+    {"id": "h-muvekkil", "title": "Müvekkile bildirim", "due_days": 1, "priority": 1, "taraf": None,
+     "description": "Dosyadaki gelişmeyi müvekkile bildir.", "action": None,
+     "kontrol": None, "sonuclar": _sonuc()},
 )
 TEMPLATE_TARAF = ("borclu", "alacakli", "herhangi")
+TEMPLATE_SONUCLAR = ("olumlu", "olumsuz", "bekliyor")
+
+
+def clean_sonuclar(d):
+    """{olumlu|olumsuz|bekliyor: {baslik, gun} | None} → temiz sözlük (bilinmeyen anahtarlar atılır)."""
+    out = {}
+    for k in TEMPLATE_SONUCLAR:
+        x = d.get(k) if isinstance(d, dict) else None
+        if not isinstance(x, dict):
+            out[k] = None
+            continue
+        baslik = " ".join(str(x.get("baslik") or "").split())[:200] or None
+        gun = x.get("gun")
+        try:
+            gun = None if gun in (None, "") else int(gun)
+        except (TypeError, ValueError):
+            raise ZsError("Sonraki iş süresi gün sayısı olmalı.")
+        if gun is not None and not 0 <= gun <= 365:
+            raise ZsError("Sonraki iş süresi 0–365 gün olmalı.")
+        out[k] = {"baslik": baslik, "gun": gun} if baslik or gun is not None else None
+    return out
 
 
 def office_of(user) -> str:
@@ -638,10 +702,12 @@ class ZsStore:
                     "AND assignee_id = ?) OR id IN (SELECT task_id FROM zs_members WHERE user_id = ?))")
             sel = f"SELECT * FROM zs_tasks WHERE {base}"
             order = " ORDER BY sort_order, id"
+            # Onay listesi: onaya gönderilen işler + karar bekleyen ek süre / ertesi güne aktarma talepleri.
+            waiting = ("(status = 'onayda' OR id IN (SELECT task_id FROM zs_extensions WHERE status = 'bekliyor'))")
             if filtre == "onay" and user["role"] == "admin":
-                roots = self._rows(self._q(cur, sel + " AND status = 'onayda'" + order, bparams))
+                roots = self._rows(self._q(cur, sel + f" AND {waiting}" + order, bparams))
             elif filtre == "onay":
-                roots = self._rows(self._q(cur, sel + f" AND status = 'onayda' AND {mine}" + order,
+                roots = self._rows(self._q(cur, sel + f" AND {waiting} AND {mine}" + order,
                                            bparams + [uid, uid, uid]))
             elif filtre == "tumu" and user["role"] == "admin":
                 roots = self._rows(self._q(cur, sel + order, bparams))
@@ -1478,10 +1544,16 @@ class ZsStore:
                                            "LEFT JOIN zs_users u ON u.id = t.created_by "
                                            "WHERE COALESCE(t.office_id, '') = ? ORDER BY LOWER(t.title), t.id",
                                       (office_of(user),)))
-        return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": self._run(fn)}
+        buro = self._run(fn)
+        for t in buro:
+            try:
+                t["sonuclar"] = clean_sonuclar(json.loads(t.get("sonuclar") or "{}"))
+            except (ValueError, ZsError):
+                t["sonuclar"] = clean_sonuclar({})
+        return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": buro}
 
     @staticmethod
-    def _template_fields(title, description, due_days, priority, taraf, action):
+    def _template_fields(title, description, due_days, priority, taraf, action, kontrol=None, sonuclar=None):
         title = " ".join((title or "").split())[:200]
         if not title:
             raise ZsError("Şablon adı yazın.")
@@ -1490,7 +1562,9 @@ class ZsStore:
         if priority not in PRIORITIES:
             raise ZsError("Geçersiz öncelik.")
         return (title, (description or "").strip()[:2000], None if due_days is None else int(due_days), priority,
-                taraf if taraf in TEMPLATE_TARAF else None, (str(action).strip()[:100] or None) if action else None)
+                taraf if taraf in TEMPLATE_TARAF else None, (str(action).strip()[:100] or None) if action else None,
+                " ".join(str(kontrol or "").split())[:300] or None,
+                json.dumps(clean_sonuclar(sonuclar), ensure_ascii=False))
 
     def _template_name_taken(self, cur, user, title, except_id=None):
         # Hazır şablonların adları da dolu sayılır: İş Ata penceresinde aynı adlı iki şablon görünmesin.
@@ -1510,9 +1584,15 @@ class ZsStore:
             raise ZsError(f"Şablonu yalnız ekleyen ya da yönetici {verb}.")
         return t
 
-    def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None):
-        title, description, due_days, priority, taraf, action = self._template_fields(
-            title, description, due_days, priority, taraf, action)
+    def _template_out(self, cur, tid):
+        t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,)))
+        t["sonuclar"] = clean_sonuclar(json.loads(t.get("sonuclar") or "{}"))
+        return t
+
+    def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None,
+                        kontrol=None, sonuclar=None):
+        title, description, due_days, priority, taraf, action, kontrol, sonuclar = self._template_fields(
+            title, description, due_days, priority, taraf, action, kontrol, sonuclar)
 
         def fn(cur):
             n = self._q(cur, "SELECT COUNT(*) FROM zs_templates WHERE COALESCE(office_id, '') = ?",
@@ -1522,25 +1602,27 @@ class ZsStore:
             if self._template_name_taken(cur, user, title):
                 raise ZsError("Bu adla bir şablon zaten var.")
             tid = self._insert(cur, "INSERT INTO zs_templates (office_id, title, description, due_days, priority, "
-                                    "taraf, action, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    "taraf, action, kontrol, sonuclar, created_by, created_at) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                (office_of(user) or None, title, description, due_days, priority, taraf, action,
-                                user["id"], _now()))
-            return self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,)))
+                                kontrol, sonuclar, user["id"], _now()))
+            return self._template_out(cur, tid)
         return self._run(fn)
 
     def update_template(self, user, template_id, title, description="", due_days=None, priority=1, taraf=None,
-                        action=None):
+                        action=None, kontrol=None, sonuclar=None):
         """Şablonu ekleyen ya da büro yöneticisi düzenler (İş Listesi → Şablonlar)."""
-        title, description, due_days, priority, taraf, action = self._template_fields(
-            title, description, due_days, priority, taraf, action)
+        title, description, due_days, priority, taraf, action, kontrol, sonuclar = self._template_fields(
+            title, description, due_days, priority, taraf, action, kontrol, sonuclar)
 
         def fn(cur):
             self._own_template(cur, user, template_id, "düzenleyebilir")
             if self._template_name_taken(cur, user, title, except_id=template_id):
                 raise ZsError("Bu adla bir şablon zaten var.")
             self._q(cur, "UPDATE zs_templates SET title = ?, description = ?, due_days = ?, priority = ?, taraf = ?, "
-                         "action = ? WHERE id = ?", (title, description, due_days, priority, taraf, action, template_id))
-            return self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (template_id,)))
+                         "action = ?, kontrol = ?, sonuclar = ? WHERE id = ?",
+                    (title, description, due_days, priority, taraf, action, kontrol, sonuclar, template_id))
+            return self._template_out(cur, template_id)
         return self._run(fn)
 
     def delete_template(self, user, template_id):
