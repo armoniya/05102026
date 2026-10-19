@@ -22,6 +22,7 @@ const VIEWS = {
   onay: ["Onay bekleyenler", "Onay", "shield", "Onay bekleyenler", "Kontrol edip onaylamanız gereken işler"],
   tumu: ["Tüm işler", "Tümü", "layers", "Tüm işler", "Bürodaki bütün işler"],
   rapor: ["Raporlar", "Rapor", "chart", "Raporlar", ""],
+  sablonlar: ["Şablonlar", "Şablon", "copy", "İş şablonları", "UYAP'ta “İş Ata” penceresinde aranıp seçilen hazır işler — büronun şablonlarını buradan ekleyin, düzenleyin, silin"],
   kullanicilar: ["Kullanıcılar", "Kişiler", "users", "Kullanıcılar", "Hesapları ekleyin, düzenleyin, kapatın, parolaları sıfırlayın"],
 };
 const FILTERS = {
@@ -46,6 +47,7 @@ const ICONS = {
   cal: "M8 2v4|M16 2v4|M3 10h18|M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
   msg: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
   clip: "m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48",
+  copy: "M8 8h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z|M4 16V4a2 2 0 0 1 2-2h12",
   list: "M9 6h11|M9 12h11|M9 18h11|M4 6h.01|M4 12h.01|M4 18h.01",
   plus: "M12 5v14|M5 12h14",
   search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z|m21 21-4.3-4.3",
@@ -259,14 +261,14 @@ function renderTabs() {
   const item = (k) => {
     const [long, short, ic] = VIEWS[k];
     const n = counts[k];
-    return h("button", { type: "button", class: S.view === k ? "on" : "", onclick: () => go(k), "aria-current": S.view === k ? "page" : null },
+    return h("button", { type: "button", class: (S.view === k ? "on" : "") + (k === "sablonlar" ? " wide-only" : ""), onclick: () => go(k), "aria-current": S.view === k ? "page" : null },
       icon(ic), h("span", { class: "long" }, long), h("span", { class: "short" }, short),
       k === "benim" && late ? h("span", { class: "dot", title: "Geciken işiniz var" }) : null,
       n ? h("span", { class: "cnt" + (k === "onay" && isAdmin() ? " warn" : "") }, n) : null);
   };
   const kids = [h("div", { class: "nav-h" }, "İşler"), item("takvim"), item("hatirlatici"), item("benim"), item("ozel"), item("onay")];
-  if (isAdmin()) kids.push(item("tumu"), h("div", { class: "nav-h" }, "Yönetim"), item("rapor"), item("kullanicilar"));
-  else kids.push(item("rapor"));
+  if (isAdmin()) kids.push(item("tumu"), h("div", { class: "nav-h" }, "Yönetim"), item("rapor"), item("sablonlar"), item("kullanicilar"));
+  else kids.push(item("rapor"), item("sablonlar"));
   $("tabs").replaceChildren(...kids);
 }
 
@@ -282,7 +284,7 @@ function renderHead() {
     : S.view === "rapor" ? (isAdmin() ? "Kişilerin yaptıkları, iş ve tarih bazında sonuçlar (başkalarının özel işleri hariç)" : "Yaptıklarınız ve işlerinizin sonuçları")
     : v[4];
   const top = h("div", { class: "top" }, h("div", {}, h("h1", {}, title), h("div", { class: "subt" }, sub)));
-  if (S.view === "kullanicilar" || S.view === "rapor") { $("head").replaceChildren(top); return; }
+  if (S.view === "kullanicilar" || S.view === "rapor" || S.view === "sablonlar") { $("head").replaceChildren(top); return; }
   const q = h("input", { type: "search", id: "q", placeholder: "İşlerde ara…  ( / )", value: S.q });
   q.addEventListener("input", () => { S.q = q.value; renderList(); });
   if (S.view === "takvim") q.placeholder = "Takvimde ara…  ( / )";
@@ -320,7 +322,7 @@ function renderHead() {
 async function refresh() {
   try {
     const admin = isAdmin();
-    const want = { takvim: admin ? "tumu" : "benim", benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", kullanicilar: null, rapor: null, hatirlatici: null }[S.view];
+    const want = { takvim: admin ? "tumu" : "benim", benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", kullanicilar: null, rapor: null, hatirlatici: null, sablonlar: null }[S.view];
     const [mine, onay, cur] = await Promise.all([
       api("GET", "/is-listesi/api/tasks?filtre=benim"),
       admin ? api("GET", "/is-listesi/api/tasks?filtre=onay") : Promise.resolve(null),
@@ -332,6 +334,7 @@ async function refresh() {
     renderTabs(); renderHead();
     if (S.view === "kullanicilar") { closeDetail(); await renderUsers(); return; }
     if (S.view === "rapor") { closeDetail(); await renderReport(); return; }
+    if (S.view === "sablonlar") { closeDetail(); await renderTemplates(); return; }
     if (S.view === "hatirlatici") { closeDetail(); renderReminders(); return; }
     renderList();
     if (S.selId) await openDetail(S.selId, true); else closeDetail();
@@ -390,7 +393,7 @@ function renderList() {
 }
 
 function openComposer() {
-  if (S.view === "onay" || S.view === "kullanicilar" || S.view === "rapor" || S.view === "hatirlatici") { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
+  if (S.view === "onay" || S.view === "kullanicilar" || S.view === "rapor" || S.view === "hatirlatici" || S.view === "sablonlar") { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
   S.composer = true; renderList();
   const i = document.querySelector(".composer input"); if (i) { i.focus(); i.scrollIntoView({ block: "center" }); }
 }
@@ -1261,6 +1264,71 @@ async function renderUsers(shown) {
     h("div", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
       h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Kişi"), h("th", {}, "Rol"), h("th", {}, "Durum"), h("th", {}, ""))),
         h("tbody", {}, rows)))].filter(Boolean));
+}
+
+// ── iş şablonları (UYAP'ta "İş Ata" penceresinde seçilir; model: "yapılacak iş.md") ──
+const TARAF = { borclu: "Borçlu", alacakli: "Alacaklı", herhangi: "Herhangi taraf" };
+const canEditTpl = (t) => typeof t.id === "number" && (isAdmin() || t.created_by === S.me.id);
+function templateForm(t, done) {
+  const title = h("input", { value: t ? t.title : "", maxlength: 200, placeholder: "ör. Haciz ihbarnamesi kontrol" });
+  const due = h("input", { type: "number", min: 0, max: 365, value: t && t.due_days != null ? t.due_days : "", placeholder: "Yok" });
+  const prio = h("select", {}, [1, 2, 0].map((p) => h("option", { value: p, selected: (t ? t.priority : 1) === p }, PRIO[p])));
+  const taraf = h("select", {}, h("option", { value: "" }, "Taraf yok"),
+    Object.entries(TARAF).map(([k, l]) => h("option", { value: k, selected: !!t && t.taraf === k }, l)));
+  const desc = h("textarea", { rows: 2, maxlength: 2000, placeholder: "Ne kontrol edilecek, ne yapılacak? (iş açılınca açıklamaya yazılır)" }, t ? t.description : "");
+  const save = act(async () => {
+    await api("POST", t ? `/is-listesi/api/sablonlar/${t.id}` : "/is-listesi/api/sablonlar", {
+      title: title.value, description: desc.value, due_days: due.value === "" ? null : Number(due.value),
+      priority: Number(prio.value), taraf: taraf.value || null });
+    toast(t ? "Şablon güncellendi." : "Şablon eklendi.", true); await done();
+  });
+  title.addEventListener("keydown", (e) => { if (e.key === "Enter") save(e); if (e.key === "Escape" && t) done(); });
+  const el = h("div", {},
+    h("div", { class: "form-grid" }, h("label", {}, "İş", title), h("label", {}, "Süre (gün)", due),
+      h("label", {}, "Öncelik", prio), h("label", {}, "Taraf", taraf)),
+    h("label", { class: "lbl", style: "margin-bottom:12px" }, "Açıklama", desc),
+    h("div", { class: "row" }, h("button", { type: "button", class: t ? "btn sm" : "btn", onclick: save }, t ? null : icon("plus"), t ? "Kaydet" : "Ekle"),
+      t ? h("button", { type: "button", class: "btn-ghost sm", onclick: () => done() }, "Vazgeç")
+        : h("span", { class: "small muted" }, "Süre: iş açılınca son tarih bugünden bu kadar gün sonra 17:00 olur. Taraf “Borçlu” ise dosyanın ilk borçlusu seçilir.")));
+  if (t) setTimeout(() => title.focus());
+  return el;
+}
+async function renderTemplates() {
+  const d = await api("GET", "/is-listesi/api/sablonlar");
+  if (S.view !== "sablonlar") return;
+  const q = h("input", { type: "search", placeholder: "Şablonlarda ara…", value: S.tq || "" });
+  const tbody = h("tbody");
+  const cells = (t) => [
+    h("td", {}, h("b", {}, t.title), t.description ? h("div", { class: "small muted" }, t.description) : null),
+    h("td", {}, t.due_days != null ? `${t.due_days} gün` : "—"),
+    h("td", {}, h("span", { class: "tag" + (t.priority === 2 ? " off" : "") }, PRIO[t.priority])),
+    h("td", {}, TARAF[t.taraf] || "—"),
+    h("td", { class: "small muted" }, typeof t.id === "number" ? t.created_by_name || "" : "Hazır")];
+  const draw = () => {
+    const k = (S.tq || "").toLocaleLowerCase("tr");
+    const rows = d.buro.filter((t) => !k || t.title.toLocaleLowerCase("tr").includes(k)).map((t) => {
+      const tr = h("tr", {}, cells(t), h("td", { style: "text-align:right" }, canEditTpl(t) ? h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { type: "button", class: "btn-ghost sm", onclick: () => tr.replaceChildren(h("td", { colspan: 6 }, templateForm(t, renderTemplates))) },
+          icon("edit"), "Düzenle"),
+        confirmBtn("Sil", async () => { await api("DELETE", `/is-listesi/api/sablonlar/${t.id}`); toast("Şablon silindi.", true); await renderTemplates(); },
+          "btn-ghost sm")) : null));
+      return tr;
+    });
+    tbody.replaceChildren(...(rows.length ? rows : [h("tr", {}, h("td", { colspan: 6, class: "muted" },
+      d.buro.length ? "Eşleşen şablon yok." : "Henüz büro şablonu yok. Yukarıdan ekleyin ya da UYAP'ta İş Ata penceresinde “Şablon olarak kaydet” deyin."))]));
+  };
+  q.addEventListener("input", () => { S.tq = q.value; draw(); });
+  draw();
+  const head = h("tr", {}, ["İş", "Süre", "Öncelik", "Taraf", "Ekleyen", ""].map((l) => h("th", {}, l)));
+  $("list").replaceChildren(
+    h("div", { class: "card" }, h("h3", {}, "Yeni şablon"), templateForm(null, renderTemplates)),
+    h("div", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
+      h("div", { class: "row", style: "justify-content:space-between;flex-wrap:wrap;padding:6px 6px 8px" },
+        h("b", {}, `Büro şablonları (${d.buro.length})`), h("label", { class: "search" }, icon("search"), q)),
+      h("table", {}, h("thead", {}, head), tbody)),
+    h("details", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
+      h("summary", { style: "cursor:pointer;padding:6px;font-weight:600" }, `Hazır şablonlar (${d.hazir.length}) — her büroda var, değiştirilemez`),
+      h("table", {}, h("thead", {}, head.cloneNode(true)), h("tbody", {}, d.hazir.map((t) => h("tr", {}, cells(t), h("td")))))));
 }
 
 // ── raporlar (yönetici) ──────────────────────────────────────────────────────────
@@ -2183,6 +2251,7 @@ function accountSheet() {
   dlg.replaceChildren(h("div", { class: "sheet-me" }, avatar(S.me.id, "lg"), h("div", {},
       h("div", { style: "font-weight:700" }, S.me.display_name), h("div", { class: "small muted" }, isAdmin() ? "Yönetici" : "Kullanıcı"))),
     item("bell", "Bildirimler", () => notifyDialog()),
+    item("copy", "İş şablonları", () => { dlg.close(); go("sablonlar"); }),
     S.me.account_username ? null : item("key", "Parolamı değiştir", () => { dlg.close(); passwordDialog(); }),
     item(dark ? "sun" : "moon", dark ? "Açık tema" : "Koyu tema", () => { $("btn-theme").click(); dlg.close(); }),
     h("form", { method: "post", action: "/is-listesi/logout", style: "margin:0" },
@@ -2191,8 +2260,10 @@ function accountSheet() {
   dlg.showModal();
 }
 
-// Bildirimden gelen bağlantı: /is-listesi#is-<id> → işi uygun görünümde aç.
+// Bildirimden gelen bağlantı: /is-listesi#is-<id> → işi uygun görünümde aç; #sablonlar → Şablonlar
+// (UYAP'taki İş Ata penceresinin "Şablonları yönet" bağlantısı).
 async function openFromLink(url) {
+  if (/#sablonlar$/.test(url || location.hash)) { history.replaceState(null, "", "/is-listesi"); go("sablonlar"); return; }
   const m = /#is-(\d+)$/.exec(url || location.hash);
   if (!m) return;
   history.replaceState(null, "", "/is-listesi");

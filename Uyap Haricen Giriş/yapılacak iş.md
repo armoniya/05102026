@@ -48,8 +48,16 @@ Alanlar:
 | `action` | Önerilen UYAP aksiyonu anahtarı (Aşama 3) | `talep:adres_arastirmasi` |
 
 Kullanıcı İş Ata penceresinde şablona tıklayınca başlık, açıklama, son tarih ve öncelik dolar;
-dilediği gibi değiştirip kaydeder. Formdaki değerler **"Şablon olarak kaydet"** ile büroya yeni
-şablon olarak eklenebilir.
+dilediği gibi değiştirip kaydeder. Formdaki değerler **"☆ Bu işi şablon olarak kaydet"** ile büroya
+yeni şablon olarak eklenebilir (bağlantı yalnız şablonu olmayan bir iş yazılınca görünür).
+
+**Pencere şişmez:** şablon sayısı kaç olursa olsun İş Ata penceresinde arama boşken en çok
+kullanılan 6 şablon, aramaya yazınca en iyi 8 eşleşme görünür; Enter ilkini seçer. Kullanım sayısı
+o bilgisayarda tutulur.
+
+**Yönetim İş Listesi'nde:** web'de **Şablonlar** sekmesi (pencerede "Şablonları yönet") büronun
+şablonlarını ekler, düzenler, siler; hazır şablonlar orada salt okunur listelenir. Düzenleme ve
+silme şablonu ekleyene ya da yöneticiye açıktır. Hazır şablonların adları büroya verilemez.
 
 ---
 

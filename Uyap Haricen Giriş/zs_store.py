@@ -1480,7 +1480,8 @@ class ZsStore:
                                       (office_of(user),)))
         return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": self._run(fn)}
 
-    def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None):
+    @staticmethod
+    def _template_fields(title, description, due_days, priority, taraf, action):
         title = " ".join((title or "").split())[:200]
         if not title:
             raise ZsError("Şablon adı yazın.")
@@ -1488,34 +1489,64 @@ class ZsStore:
             raise ZsError("Süre 0–365 gün olmalı.")
         if priority not in PRIORITIES:
             raise ZsError("Geçersiz öncelik.")
-        taraf = taraf if taraf in TEMPLATE_TARAF else None
-        action = (str(action).strip()[:100] or None) if action else None
+        return (title, (description or "").strip()[:2000], None if due_days is None else int(due_days), priority,
+                taraf if taraf in TEMPLATE_TARAF else None, (str(action).strip()[:100] or None) if action else None)
+
+    def _template_name_taken(self, cur, user, title, except_id=None):
+        # Hazır şablonların adları da dolu sayılır: İş Ata penceresinde aynı adlı iki şablon görünmesin.
+        # Karşılaştırma Python'da: SQLite LOWER() Türkçe harfleri (Ş/ş, İ/i) eşlemez.
+        def key(s):
+            return s.replace("İ", "i").replace("I", "i").lower().replace("ı", "i")
+        rows = self._q(cur, "SELECT title FROM zs_templates WHERE COALESCE(office_id, '') = ? AND id <> ?",
+                       (office_of(user), except_id or 0)).fetchall()
+        return key(title) in {key(t["title"]) for t in HAZIR_SABLONLAR} | {key(r[0]) for r in rows}
+
+    def _own_template(self, cur, user, template_id, verb):
+        t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ? AND COALESCE(office_id, '') = ?",
+                              (template_id, office_of(user))))
+        if not t:
+            raise ZsError("Şablon bulunamadı.")
+        if user["role"] != "admin" and t["created_by"] != user["id"]:
+            raise ZsError(f"Şablonu yalnız ekleyen ya da yönetici {verb}.")
+        return t
+
+    def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None):
+        title, description, due_days, priority, taraf, action = self._template_fields(
+            title, description, due_days, priority, taraf, action)
 
         def fn(cur):
             n = self._q(cur, "SELECT COUNT(*) FROM zs_templates WHERE COALESCE(office_id, '') = ?",
                         (office_of(user),)).fetchone()[0]
             if n >= 200:
                 raise ZsError("Bir büroda en çok 200 şablon olabilir.")
-            if self._q(cur, "SELECT 1 FROM zs_templates WHERE COALESCE(office_id, '') = ? AND LOWER(title) = LOWER(?)",
-                       (office_of(user), title)).fetchone():
+            if self._template_name_taken(cur, user, title):
                 raise ZsError("Bu adla bir şablon zaten var.")
             tid = self._insert(cur, "INSERT INTO zs_templates (office_id, title, description, due_days, priority, "
                                     "taraf, action, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                               (office_of(user) or None, title, (description or "").strip()[:2000],
-                                None if due_days is None else int(due_days), priority, taraf, action,
+                               (office_of(user) or None, title, description, due_days, priority, taraf, action,
                                 user["id"], _now()))
             return self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,)))
+        return self._run(fn)
+
+    def update_template(self, user, template_id, title, description="", due_days=None, priority=1, taraf=None,
+                        action=None):
+        """Şablonu ekleyen ya da büro yöneticisi düzenler (İş Listesi → Şablonlar)."""
+        title, description, due_days, priority, taraf, action = self._template_fields(
+            title, description, due_days, priority, taraf, action)
+
+        def fn(cur):
+            self._own_template(cur, user, template_id, "düzenleyebilir")
+            if self._template_name_taken(cur, user, title, except_id=template_id):
+                raise ZsError("Bu adla bir şablon zaten var.")
+            self._q(cur, "UPDATE zs_templates SET title = ?, description = ?, due_days = ?, priority = ?, taraf = ?, "
+                         "action = ? WHERE id = ?", (title, description, due_days, priority, taraf, action, template_id))
+            return self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (template_id,)))
         return self._run(fn)
 
     def delete_template(self, user, template_id):
         """Şablonu ekleyen ya da büro yöneticisi siler."""
         def fn(cur):
-            t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ? AND COALESCE(office_id, '') = ?",
-                                  (template_id, office_of(user))))
-            if not t:
-                raise ZsError("Şablon bulunamadı.")
-            if user["role"] != "admin" and t["created_by"] != user["id"]:
-                raise ZsError("Şablonu yalnız ekleyen ya da yönetici silebilir.")
+            t = self._own_template(cur, user, template_id, "silebilir")
             self._q(cur, "DELETE FROM zs_templates WHERE id = ?", (template_id,))
             return t
         return self._run(fn)

@@ -255,6 +255,7 @@ _ACTIONS = {
     ("POST", "/api/bildirim/deneme"): "bildirim_deneme",
     ("POST", "/api/sso-kod"): "web_gecis_kodu",
     ("POST", "/api/sablonlar"): "sablon_ekle",
+    ("POST", "/api/sablonlar/{id}"): "sablon_duzenle",
     ("DELETE", "/api/sablonlar/{id}"): "sablon_sil",
 }
 _SECRET_KEYS = {"password", "old", "new", "pw", "parola", "sifre"}
@@ -1015,6 +1016,17 @@ async def api_template_create(request, user):
 
 
 @_api()
+async def api_template_update(request, user):
+    """İş Listesi → Şablonlar: ekleyen ya da yönetici düzenler."""
+    d = await _body(request)
+    pr = _opt_int(d.get("priority"))
+    t = await _db(C.store.update_template, user, int(request.match_info["id"]), d.get("title"),
+                  d.get("description") or "", _opt_int(d.get("due_days")), 1 if pr is None else pr,
+                  d.get("taraf"), d.get("action"))
+    return _json({"ok": True, "template": t})
+
+
+@_api()
 async def api_template_delete(request, user):
     await _db(C.store.delete_template, user, int(request.match_info["id"]))
     return _json({"ok": True})
@@ -1504,6 +1516,8 @@ async def sso_get(request):
     # ?is=<id>: UYAP'taki iş panelinden tıklanan iş doğrudan açılsın.
     task = request.query.get("is") or ""
     target = f"{NEW}#is-{int(task)}" if task.isdigit() and len(task) < 12 else NEW
+    if request.query.get("sekme") == "sablonlar":       # İş Ata penceresinden "Şablonları yönet"
+        target = f"{NEW}#sablonlar"
     page = (f"<!doctype html><html lang='tr'><head><meta charset='utf-8'>"
             f"<meta http-equiv='refresh' content='0;url={target}'><title>İş Listesi</title></head>"
             f"<body><a href='{target}'>İş Listesi'ni aç</a></body></html>")
@@ -1692,6 +1706,7 @@ def register(app, session_secret, guard, client_ip, store=None, accounts_store=N
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/durum", api_task_transition)
         r.add_get(f"{P}/api/sablonlar", api_templates)
         r.add_post(f"{P}/api/sablonlar", api_template_create)
+        r.add_post(f"{P}/api/sablonlar/{{id:\\d+}}", api_template_update)
         r.add_delete(f"{P}/api/sablonlar/{{id:\\d+}}", api_template_delete)
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/devret", api_task_transfer)
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/gorunur", api_task_publish)

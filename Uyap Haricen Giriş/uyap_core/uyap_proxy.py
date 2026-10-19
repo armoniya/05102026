@@ -1879,8 +1879,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '#uyap-isata .ia-cip:hover{background:rgba(255,255,255,0.08)}' +
             '#uyap-isata .ia-cip.buro{border-color:rgba(167,139,250,0.65)}' +
             '#uyap-isata .ia-cip.sec{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
-            '#uyap-isata .ia-sil{margin-left:6px;opacity:.6}' +
-            '#uyap-isata .ia-sil:hover,#uyap-isata .ia-sil.emin{opacity:1;color:#fca5a5}' +
+            '#uyap-isata .ia-not{margin-top:4px;font-size:11px;color:#9ca3af}' +
+            '#uyap-isata .ia-link{padding:0;border:0;background:none;color:#c4b5fd;cursor:pointer;font-family:inherit;font-size:11px;text-decoration:underline}' +
+            '#uyap-isata .ia-link:hover{color:#ddd6fe}' +
             // UYAP ana sayfası "Bildirimler": bildirimin dosyasına iş.
             '.uyap-bildirim-is{margin-left:8px;padding:1px 9px;border:1px solid #a78bfa;border-radius:999px;background:#ede9fe;color:#5b21b6;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap}' +
             '.uyap-bildirim-is:hover{background:#ddd6fe}';
@@ -1964,6 +1965,25 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
         return sablonlar;
     }
+    // Şablon yönetimi İş Listesi'nde (Şablonlar sekmesi); dönünce liste tazelensin diye saklanan silinir.
+    function sablonlariYonet() {
+        const host = location.hostname;
+        const yerel = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+        sablonZamani = 0;
+        window.open(yerel ? EP + '/ac?sekme=sablonlar' : '/is-listesi/#sablonlar', '_blank', 'noopener');
+    }
+    // Hangi şablonu ne sık kullandığınız (bu bilgisayarda): pencerede en çok kullanılanlar önde gelir.
+    const SAYAC_ANAHTARI = 'cokluuyapIsSablonSayac';
+    function sablonSayaci() {
+        try { return JSON.parse(localStorage.getItem(SAYAC_ANAHTARI) || '{}') || {}; } catch (e) { return {}; }
+    }
+    function sablonKullanildi(id) {
+        try {
+            const s = sablonSayaci();
+            s[id] = (s[id] || 0) + 1;
+            localStorage.setItem(SAYAC_ANAHTARI, JSON.stringify(s));
+        } catch (e) {}
+    }
     function kucukHarf(s) { return String(s || '').toLocaleLowerCase('tr-TR').replace(/\s+/g, ' ').trim(); }
 
     // ── Dosyanın tarafları (UYAP "Taraf Bilgileri" ucu): borçlular önce ──
@@ -2033,12 +2053,16 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const f = el('div', 'margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12);');
         f.appendChild(el('div', 'font-weight:700;', 'Yeni iş'));
         // Şablonlar: tıklayınca iş adı, açıklama, süre, öncelik ve (gerekirse) taraf dolar.
-        const sablonAra = el('input'); sablonAra.placeholder = 'Şablonlarda ara…'; sablonAra.maxLength = 100;
-        const sablonYeri = el('div', 'max-height:110px;overflow:auto;margin-top:2px;');
+        const sablonAra = el('input'); sablonAra.placeholder = 'Şablon ara… (Enter: ilkini seç)'; sablonAra.maxLength = 100;
+        const sablonYeri = el('div', '');
+        const sablonNot = el('div', '');
+        sablonNot.className = 'ia-not';
         const sablonKutu = el('div', '');
-        let sablonKaydet = null;                    // "Şablon olarak kaydet" (aşağıda kurulur)
+        let sablonKaydet = null;                    // "Bu işi şablon olarak kaydet" (aşağıda kurulur)
+        let sablonYapGoster = function() {};
         sablonKutu.appendChild(alan('Şablon', sablonAra));
         sablonKutu.appendChild(sablonYeri);
+        sablonKutu.appendChild(sablonNot);
         f.appendChild(sablonKutu);
         // Taraf: iş dosyadaki bir kişiye yapılır (birden çok borçlu olabilir); başlığın başına adı gelir.
         const taraf = el('select');
@@ -2126,13 +2150,25 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             onizle();
             baslik.focus();
         }
+        // Şablon sayısı artınca pencere şişmesin: arama boşken en çok kullandıklarınızdan 6, yazınca
+        // en iyi 8 eşleşme görünür. Tüm liste, düzenleme ve silme İş Listesi → Şablonlar'da.
+        let gorunenler = [];
         function sablonlariCiz() {
             sablonYeri.innerHTML = '';
+            sablonNot.innerHTML = '';
             if (!sablonlar) return;
-            const q = kucukHarf(sablonAra.value);
-            const uygun = function(s) { return !q || kucukHarf(s.title).indexOf(q) >= 0; };
-            const benimMi = function(s) { return ben && (ben.me.role === 'admin' || s.created_by === ben.me.id); };
-            sablonlar.hazir.filter(uygun).concat(sablonlar.buro.filter(uygun)).forEach(function(s) {
+            const q = kucukHarf(sablonAra.value.trim());
+            const sayac = sablonSayaci();
+            const uygun = sablonlar.hazir.concat(sablonlar.buro).filter(function(s) { return !q || kucukHarf(s.title).indexOf(q) >= 0; });
+            // Önce adı aramayla başlayanlar, sonra çok kullanılanlar; eşitlikte sunucunun sırası.
+            uygun.sort(function(a, b) {
+                const ba = q && kucukHarf(a.title).indexOf(q) === 0 ? 0 : 1, bb = q && kucukHarf(b.title).indexOf(q) === 0 ? 0 : 1;
+                return ba - bb || (sayac[b.id] || 0) - (sayac[a.id] || 0);
+            });
+            gorunenler = uygun.slice(0, q ? 8 : 6);
+            const secili = seciliSablon && uygun.find(function(s) { return s.id === seciliSablon.id; });
+            if (secili && gorunenler.indexOf(secili) < 0) gorunenler.unshift(secili);   // seçili şablon hep görünür
+            gorunenler.forEach(function(s) {
                 const buro = typeof s.id === 'number';
                 const b = el('button', null, s.title);
                 b.type = 'button';
@@ -2141,32 +2177,24 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                            buro ? 'Büro şablonu' + (s.created_by_name ? ' · ' + s.created_by_name : '') : 'Hazır şablon']
                     .filter(Boolean).join('\n');
                 b.addEventListener('click', function(ev) { ev.stopPropagation(); sablonUygula(s); });
-                if (buro && benimMi(s)) {
-                    // Silme iki tıklamalı: × → "sil?" → sil (tarayıcı onay penceresi açılmaz).
-                    const x = el('span', null, '×');
-                    x.className = 'ia-sil';
-                    x.title = 'Şablonu sil';
-                    x.addEventListener('click', async function(ev) {
-                        ev.stopPropagation();
-                        if (!x.classList.contains('emin')) {
-                            x.classList.add('emin'); x.textContent = 'sil?';
-                            setTimeout(function() { x.classList.remove('emin'); x.textContent = '×'; }, 3000);
-                            return;
-                        }
-                        try {
-                            await api('/sablonlar/' + s.id, { method: 'DELETE' });
-                            if (seciliSablon && seciliSablon.id === s.id) seciliSablon = null;
-                            await sablonlariGetir(true);
-                            sablonlariCiz();
-                        } catch (e) { mesajEl.textContent = 'Şablon silinemedi: ' + e.message; }
-                    });
-                    b.appendChild(x);
-                }
                 sablonYeri.appendChild(b);
             });
-            if (!sablonYeri.children.length) sablonYeri.appendChild(el('div', 'color:#9ca3af;margin-top:4px;', 'Eşleşen şablon yok.'));
+            const kalan = uygun.length - gorunenler.length;
+            sablonNot.appendChild(document.createTextNode(
+                !uygun.length ? 'Eşleşen şablon yok. ' : kalan > 0 ? '+' + kalan + ' şablon daha — aramaya yazın. ' : ''));
+            const yonet = el('button', null, 'Şablonları yönet');
+            yonet.type = 'button';
+            yonet.className = 'ia-link';
+            yonet.title = "İş Listesi'nde Şablonlar sekmesi: ekle, düzenle, sil";
+            yonet.addEventListener('click', function(ev) { ev.stopPropagation(); sablonlariYonet(); });
+            sablonNot.appendChild(yonet);
+            sablonYapGoster();
         }
         sablonAra.addEventListener('input', sablonlariCiz);
+        sablonAra.addEventListener('keydown', function(ev) {
+            if (ev.key === 'Enter' && gorunenler.length) { ev.preventDefault(); sablonUygula(gorunenler[0]); }
+            if (ev.key === 'Escape' && sablonAra.value) { ev.stopPropagation(); sablonAra.value = ''; sablonlariCiz(); }
+        });
         sablonlariGetir().then(function() {
             sablonlariCiz();
             if (on.sablon) {
@@ -2219,6 +2247,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                              evrak_adi: belge.value ? belge.options[belge.selectedIndex].textContent : null,
                              taraf_adi: tarafSecili ? adDuzelt(tarafSecili.adi) : null,
                              uyap: kartAlanlari(d) } }) });
+                if (seciliSablon) sablonKullanildi(seciliSablon.id);
                 baslik.value = ''; aciklama.value = ''; sureSec(null);
                 seciliSablon = null; sonSablonAciklamasi = ''; sablonlariCiz(); onizle();
                 mesajEl.style.color = '#86efac';
@@ -2232,7 +2261,23 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             } finally { b.disabled = false; }
         }));
         // Formdaki iş adı / açıklama / süre / öncelik büroya yeni şablon olur (taraf adı şablona girmez).
-        sablonKaydet = f.appendChild(dugme('Şablon olarak kaydet', 'rgba(124,58,237,0.85)', async function(b) {
+        // Büyük düğme değil, "İş" alanının altında küçük bağlantı: yalnız şablonu olmayan bir iş yazılınca görünür.
+        sablonKaydet = el('button', null, '☆ Bu işi şablon olarak kaydet');
+        sablonKaydet.type = 'button';
+        sablonKaydet.className = 'ia-link';
+        sablonKaydet.style.display = 'none';
+        sablonKaydet.title = 'Büronun şablonlarına eklenir; düzenlemek için İş Listesi → Şablonlar';
+        f.insertBefore(sablonKaydet, onizleme.nextSibling);
+        sablonYapGoster = function() {          // şablon listesi her çizildiğinde de çağrılır
+            const ad = kucukHarf(baslik.value);
+            const var_ = sablonlar && sablonlar.hazir.concat(sablonlar.buro).some(function(s) { return kucukHarf(s.title) === ad; });
+            sablonKaydet.style.display = ad && sablonlar && !var_ && sablonKutu.style.display !== 'none' ? '' : 'none';
+        };
+        baslik.addEventListener('input', sablonYapGoster);
+        sablonYapGoster();
+        sablonKaydet.addEventListener('click', async function(ev) {
+            ev.stopPropagation();
+            const b = sablonKaydet;
             const ad = baslik.value.trim();
             if (!ad) { mesajEl.textContent = 'Şablon için "İş" alanını doldurun.'; baslik.focus(); return; }
             b.disabled = true;
@@ -2253,8 +2298,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 mesajEl.style.color = '#fca5a5';
                 mesajEl.textContent = 'Şablon kaydedilemedi: ' + e.message;
             } finally { b.disabled = false; }
-        }));
-        if (sablonKutu.style.display === 'none') sablonKaydet.style.display = 'none';
+        });
         f.appendChild(dugme('İş Listesi\'nde aç', 'rgba(255,255,255,0.15)', ac));
         f.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
         setTimeout(function() { baslik.focus(); }, 0);

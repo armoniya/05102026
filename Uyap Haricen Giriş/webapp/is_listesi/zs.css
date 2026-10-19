@@ -253,6 +253,7 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
   .nav button{flex-direction:column;gap:3px;width:auto;flex:1;padding:6px 2px;font-size:11px;border-radius:8px}
   .nav button svg.i{width:20px;height:20px}
   .nav .long{display:none} .nav .short{display:inline}
+  .nav .wide-only{display:none} /* Şablonlar telefonda hesap menüsünde */
   .nav .cnt{position:absolute;top:2px;left:calc(50% + 6px);margin:0;padding:0 5px;line-height:16px;min-width:16px;font-size:10px}
   .nav .dot{left:calc(50% - 14px);top:4px}
   .side-foot{margin:0 0 0 auto;border:0;padding:0;display:flex;align-items:center;gap:6px}

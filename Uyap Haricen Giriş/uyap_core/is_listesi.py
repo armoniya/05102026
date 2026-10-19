@@ -16,8 +16,10 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
     POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla, reason}  → onaya gönder vb.
     GET  /__uyap_kisi__/is-listesi/sablonlar         → {hazir, buro} iş şablonları
     POST /__uyap_kisi__/is-listesi/sablonlar         {title, description, due_days, priority, taraf}
+    POST /__uyap_kisi__/is-listesi/sablonlar/<id>    {title, description, due_days, priority, taraf}  → düzenle
     DELETE /__uyap_kisi__/is-listesi/sablonlar/<id>
-    GET  /__uyap_kisi__/is-listesi/ac[?is=<id>]      → 303 → cokluuyap.com'da şifresiz oturum (tek kullanımlık kod)
+    GET  /__uyap_kisi__/is-listesi/ac[?is=<id> | ?sekme=sablonlar]  → 303 → cokluuyap.com'da şifresiz oturum
+                                                     (tek kullanımlık kod)
 
 Kimlik uyap_app girişinde configure() ile verilir, çıkışta clear() ile silinir. Jeton bellekte
 tutulur, süresi dolmadan yenilenir; sunucu 401 dönerse bir kez yeniden alınır.
@@ -116,6 +118,10 @@ def _obj(body):
     return d if isinstance(d, dict) else None
 
 
+def _sablon_alanlari(d):
+    return {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf") if k in d}
+
+
 def _safe_json(r):
     try:
         d = r.json()
@@ -179,9 +185,13 @@ async def handle(method, path, query, body):
             d = _obj(body)
             if d is None:
                 return _err(400, "Geçersiz istek verisi.")
-            keep = {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf") if k in d}
-            return _json(*await _call("POST", "sablonlar", body=keep))
+            return _json(*await _call("POST", "sablonlar", body=_sablon_alanlari(d)))
         m = re.fullmatch(r"sablonlar/(\d{1,12})", sub)
+        if m and method == "POST":
+            d = _obj(body)
+            if d is None:
+                return _err(400, "Geçersiz istek verisi.")
+            return _json(*await _call("POST", f"sablonlar/{m.group(1)}", body=_sablon_alanlari(d)))
         if m and method == "DELETE":
             return _json(*await _call("DELETE", f"sablonlar/{m.group(1)}"))
         # UYAP'tan çıkmadan işi ilerletme: onaya gönder (özel işte tamamla) / başla. Onaylama ve
@@ -198,8 +208,11 @@ async def handle(method, path, query, body):
             if status != 200 or not d.get("url"):
                 return _err(status if status >= 400 else 502, d.get("error") or "İş Listesi açılamadı.")
             from urllib.parse import parse_qs
-            task = (parse_qs(query or "").get("is") or [""])[0]
+            q = parse_qs(query or "")
+            task = (q.get("is") or [""])[0]
             extra = f"&is={task}" if task.isdigit() and len(task) < 12 else ""
+            if (q.get("sekme") or [""])[0] == "sablonlar":
+                extra = "&sekme=sablonlar"
             return 303, {"Location": _cfg["base"] + d["url"] + extra, "Cache-Control": "no-store",
                          "Referrer-Policy": "no-referrer"}, b""
     except _Fail as e:
