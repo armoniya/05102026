@@ -3258,7 +3258,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     // ── Sağ tık menüsü ──
     // UYAP'ta tarayıcının uzun menüsü yerine sade CokluUyap menüsü — dosya türüne göre (DOSYA_TURLERI).
     // Menüsü tanımlı olmayan yerde, yazı alanlarında (yapıştır, yazım denetimi), kendi pencerelerimizde
-    // ve Shift / Ctrl + sağ tıkta tarayıcının menüsü açılır.
+    // seçili metin varken ve Shift / Ctrl + sağ tıkta tarayıcının menüsü açılır.
     // Kapatmak için: localStorage cokluuyapSagMenu = 'kapali'.
     let sagMenu = null, sagMenuSecili = -1;
     function sagMenuKapat() {
@@ -3380,6 +3380,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             sagMenuKapat();
             const h = ev.target && ev.target.closest ? ev.target : null;
             if (ev.shiftKey || ev.ctrlKey || !h || sagMenuKapali()) return;
+            // Seçili metin varsa tarayıcının menüsü (Kopyala, Google'da ara, Çevir …) kalsın.
+            if (String(window.getSelection ? window.getSelection() : '').trim()) return;
             if (h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')) return;
             if (ort && ort.contains(h)) return;
             let gruplar;

@@ -151,7 +151,8 @@ UYAP'ta **icra dosyası kartında** sağ tık, tarayıcının uzun menüsü yeri
 açar (`uyap_proxy.py`, "Sağ tık menüsü"). Şimdilik tek madde var: **Dosya bilgilerini kopyala**.
 "İzmir 15. İcra Dairesi 2025/123" gibi birim adı ve dosya numarası tek tıkla panoya kopyalanır;
 menünün başlığında da kopyalanacak metin görünür. Başka her yerde (diğer dosya türleri, kart dışı,
-yazı alanları) ve **Shift / Ctrl + sağ tık**ta tarayıcının menüsü açılır.
+yazı alanları), **metin seçiliyken** (Kopyala, Google'da ara, Çevir) ve **Shift / Ctrl + sağ tık**ta
+tarayıcının menüsü açılır.
 
 **Dosya türüne göre menü:** `DOSYA_TURLERI` (arabuluculuk, icra, ceza, idare, hukuk; eşleşmezse diğer)
 dosya türü açıklamasından, yoksa birim adından türü bulur. Her türün `menu(c)` işlevi kendi maddelerini
