@@ -42,7 +42,7 @@ import zs_push
 import zs_rapor
 import zs_bildirim
 import zs_tg_grup
-from zs_store import ZsStore, ZsError, office_of
+from zs_store import ZsStore, ZsError, office_of, KEEP, HAZIR_SURECLER
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -260,6 +260,10 @@ _ACTIONS = {
     ("POST", "/api/sablonlar"): "sablon_ekle",
     ("POST", "/api/sablonlar/{id}"): "sablon_duzenle",
     ("DELETE", "/api/sablonlar/{id}"): "sablon_sil",
+    ("POST", "/api/etiketler"): "etiket_ekle",
+    ("POST", "/api/etiketler/{id}"): "etiket_duzenle",
+    ("DELETE", "/api/etiketler/{id}"): "etiket_sil",
+    ("POST", "/api/tasks/{id}/etiketler"): "is_etiket",
 }
 _SECRET_KEYS = {"password", "old", "new", "pw", "parola", "sifre"}
 
@@ -781,7 +785,8 @@ async def api_task_create(request, user):
     private = bool(d.get("private")) and not parent_id
     t = await _db(C.store.create_task, user, d.get("title"), parent_id, d.get("description") or "",
                   assignee, _opt_int(d.get("due_at")), private=private,
-                  priority=1 if pr is None else pr, dosya=d.get("dosya"))
+                  priority=1 if pr is None else pr, dosya=d.get("dosya"), sablon=d.get("sablon"),
+                  etiketler=d.get("etiketler"))
     # Yönetici işi açarken ek atanan / onay yetkilisi de seçebilir.
     if user["role"] == "admin" and not parent_id and not private:
         for role, key in (("assignee", "assignees"), ("approver", "approvers")):
@@ -804,6 +809,8 @@ async def api_task_update(request, user):
             fields[k] = _opt_int(d[k])
     if "dosya" in d:
         fields["dosya"] = d["dosya"]
+    if "asama" in d:
+        fields["asama"] = d["asama"]
     if "done" in d:
         fields["done"] = bool(d["done"])
     if d.get("move") in (-1, 1):
@@ -839,8 +846,14 @@ async def api_task_delete(request, user):
 async def api_task_transition(request, user):
     d = await _body(request)
     t, _ = await _visible_task(user, int(request.match_info["id"]))
-    out = await _db(C.store.transition, user, t["id"], d.get("action") or "", d.get("reason") or "")
-    return _json({"ok": True, "task": out})
+    sonuc = d.get("sonuc") or None
+    sonraki = d.get("sonraki")
+    if sonraki is not False and not isinstance(sonraki, dict):
+        sonraki = None
+    out, nxt = await _db(C.store.transition, user, t["id"], d.get("action") or "", d.get("reason") or "",
+                         sonuc, sonraki)
+    # sonraki yalnız kontrol sonucu verildiyse döner: eski istemci (UYAP penceresi) yokluğunda kendisi açar.
+    return _json(dict({"ok": True, "task": out}, **({"sonraki": nxt} if sonuc else {})))
 
 
 @_api(admin=True)
@@ -1025,7 +1038,7 @@ async def api_template_create(request, user):
     pr = _opt_int(d.get("priority"))
     t = await _db(C.store.create_template, user, d.get("title"), d.get("description") or "",
                   _opt_int(d.get("due_days")), 1 if pr is None else pr, d.get("taraf"), d.get("action"),
-                  d.get("kontrol"), d.get("sonuclar"))
+                  d.get("kontrol"), d.get("sonuclar"), d.get("asama"), d.get("etiketler"))
     return _json({"ok": True, "template": t})
 
 
@@ -1036,7 +1049,8 @@ async def api_template_update(request, user):
     pr = _opt_int(d.get("priority"))
     t = await _db(C.store.update_template, user, int(request.match_info["id"]), d.get("title"),
                   d.get("description") or "", _opt_int(d.get("due_days")), 1 if pr is None else pr,
-                  d.get("taraf"), d.get("action"), d.get("kontrol"), d.get("sonuclar"))
+                  d.get("taraf"), d.get("action"), d.get("kontrol"), d.get("sonuclar"),
+                  d["asama"] if "asama" in d else KEEP, d["etiketler"] if "etiketler" in d else KEEP)
     return _json({"ok": True, "template": t})
 
 
@@ -1044,6 +1058,51 @@ async def api_template_update(request, user):
 async def api_template_delete(request, user):
     await _db(C.store.delete_template, user, int(request.match_info["id"]))
     return _json({"ok": True})
+
+
+# ── API: süreçler ve etiketler (hazırlar kodda; özel etiketler kişisel ya da büroya açık) ──
+@_api()
+async def api_processes(request, user):
+    return _json({"ok": True, "surecler": HAZIR_SURECLER})
+
+
+@_api()
+async def api_tags(request, user):
+    return _json(dict(await _db(C.store.list_tags, user), ok=True))
+
+
+@_api()
+async def api_tag_create(request, user):
+    d = await _body(request)
+    t = await _db(C.store.create_tag, user, d.get("name"), d.get("color"), bool(d.get("kisisel")), d.get("parent"))
+    return _json({"ok": True, "tag": t})
+
+
+@_api()
+async def api_tag_update(request, user):
+    d = await _body(request)
+    t = await _db(C.store.update_tag, user, int(request.match_info["id"]), d.get("name"), d.get("color"),
+                  d["parent"] if "parent" in d else KEEP)
+    return _json({"ok": True, "tag": t})
+
+
+@_api()
+async def api_tag_delete(request, user):
+    await _db(C.store.delete_tag, user, int(request.match_info["id"]))
+    return _json({"ok": True})
+
+
+@_api()
+async def api_task_tags(request, user):
+    """{add: [...], remove: [...]} — kişisel etiketi işi gören herkes; büro / hazır etiketi atanan,
+    açan ya da yönetici takar."""
+    d = await _body(request)
+    t, root = await _visible_task(user, int(request.match_info["id"]))
+    if t["parent_id"]:
+        raise ZsError("Etiket yalnız ana işe eklenir.")
+    can_shared = user["role"] == "admin" or user["id"] in root["assignees"] or root["created_by"] == user["id"]
+    tags = await _db(C.store.set_task_tags, user, t["id"], d.get("add") or [], d.get("remove") or [], can_shared)
+    return _json({"ok": True, "tags": tags})
 
 
 # ── API: raporlar ────────────────────────────────────────────────────────────────────
@@ -1723,6 +1782,12 @@ def register(app, session_secret, guard, client_ip, store=None, accounts_store=N
         r.add_post(f"{P}/api/sablonlar", api_template_create)
         r.add_post(f"{P}/api/sablonlar/{{id:\\d+}}", api_template_update)
         r.add_delete(f"{P}/api/sablonlar/{{id:\\d+}}", api_template_delete)
+        r.add_get(f"{P}/api/surecler", api_processes)
+        r.add_get(f"{P}/api/etiketler", api_tags)
+        r.add_post(f"{P}/api/etiketler", api_tag_create)
+        r.add_post(f"{P}/api/etiketler/{{id:\\d+}}", api_tag_update)
+        r.add_delete(f"{P}/api/etiketler/{{id:\\d+}}", api_tag_delete)
+        r.add_post(f"{P}/api/tasks/{{id:\\d+}}/etiketler", api_task_tags)
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/devret", api_task_transfer)
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/gorunur", api_task_publish)
         r.add_post(f"{P}/api/tasks/{{id:\\d+}}/kisiler", api_member_add)

@@ -12,8 +12,12 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
     GET  /__uyap_kisi__/is-listesi/me                → {me, people, office}
     GET  /__uyap_kisi__/is-listesi/tasks?birim_id=…&dosya_no=…[&dosya_id=…]  → bu dosyaya bağlı işler
     GET  /__uyap_kisi__/is-listesi/tasks?filtre=…    → sağdaki iş paneli: benim | onay | tumu
-    POST /__uyap_kisi__/is-listesi/tasks             {title, description, assignee_id, due_at, priority, dosya}
-    POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla|onayla|reddet, reason}
+    POST /__uyap_kisi__/is-listesi/tasks             {title, description, assignee_id, due_at, priority, dosya,
+                                                      sablon, etiketler}  → süreç/aşama şablondan
+    GET  /__uyap_kisi__/is-listesi/surecler          → hazır süreçler (aşamalarıyla)
+    GET  /__uyap_kisi__/is-listesi/etiketler         → {hazir, buro, kisisel}
+    POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla|onayla|reddet, reason, sonuc?, sonraki?}
+                                                     (sonuc verilince sunucu sonraki aşamanın işini açar)
     POST /__uyap_kisi__/is-listesi/tasks/<id>/ek-sure {new_due, reason}  → "Ertesi güne aktar" (yönetici onaylar)
     POST /__uyap_kisi__/is-listesi/ek-sure/<id>/karar {approve, note}  → aktarma talebini kabul / ret
     GET  /__uyap_kisi__/is-listesi/sablonlar         → {hazir, buro} iş şablonları
@@ -197,7 +201,8 @@ def _obj(body):
 
 
 def _sablon_alanlari(d):
-    return {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf", "kontrol", "sonuclar") if k in d}
+    return {k: d[k] for k in ("title", "description", "due_days", "priority", "taraf", "kontrol", "sonuclar",
+                              "asama", "etiketler") if k in d}
 
 
 def _safe_json(r):
@@ -254,11 +259,15 @@ async def handle(method, path, query, body):
             d = _obj(body)
             if d is None:
                 return _err(400, "Geçersiz istek verisi.")
-            keep = {k: d[k] for k in ("title", "description", "assignee_id", "due_at", "priority", "dosya") if k in d}
+            keep = {k: d[k] for k in ("title", "description", "assignee_id", "due_at", "priority", "dosya", "sablon",
+                                      "etiketler") if k in d}
             return _json(*await _call("POST", "tasks", body=keep))
         # İş şablonları (hazır + büro): İş Ata penceresi listeler, "Şablon olarak kaydet" ekler.
         if sub == "sablonlar" and method == "GET":
             return _json(*await _call("GET", "sablonlar"))
+        # Süreçler (hazır, kodda) ve etiketler (hazır + büro + kişisel): İş Ata penceresi gösterir.
+        if sub in ("surecler", "etiketler") and method == "GET":
+            return _json(*await _call("GET", sub))
         if sub == "sablonlar" and method == "POST":
             d = _obj(body)
             if d is None:
@@ -280,8 +289,16 @@ async def handle(method, path, query, body):
             d = _obj(body)
             if d is None or d.get("action") not in ("gonder", "basla", "tamamla", "onayla", "reddet"):
                 return _err(400, "Geçersiz işlem.")
-            return _json(*await _call("POST", f"tasks/{m.group(1)}/durum",
-                                      body={"action": d["action"], "reason": str(d.get("reason") or "")[:2000]}))
+            body = {"action": d["action"], "reason": str(d.get("reason") or "")[:2000]}
+            # Kontrol sonucu + sonraki iş: sunucu süreçte sıradaki aşamanın işini açar.
+            if d.get("sonuc") in ("olumlu", "olumsuz", "bekliyor"):
+                body["sonuc"] = d["sonuc"]
+                s = d.get("sonraki")
+                if s is False:
+                    body["sonraki"] = False
+                elif isinstance(s, dict):
+                    body["sonraki"] = {"baslik": str(s.get("baslik") or "")[:200], "gun": s.get("gun")}
+            return _json(*await _call("POST", f"tasks/{m.group(1)}/durum", body=body))
         # "Ertesi güne aktar": son tarihi ileri alma talebi (gerekçe zorunlu); yönetici / onay yetkilisi
         # yan panelden ya da İş Listesi'nde kabul eder veya reddeder (ek-sure/<id>/karar).
         m = re.fullmatch(r"tasks/(\d{1,12})/ek-sure", sub)

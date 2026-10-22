@@ -3,7 +3,11 @@
 
 const S = { me: null, people: {}, peopleList: [], uploads: false, maxMb: 25,
   view: "takvim", tasks: [], mine: [], onayList: null, selId: null, detail: null, expanded: new Set(),
-  q: "", f: "aktif", sort: "tarih", composer: false, tab: "zaman", rejectFor: null, order: [] };
+  q: "", f: "aktif", sort: "tarih", composer: false, tab: "zaman", rejectFor: null, order: [],
+  // Süzgeçler (fd: dosya türü, fg: süreç / grup etiketi, fa: aşama, ft: hepsi bulunacak etiketler; pa: Süreçler
+  // görünümünde "şu an bu aşamada bekleyenler") ve tanımlar.
+  fd: "", fg: "", fa: "", ft: [], pa: "", surecler: [], sablonlar: [],
+  tagDefs: { hazir: [], buro: [], kisisel: [], renkler: [] }, tagMap: {} };
 
 // "Onay bekliyor" her yerde aynı ad: etiket, süzgeç, menü.
 const STATUS = { acik: "Açık", devam: "Devam ediyor", onayda: "Onay bekliyor", onaylandi: "Onaylandı", tamamlandi: "Tamamlandı" };
@@ -12,7 +16,7 @@ const EVENTS = { created: "oluşturdu", assigned: "atadı", edited: "düzenledi"
   subtask_deleted: "alt işi sildi", submitted: "onaya gönderdi", approved: "onayladı", rejected: "reddetti",
   reopened: "yeniden açtı", status: "işi başlattı", note: "not ekledi", file: "belge ekledi",
   file_deleted: "belge sildi", deleted: "sildi", transferred: "işi devretti", published: "işi görünür yaptı",
-  completed: "işi tamamladı" };
+  completed: "işi tamamladı", tags: "etiketleri değiştirdi" };
 // [uzun ad, kısa ad (telefon), ikon, sayfa başlığı, alt başlık]
 const VIEWS = {
   takvim: ["Takvim", "Takvim", "cal", "Takvim", ""],
@@ -21,8 +25,9 @@ const VIEWS = {
   ozel: ["Özel işlerim", "Özel", "lock", "Özel işlerim", "Yalnız sizin görebildiğiniz işler — onaya gönderilmez, bitince “Tamamla”"],
   onay: ["Onay bekleyenler", "Onay", "shield", "Onay bekleyenler", "Kontrol edip onaylamanız gereken işler"],
   tumu: ["Tüm işler", "Tümü", "layers", "Tüm işler", "Bürodaki bütün işler"],
+  surec: ["Süreçler", "Süreç", "list", "Süreçler", "Dosya ve taraf bazında aşamalar — hangi dosyanın nerede beklediği tek bakışta"],
   rapor: ["Raporlar", "Rapor", "chart", "Raporlar", ""],
-  sablonlar: ["Şablonlar", "Şablon", "copy", "İş şablonları", "UYAP'ta “İş Ata” penceresinde aranıp seçilen hazır işler — büronun şablonlarını buradan ekleyin, düzenleyin, silin"],
+  sablonlar: ["Şablonlar", "Şablon", "copy", "İş şablonları ve etiketler", "UYAP'ta “İş Ata” penceresinde aranıp seçilen hazır işler ve işleri gruplayan etiketler — buradan ekleyin, düzenleyin, silin"],
   kullanicilar: ["Kullanıcılar", "Kişiler", "users", "Kullanıcılar", "Hesapları ekleyin, düzenleyin, kapatın, parolaları sıfırlayın"],
 };
 const FILTERS = {
@@ -226,6 +231,179 @@ function dueChip(t) {
     today ? `Bugün ${FMT_TIME.format(new Date(t.due_at * 1000))}` : fmtShort(t.due_at), late ? " · gecikti" : "");
 }
 
+// ── süreç / aşama / etiket (hazırlar sunucuda kodda; özel etiketler kişisel ya da büroya açık) ──
+async function loadMeta() {
+  try {
+    const [p, g, s] = await Promise.all([api("GET", "/is-listesi/api/surecler"), api("GET", "/is-listesi/api/etiketler"),
+      api("GET", "/is-listesi/api/sablonlar")]);
+    S.surecler = p.surecler; S.tagDefs = g; S.sablonlar = s.hazir.concat(s.buro);
+    S.tagMap = Object.fromEntries([...g.hazir, ...g.buro, ...g.kisisel].map((x) => [x.key, x]));
+  } catch (_) { /* eski sunucu: süzgeçler boş kalır */ }
+  // Hatırlanan süzgeçte artık olmayan grup / etiket düşer.
+  if (S.fg && !(S.tagMap[S.fg] && S.tagMap[S.fg].parent === `e-${S.fd}`)) { S.fg = ""; S.fa = ""; }
+  if (S.fa && !(surecOf(fsOf()) || { asamalar: [] }).asamalar.some((a) => a.key === S.fa)) S.fa = "";
+  S.ft = S.ft.filter((k) => S.tagMap[k]);
+}
+const surecOf = (k) => S.surecler.find((s) => s.key === k) || null;
+// İşin (ya da şablonun "surec/asama" değerinin) aşaması: {s, a, i} ya da null.
+function asamaOf(t) {
+  const [sk, ak] = typeof t === "string" ? t.split("/") : [t.surec, t.asama];
+  const s = sk && surecOf(sk); if (!s) return null;
+  const i = s.asamalar.findIndex((a) => a.key === ak);
+  return i < 0 ? null : { s, a: s.asamalar[i], i };
+}
+function asamaTag(t) {
+  const x = asamaOf(t); if (!x) return null;
+  return h("span", { class: "asama" + (x.a.dal ? " iade" : ""),
+    title: `${x.s.title} · aşama ${x.i + 1}/${x.s.asamalar.length}${x.a.dal ? " · iade dalı (yeniden tebliğ)" : ""}` }, `${x.i + 1}. ${x.a.title}`);
+}
+function asamaSelect(cur) {
+  return h("select", {}, h("option", { value: "" }, "Süreç yok"), S.surecler.map((s) => h("optgroup", { label: s.title },
+    s.asamalar.map((a, i) => h("option", { value: `${s.key}/${a.key}`, selected: cur === `${s.key}/${a.key}` },
+      `${i + 1}. ${a.title}${a.dal ? " (iade dalı)" : ""}`)))));
+}
+// İşin şablonu (kontrol sorusu ve sonuç dalları için): kayıtlı bağ ("h-mazbata" | "b-12").
+const tplOf = (t) => t.sablon ? (S.sablonlar || []).find((x) => String(x.id) === t.sablon || `b-${x.id}` === t.sablon) || null : null;
+const adKey = (s) => String(s || "").toLocaleLowerCase("tr-TR").replace(/ı/g, "i").replace(/\s+/g, " ").trim();
+const tplByTitle = (ad) => { const k = adKey(ad); return (S.sablonlar || []).find((x) => adKey(x.title) === k)
+  || (S.sablonlar || []).find((x) => (x.eski || []).some((e) => adKey(e) === k)) || null; };
+// Etiket ağacı: dosya türü (ana etiket) → süreç / grup → alt etiket (en çok 3 katman).
+const allTags = () => [...S.tagDefs.hazir, ...S.tagDefs.buro, ...S.tagDefs.kisisel];
+function tagChain(k) {   // [etiket, üstü, …, kök]
+  const out = [];
+  while (k && S.tagMap[k] && !out.includes(k) && out.length < 4) { out.push(k); k = S.tagMap[k].parent; }
+  return out;
+}
+const tagPath = (k) => tagChain(k).reverse().map((x) => S.tagMap[x].name).join(" › ");
+// Üst etiketle süzünce altındaki etiketlerden biri takılı işler de gelir.
+const hasTag = (t, k) => (t.tags || []).some((x) => tagChain(x).includes(k));
+// Ağaç sırası: [{g, d}] — kökler (önce dosya türleri) ve altları; d = derinlik (0 = kök).
+function tagTree(list) {
+  const keys = new Set(list.map((g) => g.key)), kids = {};
+  for (const g of list) { const p = g.parent && keys.has(g.parent) ? g.parent : ""; (kids[p] = kids[p] || []).push(g); }
+  const out = [], walk = (p, d) => (kids[p] || []).forEach((g) => { out.push({ g, d }); if (d < 3) walk(g.key, d + 1); });
+  walk("", 0);
+  return out;
+}
+const indent = (d) => d ? "   ".repeat(d - 1) + " └ " : "";
+// Etiket bu türdeki işe takılabilir mi (dosyasız iş ya da genel etiket: her zaman).
+const tagFits = (g, tur) => !tur || !g.tur || g.tur === tur;
+function tagChip(k, extra) {
+  const g = S.tagMap[k]; if (!g) return null;
+  return h("span", { class: "etk" + (g.owner_id ? " kisisel" : "") + (g.parent ? "" : " kok"), style: `--c:${g.color}`,
+    title: tagPath(k) + (g.owner_id ? " — kişisel etiket, yalnız siz görürsünüz" : "") }, g.name, extra || null);
+}
+// İşte en derin etiketler gösterilir; üstleri (ör. İcra) yalnız başka alt etiketi yoksa görünür. Aşama
+// etiketi gösterilmez: aşama rozeti (asamaTag) onu zaten gösterir.
+function tagChips(t) {
+  const ks = (t.tags || []).filter((k) => !(S.tagMap[k] || {}).asama), parents = new Set(ks.flatMap((k) => tagChain(k).slice(1)));
+  return ks.filter((k) => !parents.has(k)).map((k) => tagChip(k));
+}
+const tagText = (t) => (t.tags || []).flatMap((k) => tagChain(k)).map((k) => (S.tagMap[k] || {}).name || "").join(" ");
+
+// Süzgeç katmanları: dosya türü (fd) → süreç / grup (fg: türün altındaki etiket) → aşama (fa); ft: ayrıca
+// hepsi bulunacak etiketler. Dosyasız iş "yok", türü bilinmeyen dosya "diger" sayılır.
+const TUR_SIRA = [["icra", "İcra"], ["hukuk", "Hukuk davası"], ["arabuluculuk", "Arabuluculuk"], ["cbs", "CBS"],
+  ["ceza", "Ceza davası"], ["idare", "İdari dava"], ["diger", "Diğer dosya"], ["yok", "Dosyasız"]];
+const TUR_HEP = new Set(["icra", "hukuk", "arabuluculuk", "cbs"]);   // iş olmasa da görünen türler
+const turOf = (t) => t.tur || (t.dosya_id ? "diger" : "yok");
+const fsOf = () => (S.tagMap[S.fg] || {}).surec || "";
+// upto: kaç katman süzülür (çip sayıları için üst katmanlar: 0 = yalnız ft, 1 = +tür, 2 = +grup, 3 = +aşama).
+function facetFilter(T, upto = 3) {
+  if (S.ft.length) T = T.filter((t) => S.ft.every((k) => hasTag(t, k)));
+  if (upto > 0 && S.fd) T = T.filter((t) => turOf(t) === S.fd);
+  const sk = fsOf();
+  if (upto > 1 && S.fg) T = T.filter((t) => sk ? t.surec === sk : hasTag(t, S.fg));
+  if (upto > 2 && S.fa && sk) T = T.filter((t) => t.asama === S.fa);
+  return T;
+}
+const facetsOn = () => !!(S.fd || S.fg || S.ft.length);
+function saveFacets() { store.set("zs-facet", JSON.stringify({ fd: S.fd, fg: S.fg, fa: S.fa, ft: S.ft })); }
+function clearFacets() { S.fd = ""; S.fg = ""; S.fa = ""; S.ft = []; saveFacets(); }
+
+// Süzgeç: Dosya türü çipleri → (tür seçilince) süreç / grup çipleri → (süreç seçilince) sıralı aşama çipleri.
+// Her çipte o seçimle kaç iş kaldığı yazar; aynı çipe yeniden basmak seçimi kaldırır.
+function facetBar() {
+  const T = baseTasks().filter(FILTERS[S.f][1]);
+  const redraw = () => { saveFacets(); renderHead(); renderList(); };
+  const chip = (on, label, n, onclick, cls) => h("button", { type: "button", class: "chip" + (on ? " on" : "") + (cls || ""),
+    "aria-pressed": on ? "true" : "false", onclick }, label, h("span", { class: "n" }, ` ${n}`));
+  const row = (label, kids) => h("div", { class: "facet-row" }, h("span", { class: "facet-l" }, label), h("div", { class: "chips" }, kids));
+  const T0 = facetFilter(T, 0);
+  const turN = (k) => T0.filter((t) => turOf(t) === k).length;
+  const rows = [row("Dosya türü", [chip(!S.fd, "Tümü", T0.length, () => { S.fd = ""; S.fg = ""; S.fa = ""; redraw(); }),
+    ...TUR_SIRA.filter(([k]) => TUR_HEP.has(k) || S.fd === k || turN(k)).map(([k, l]) =>
+      chip(S.fd === k, l, turN(k), () => { S.fd = S.fd === k ? "" : k; S.fg = ""; S.fa = ""; redraw(); }))])];
+  const groups = S.fd ? allTags().filter((g) => g.parent === `e-${S.fd}`) : [];
+  if (groups.length) {
+    const T1 = facetFilter(T, 1);
+    const gN = (g) => T1.filter((t) => g.surec ? t.surec === g.surec : hasTag(t, g.key)).length;
+    rows.push(row("Süreç", [chip(!S.fg, "Tümü", T1.length, () => { S.fg = ""; S.fa = ""; redraw(); }),
+      ...groups.map((g) => chip(S.fg === g.key, g.name, gN(g), () => { S.fg = S.fg === g.key ? "" : g.key; S.fa = ""; redraw(); },
+        g.surec ? " surec" : ""))]));
+  }
+  const s = surecOf(fsOf());
+  if (s) {
+    const T2 = facetFilter(T, 2), kids = [chip(!S.fa, "Tüm aşamalar", T2.length, () => { S.fa = ""; redraw(); })];
+    s.asamalar.forEach((a, i) => {
+      if (a.dal && !(s.asamalar[i - 1] || {}).dal) kids.push(h("span", { class: "facet-dal" }, "İade dalı:"));
+      if (!a.dal && (s.asamalar[i - 1] || {}).dal) kids.push(h("span", { class: "facet-dal" }, "Tebliğ edildiyse:"));
+      kids.push(chip(S.fa === a.key, `${i + 1}. ${a.title}`, T2.filter((t) => t.asama === a.key).length,
+        () => { S.fa = S.fa === a.key ? "" : a.key; redraw(); }, a.dal ? " iade" : ""));
+    });
+    rows.push(row("Aşama", kids));
+  }
+  // Diğer etiketler (genel, kişisel, gruplar): dosya türü kökleri ve aşama etiketleri yukarıda seçilir.
+  const shown = facetFilter(T);
+  const tagSel = h("select", { "aria-label": "Etiket" }, h("option", { value: "" }, "Etiket ekle…"),
+    tagTree(allTags().filter((g) => !g.asama && (g.parent || !g.tur))).filter(({ g }) => !S.ft.includes(g.key)).map(({ g, d }) =>
+      h("option", { value: g.key }, `${indent(d)}${g.name}${g.owner_id ? " (kişisel)" : ""} · ${shown.filter((t) => hasTag(t, g.key)).length}`)));
+  tagSel.addEventListener("change", () => { if (tagSel.value) { S.ft.push(tagSel.value); redraw(); } });
+  rows.push(row("Etiket", [tagSel,
+    ...S.ft.map((k) => h("button", { type: "button", class: "etk on", style: `--c:${(S.tagMap[k] || {}).color || ""}`,
+      title: `${S.tagMap[k] ? tagPath(k) : k} — süzgeçten çıkar`, onclick: () => { S.ft = S.ft.filter((x) => x !== k); redraw(); } }, (S.tagMap[k] || {}).name || k, icon("x"))),
+    facetsOn() ? h("button", { type: "button", class: "btn-ghost sm", onclick: () => { clearFacets(); renderHead(); renderList(); } }, "Süzgeçleri temizle") : null]));
+  return h("div", { class: "facets" }, rows);
+}
+
+// İşin etiketleri: kişisel etiketi işi gören herkes takar; hazır / büro etiketini atanan, açan ya da yönetici.
+function tagDialog(t) {
+  const dlg = $("dlg"), shared = isAdmin() || isMine(t) || t.created_by === S.me.id;
+  const have = new Set(t.tags || []), boxes = [];
+  // Ağaç: işin dosya türüne uyan dal + genel etiketler. Dosya türü etiketi dosyadan, aşama etiketi işin
+  // aşamasından gelir (ikisi de burada değişmez; aşama "Düzenle"den).
+  const rows = tagTree(allTags().filter((g) => tagFits(g, t.tur) && !g.asama)).map(({ g, d }) => {
+    const auto = !!t.tur && !g.parent && g.tur === t.tur;
+    const canUse = !auto && (g.owner_id || shared);
+    const cb = h("input", { type: "checkbox", checked: have.has(g.key), disabled: !canUse });
+    if (canUse) boxes.push([g.key, cb]);
+    return h("label", { class: "etk-opt", style: `padding-left:${d * 22}px`,
+      title: auto ? "Dosya türü etiketi dosyadan gelir" : canUse ? tagPath(g.key) : "Büro etiketini yalnız işe atanan, işi açan ya da yönetici takar" },
+      cb, tagChip(g.key));
+  });
+  const nw = h("input", { placeholder: "Yeni kişisel etiket adı", maxlength: 40, class: "grow" });
+  const addNew = act(async () => {
+    if (!nw.value.trim()) { nw.focus(); return; }
+    const r = await api("POST", "/is-listesi/api/etiketler", { name: nw.value, kisisel: true });
+    await api("POST", `/is-listesi/api/tasks/${t.id}/etiketler`, { add: [r.tag.key] });
+    await loadMeta(); await refresh(); if (S.detail) tagDialog(S.detail);
+  });
+  nw.addEventListener("keydown", (e) => { if (e.key === "Enter") addNew(e); });
+  dlg.replaceChildren(h("h3", {}, "Etiketler"), h("div", { class: "small muted" }, `“${t.title}”`),
+    asamaOf(t) ? h("div", { class: "small", style: "margin-top:6px" }, "Aşama: ", asamaTag(t),
+      h("span", { class: "muted" }, " — işin aşamasından gelir; değiştirmek için “Düzenle”.")) : null,
+    h("div", { class: "etk-agac" }, rows),
+    h("div", { class: "row" }, nw, h("button", { type: "button", class: "btn-ghost sm", onclick: addNew }, icon("plus"), "Ekle ve tak")),
+    h("div", { class: "actions", style: "margin-top:18px" },
+      h("button", { type: "button", class: "btn", onclick: act(async () => {
+        const add = boxes.filter(([k, cb]) => cb.checked && !have.has(k)).map(([k]) => k);
+        const remove = boxes.filter(([k, cb]) => !cb.checked && have.has(k)).map(([k]) => k);
+        if (add.length || remove.length) await api("POST", `/is-listesi/api/tasks/${t.id}/etiketler`, { add, remove });
+        dlg.close(); await refresh(); }) }, icon("check"), "Kaydet"),
+      h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Vazgeç")));
+  dlg.showModal();
+}
+
 // ── tema ───────────────────────────────────────────────────────────────────────────
 function getTheme() {
   const v = store.get("zs-theme");
@@ -266,7 +444,7 @@ function renderTabs() {
       k === "benim" && late ? h("span", { class: "dot", title: "Geciken işiniz var" }) : null,
       n ? h("span", { class: "cnt" + (k === "onay" && isAdmin() ? " warn" : "") }, n) : null);
   };
-  const kids = [h("div", { class: "nav-h" }, "İşler"), item("takvim"), item("hatirlatici"), item("benim"), item("ozel"), item("onay")];
+  const kids = [h("div", { class: "nav-h" }, "İşler"), item("takvim"), item("hatirlatici"), item("benim"), item("ozel"), item("onay"), item("surec")];
   if (isAdmin()) kids.push(item("tumu"), h("div", { class: "nav-h" }, "Yönetim"), item("rapor"), item("sablonlar"), item("kullanicilar"));
   else kids.push(item("rapor"), item("sablonlar"));
   $("tabs").replaceChildren(...kids);
@@ -289,6 +467,11 @@ function renderHead() {
   q.addEventListener("input", () => { S.q = q.value; renderList(); });
   if (S.view === "takvim") q.placeholder = "Takvimde ara…  ( / )";
   if (S.view === "hatirlatici") q.placeholder = "Hatırlatıcılarda ara…  ( / )";
+  if (S.view === "surec") {
+    q.placeholder = "Dosya ya da taraf ara…  ( / )";
+    top.append(h("div", { class: "row" }, h("label", { class: "search" }, icon("search"), q)));
+    $("head").replaceChildren(top); return;
+  }
   const right = h("div", { class: "row" }, h("label", { class: "search" }, icon("search"), q));
   const remDay = S.view === "takvim" && S.cal && S.cal.mode === "gun" ? S.cal.at : null;
   right.append(h("button", { type: "button", class: S.view === "hatirlatici" ? "btn" : "btn-ghost", title: "Hatırlatıcı kur (işi açmadan)",
@@ -300,7 +483,8 @@ function renderHead() {
   if (S.view === "onay") { $("head").replaceChildren(top); return; }
 
   // Tek süzgeç satırı: durumlar + (varsa) gecikme süzgeçleri. Gecikme süzgeci yeniden basılınca kalkar.
-  const T = baseTasks();
+  // Sayılar seçili süreç / aşama / etiketlere göre.
+  const T = facetFilter(baseTasks());
   const chip = (f, extra) => {
     const n = T.filter(FILTERS[f][1]).length;
     return h("button", { type: "button", class: "chip" + (extra || "") + (S.f === f ? " on" : ""),
@@ -311,10 +495,12 @@ function renderHead() {
   const chips = ["aktif", "acik", "devam", "onayda", "bitti", "tumu"].map((f) => chip(f));
   const lateChips = ["isgec", "onaygec"].filter((f) => S.f === f || T.some(FILTERS[f][1])).map((f) => chip(f, " late"));
   if (lateChips.length) chips.push(h("span", { class: "chip-sep" }), ...lateChips);
-  const sortSel = h("select", { "aria-label": "Sıralama" }, [["tarih", "Son tarihe göre"], ["oncelik", "Önceliğe göre"], ["eklenme", "Eklenme sırası"]]
+  const sortSel = h("select", { "aria-label": "Sıralama" }, [["tarih", "Son tarihe göre"], ["oncelik", "Önceliğe göre"],
+    ["asama", "Aşamaya göre"], ["eklenme", "Eklenme sırası"]]
     .map(([k, l]) => h("option", { value: k, selected: S.sort === k }, l)));
   sortSel.addEventListener("change", () => { S.sort = sortSel.value; store.set("zs-sort", S.sort); renderList(); });
   $("head").replaceChildren(top,
+    S.surecler.length || S.tagMap && Object.keys(S.tagMap).length ? facetBar() : null,
     h("div", { class: "toolbar" }, h("div", { class: "chips" }, chips),
       h("label", { class: "sortsel" }, "Sırala", sortSel)));
 }
@@ -322,7 +508,8 @@ function renderHead() {
 async function refresh() {
   try {
     const admin = isAdmin();
-    const want = { takvim: admin ? "tumu" : "benim", benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", kullanicilar: null, rapor: null, hatirlatici: null, sablonlar: null }[S.view];
+    const want = { takvim: admin ? "tumu" : "benim", benim: "benim", ozel: "benim", onay: "onay", tumu: "tumu", surec: admin ? "tumu" : "benim",
+      kullanicilar: null, rapor: null, hatirlatici: null, sablonlar: null }[S.view];
     const [mine, onay, cur] = await Promise.all([
       api("GET", "/is-listesi/api/tasks?filtre=benim"),
       admin ? api("GET", "/is-listesi/api/tasks?filtre=onay") : Promise.resolve(null),
@@ -344,16 +531,23 @@ async function refresh() {
 // ── liste: süzme, gruplama ─────────────────────────────────────────────────────────
 function shownTasks() {
   let T = baseTasks();
-  if (S.view !== "onay") T = T.filter(FILTERS[S.f][1]);
+  if (S.view !== "onay") T = facetFilter(T.filter(FILTERS[S.f][1]));
   const q = S.q.trim().toLocaleLowerCase("tr-TR");
   if (q) T = T.filter((t) => (t.title + " " + (t.description || "") + " " + name(t.assignee_id) + " " + dosyaText(t) + " " +
-    t.subtasks.map((s) => s.title).join(" ")).toLocaleLowerCase("tr-TR").includes(q));
+    t.subtasks.map((s) => s.title).join(" ") + " " + tagText(t) + " " + ((asamaOf(t) || {}).a || {}).title)
+    .toLocaleLowerCase("tr-TR").includes(q));
   return T;
 }
 const byDue = (a, b) => (a.due_at || 9e12) - (b.due_at || 9e12) || a.id - b.id;
 const byPrioDue = (a, b) => (b.priority ?? 1) - (a.priority ?? 1) || byDue(a, b);
 function grouped(T) {
   if (S.sort === "eklenme") return [[null, T]];
+  if (S.sort === "asama") {
+    const out = [];
+    for (const s of S.surecler) s.asamalar.forEach((a, i) => out.push([`${S.surecler.length > 1 ? s.title + " · " : ""}${i + 1}. ${a.title}${a.dal ? " (iade dalı)" : ""}`,
+      T.filter((t) => t.surec === s.key && t.asama === a.key).sort(byPrioDue)]));
+    return [...out, ["Süreçsiz", T.filter((t) => !asamaOf(t)).sort(byPrioDue)]];
+  }
   if (S.sort === "oncelik") return [[2, "Acil"], [1, "Normal"], [0, "Düşük"]]
     .map(([p, l]) => [l, T.filter((t) => (t.priority ?? 1) === p).sort(byDue)]);
   const week = dayStart(7), out = { gec: [], bugun: [], hafta: [], sonra: [], yok: [], bitti: [] };
@@ -372,16 +566,17 @@ function grouped(T) {
 function renderList() {
   if (S.view === "takvim") { renderCalendar(); return; }
   if (S.view === "hatirlatici") { renderReminders(); return; }
+  if (S.view === "surec") { renderProcess(); return; }
   const kids = [];
   if (S.composer) kids.push(composerCard());
   const T = shownTasks();
   S.order = [];
   if (!T.length) {
-    const filtered = S.q.trim() || (S.view !== "onay" && S.f !== "tumu" && baseTasks().length);
+    const filtered = S.q.trim() || (S.view !== "onay" && (S.f !== "tumu" || facetsOn()) && baseTasks().length);
     kids.push(h("div", { class: "card empty" }, h("div", { class: "ic" }, icon(filtered ? "search" : "check")),
       h("b", {}, filtered ? "Bu süzgeçte iş yok" : S.view === "onay" ? "Onay bekleyen iş yok" : S.view === "ozel" ? "Özel işiniz yok" : "Burada iş yok"),
       filtered ? h("button", { type: "button", class: "btn-ghost sm", style: "margin-top:10px",
-        onclick: () => { S.q = ""; S.f = "tumu"; renderHead(); renderList(); } }, "Süzgeçleri temizle")
+        onclick: () => { S.q = ""; S.f = "tumu"; clearFacets(); renderHead(); renderList(); } }, "Süzgeçleri temizle")
         : S.view === "onay" ? "Her şey güncel." : "Sağ üstteki “Yeni iş” ile ya da N tuşuyla başlayın."));
   }
   for (const [label, arr] of grouped(T)) {
@@ -393,7 +588,7 @@ function renderList() {
 }
 
 function openComposer() {
-  if (S.view === "onay" || S.view === "kullanicilar" || S.view === "rapor" || S.view === "hatirlatici" || S.view === "sablonlar") { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
+  if (["onay", "kullanicilar", "rapor", "hatirlatici", "sablonlar", "surec"].includes(S.view)) { S.view = "benim"; S.selId = null; S.f = "aktif"; refresh(); }
   S.composer = true; renderList();
   const i = document.querySelector(".composer input"); if (i) { i.focus(); i.scrollIntoView({ block: "center" }); }
 }
@@ -493,12 +688,65 @@ function peoplePicker(placeholder) {
 }
 
 // ── iş durumu eylemleri (kart + detay ortak) ───────────────────────────────────────
-async function doTransition(t, action, reason) {
-  await api("POST", `/is-listesi/api/tasks/${t.id}/durum`, { action, reason: reason || "" });
+async function doTransition(t, action, reason, extra) {
+  const r = await api("POST", `/is-listesi/api/tasks/${t.id}/durum`, { action, reason: reason || "", ...(extra || {}) });
+  const n = r.sonraki;
   toast({ basla: "İş başlatıldı.", gonder: "Onaya gönderildi.", tamamla: "İş tamamlandı.", onayla: "Onaylandı.",
-    reddet: "Reddedildi.", yeniden_ac: "Yeniden açıldı." }[action], true);
+    reddet: "Reddedildi.", yeniden_ac: "Yeniden açıldı." }[action] +
+    (n && n.hata ? ` Sonraki iş açılamadı: ${n.hata}` : n ? ` Sonraki iş açıldı: ${n.title}` : ""), !(n && n.hata));
   S.rejectFor = null; await refresh();
 }
+// Kontrol şablonlu işi bitirme: sonuç seçilir (şablondaki adıyla, ör. "Tebliğ edildi" / "İade"), o dalın
+// sonraki işi (süreçte sıradaki aşama) önerilir; sunucu aynı dosya / taraf / atananla açar.
+function kontrolDialog(t, action) {
+  const tpl = tplOf(t), dlg = $("dlg"), sonraki = !t.is_private;
+  let sonuc = null;
+  const ad = h("input", { maxlength: 200, class: "grow", placeholder: "Sonraki iş (boş: açılmaz)" });
+  const gun = h("input", { type: "number", min: 0, max: 365, placeholder: "gün", style: "width:80px" });
+  const ac = h("input", { type: "checkbox" }), hedef = h("div", { class: "small" });
+  const note = h("textarea", { maxlength: 1800, rows: 3, placeholder: "Ne görüldü / ne yapıldı? (isteğe bağlı — ör. iade nedeni)" });
+  const hedefCiz = () => {
+    const n = tplByTitle(ad.value), x = n && n.asama ? asamaOf(n.asama) : null;
+    hedef.replaceChildren(...(x ? ["Sonraki aşama: ", asamaTag(n.asama)] : ad.value.trim() ? [h("span", { class: "muted" }, "Süreç dışı iş")] : []));
+  };
+  ad.addEventListener("input", () => { ac.checked = !!ad.value.trim(); hedefCiz(); });
+  const btns = Object.keys(SONUC).map((k) => {
+    const dal = (tpl.sonuclar || {})[k];
+    return h("button", { type: "button", class: "chip", "data-k": k,
+      title: dal ? `Sonraki iş: ${dal.baslik || tpl.title}${dal.gun != null ? ` (+${dal.gun} gün)` : ""}` : "Sonraki iş önerilmez",
+      onclick: () => {
+        sonuc = k;
+        btns.forEach((b) => b.classList.toggle("on", b.getAttribute("data-k") === k));
+        const n = dal ? tplByTitle(dal.baslik || tpl.title) : null;
+        ad.value = dal ? dal.baslik || tpl.title : "";
+        gun.value = dal && dal.gun != null ? dal.gun : n && n.due_days != null ? n.due_days : "";
+        ac.checked = !!dal; hedefCiz();
+      } }, (dal && dal.ad) || SONUC[k]);
+  });
+  const send = act(async () => {
+    if (!sonuc) { toast("Kontrol sonucunu seçin."); return; }
+    const dal = (tpl.sonuclar || {})[sonuc], ac2 = sonraki && ac.checked && ad.value.trim();
+    const reason = [`Kontrol: ${((dal && dal.ad) || SONUC[sonuc]).toLocaleLowerCase("tr-TR")} (${tpl.kontrol})`, note.value.trim(),
+      ac2 ? `Sonraki iş: ${ad.value.trim()}` : ""].filter(Boolean).join(" — ");
+    await doTransition(t, action, reason, { sonuc,
+      sonraki: ac2 ? { baslik: ad.value.trim(), gun: gun.value === "" ? null : Number(gun.value) } : false });
+    dlg.close();
+  });
+  dlg.replaceChildren(h("h3", {}, action === "tamamla" ? "İşi tamamla" : "Onaya gönder"),
+    h("div", { class: "small muted" }, `“${t.title}”`, asamaOf(t) ? [" · ", asamaTag(t)] : null),
+    h("div", { style: "margin:14px 0 6px;font-weight:600" }, tpl.kontrol),
+    h("div", { class: "chips" }, btns),
+    sonraki ? h("div", { class: "next-box" }, h("label", { class: "row small", style: "gap:6px" }, ac, "Sonraki işi aç"),
+      h("div", { class: "row", style: "gap:6px" }, ad, gun), hedef,
+      h("div", { class: "small muted" }, `Aynı dosya${t.taraf_adi ? `, taraf (${t.taraf_adi})` : ""} ve atananla açılır; süre bugünden gün sayısıdır (17:00).`)) : null,
+    h("label", { class: "lbl", style: "margin-top:12px" }, "Not", note),
+    h("div", { class: "actions", style: "margin-top:16px" },
+      h("button", { type: "button", class: "btn", onclick: send }, icon(action === "tamamla" ? "check" : "send"), action === "tamamla" ? "Tamamla" : "Onaya gönder"),
+      h("button", { type: "button", class: "btn-ghost", onclick: () => dlg.close() }, "Vazgeç")));
+  dlg.showModal();
+}
+// Onaya gönder / tamamla: işin şablonunda kontrol sorusu varsa önce sonuç sorulur.
+const finish = (t, action) => (e) => { stop(e); const tp = tplOf(t); if (tp && tp.kontrol) kontrolDialog(t, action); else act(() => doTransition(t, action))(e); };
 // Ret gerekçesi kutusu: kartta ya da (iş seçiliyse) detayda açılır.
 function askReject(t) {
   return (e) => { stop(e); S.rejectFor = t.id; renderList(); if (S.selId === t.id) renderDetail(); };
@@ -511,10 +759,10 @@ function flowButtons(t, small) {
   if (t.status === "acik" && (mine || admin)) b.push(h("button", { type: "button", class: "btn-ghost" + sm, onclick: act(() => doTransition(t, "basla")) }, icon("play"), "Başla"));
   if (active && isOwnPrivate(t) && (!small || !open))
     b.push(h("button", { type: "button", class: "btn-ok" + sm, disabled: open > 0,
-      onclick: act(() => doTransition(t, "tamamla")) }, icon("check"), "Tamamla"));
+      onclick: finish(t, "tamamla") }, icon("check"), "Tamamla"));
   if (active && mine && !t.is_private && (!small || !open))
     b.push(h("button", { type: "button", class: "btn" + sm, disabled: open > 0,
-      onclick: act(() => doTransition(t, "gonder")) }, icon("send"), "Onaya gönder"));
+      onclick: finish(t, "gonder") }, icon("send"), "Onaya gönder"));
   if (!small && isOwnPrivate(t)) b.push(h("button", { type: "button", class: "btn-ghost", onclick: () => transferDialog("publish"),
     title: "Özel olmaktan çıkar; yöneticiler görebilir" }, icon("eye"), "Görünür yap"));
   if (t.status === "onayda" && appr) b.push(
@@ -564,7 +812,7 @@ function taskCard(t) {
     tabindex: 0, "data-id": t.id, onclick: () => openDetail(t.id) },
     h("div", { class: "row" }, h("span", { class: "t grow", title: t.unseen ? "Son bakışınızdan beri değişti" : null }, t.title),
       privTag(t), prioTag(t), latePill(t), pill(t.status)),
-    h("div", { class: "meta" }, whoMany(assigneesOf(t)), dueChip(t), bellTag(t.reminder_at), dosyaTag(t),
+    h("div", { class: "meta" }, whoMany(assigneesOf(t)), dueChip(t), bellTag(t.reminder_at), dosyaTag(t), asamaTag(t), tagChips(t),
       t.ext_pending ? h("span", { class: "extp" }, icon("clock"), "Ek süre talebi") : null,
       subs.length ? h("span", { class: "prog" }, h("span", { class: "b" }, h("i", { style: `width:${Math.round(100 * done / subs.length)}%` })), `${done}/${subs.length}`) : null,
       t.note_count ? h("span", { title: "Not" }, icon("msg"), t.note_count) : null,
@@ -703,6 +951,9 @@ function renderDetail() {
           h("div", {}, h("a", { class: "btn-ghost sm", href: uyaptaAcUrl(t), target: "_blank", rel: "noopener noreferrer",
             title: "Bu bilgisayardaki CokluUyap'ta (127.0.0.1:8800) UYAP'ın dosya kartını açar", style: "margin-top:6px;display:inline-flex" },
             icon("clip"), "UYAP'ta aç")))] : null,
+        asamaOf(t) ? [h("dt", {}, "Süreç"), h("dd", {}, asamaTag(t), h("span", { class: "small muted" }, ` ${asamaOf(t).s.title}`))] : null,
+        h("dt", {}, "Etiketler"), h("dd", {}, h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" }, tagChips(t),
+          h("button", { type: "button", class: "btn-ghost sm", onclick: () => tagDialog(t) }, icon("edit"), (t.tags || []).length ? "Değiştir" : "Etiket ekle"))),
         nextReminder(t.id) ? [h("dt", {}, "Hatırlatma"), h("dd", {}, h("button", { type: "button", class: "linkish", onclick: () => reminderDialog() }, bellTag(nextReminder(t.id))))] : null,
         h("dt", {}, "Açan"), h("dd", {}, h("span", { class: "row", style: "gap:6px" }, who(t.created_by, "xs"),
           h("span", { class: "small muted" }, fmtShort(t.created_at))))),
@@ -744,17 +995,20 @@ function editMain() {
   const title = h("input", { value: t.title, maxlength: 300 });
   const sel = peopleSelect(t.assignee_id), due = dueField(t.due_at);
   const prio = prioSelect(t.priority);
+  const curAsama = t.surec && t.asama ? `${t.surec}/${t.asama}` : "", asm = asamaSelect(curAsama);
   if (t.is_private) { sel.disabled = true; sel.title = "Özel işi başkasına vermek için “Devret”i kullanın."; }
   const desc = h("textarea", { maxlength: 5000 }); desc.value = t.description || "";
   $("detail").replaceChildren(h("div", { class: "d-bar" }, h("h2", { style: "margin:0" }, "İşi düzenle")),
     h("div", { class: "d-body", style: "padding-top:16px" },
       h("div", { class: "form-grid" }, h("label", { style: "grid-column:1/-1" }, "Başlık", title),
-        admin ? h("label", {}, "Atanan kişi", sel) : null, h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio)),
+        admin ? h("label", {}, "Atanan kişi", sel) : null, h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio),
+        S.surecler.length ? h("label", {}, "Süreç aşaması", asm) : null),
       h("label", { class: "lbl" }, "Açıklama", desc),
       h("div", { class: "actions" },
         h("button", { type: "button", class: "btn", onclick: act(async () => {
           const body = { title: title.value, description: desc.value, due_at: due.value(), priority: Number(prio.value) };
           if (admin && !t.is_private) body.assignee_id = sel.value || null;
+          if (asm.value !== curAsama) body.asama = asm.value;
           await api("PATCH", `/is-listesi/api/tasks/${t.id}`, body);
           toast("Kaydedildi.", true); await refresh(); }) }, icon("check"), "Kaydet"),
         h("button", { type: "button", class: "btn-ghost", onclick: () => renderDetail() }, "Vazgeç"))));
@@ -1098,7 +1352,8 @@ function extBanner(t) {
 
 // ── zaman çizelgesi (kronolojik: eskiden yeniye) ───────────────────────────────────
 const ROLE_TXT = { assignee: "ek atanan", approver: "onay yetkilisi" };
-const FIELD_TXT = { title: "başlık", description: "açıklama", due_at: "son tarih", priority: "öncelik" };
+const FIELD_TXT = { title: "başlık", description: "açıklama", due_at: "son tarih", priority: "öncelik", asama: "süreç aşaması",
+  dosya: "UYAP dosyası" };
 function eventView(e) {
   const d = e.detail || {};
   switch (e.kind) {
@@ -1123,6 +1378,8 @@ function eventView(e) {
     case "ext_approved": return ["check", "ok", `ek süreyi kabul etti — yeni son tarih ${fmtShort(d.new_due)}`, d.note];
     case "ext_rejected": return ["undo", "bad", "ek süre talebini reddetti", d.note];
     case "completed": return ["check", "ok", "işi tamamladı"];
+    case "tags": return ["flag", "", [(d.added || []).length ? `etiket ekledi: ${d.added.join(", ")}` : "",
+      (d.removed || []).length ? `etiket çıkardı: ${d.removed.join(", ")}` : ""].filter(Boolean).join(" · ") || EVENTS.tags];
     default: return ["hist", "", EVENTS[e.kind] || e.kind];
   }
 }
@@ -1278,7 +1535,7 @@ const SONUC = { olumlu: "Olumlu", olumsuz: "Olumsuz", bekliyor: "Bekliyor" };
 function sonucText(t) {
   const r = t.sonuclar || {};
   return Object.keys(SONUC).filter((k) => r[k]).map((k) =>
-    `${SONUC[k]} → ${r[k].baslik || "aynı iş"}${r[k].gun != null ? ` (+${r[k].gun} gün)` : ""}`).join(" · ");
+    `${r[k].ad || SONUC[k]} → ${r[k].baslik || "aynı iş"}${r[k].gun != null ? ` (+${r[k].gun} gün)` : ""}`).join(" · ");
 }
 function templateForm(t, done, titles) {
   const title = h("input", { value: t ? t.title : "", maxlength: 200, placeholder: "ör. Haciz ihbarnamesi kontrol" });
@@ -1288,6 +1545,16 @@ function templateForm(t, done, titles) {
     Object.entries(TARAF).map(([k, l]) => h("option", { value: k, selected: !!t && t.taraf === k }, l)));
   const desc = h("textarea", { rows: 2, maxlength: 2000, placeholder: "Ne kontrol edilecek, ne yapılacak? (iş açılınca açıklamaya yazılır)" }, t ? t.description : "");
   const kontrol = h("input", { value: t && t.kontrol ? t.kontrol : "", maxlength: 300, placeholder: "ör. Tebligat tebliğ edildi mi? (boş: sonuç sorulmaz)" });
+  // Süreç aşaması + varsayılan etiketler (yalnız hazır ve büro etiketleri; şablon büronundur).
+  const asm = asamaSelect(t && t.asama ? t.asama : "");
+  // Dosya türü (kök) etiketi işin dosyasından gelir; burada yalnız başlık olarak görünür.
+  const tagBoxes = [];
+  const tagPick = h("div", { class: "etk-agac" }, tagTree([...S.tagDefs.hazir, ...S.tagDefs.buro].filter((g) => !g.asama)).map(({ g, d }) => {
+    if (!g.parent && g.tur) return h("div", { class: "small muted", style: "margin-top:6px" }, tagChip(g.key));
+    const cb = h("input", { type: "checkbox", checked: !!t && (t.etiketler || []).includes(g.key) });
+    tagBoxes.push([g.key, cb]);
+    return h("label", { class: "etk-opt", style: `padding-left:${d * 22}px`, title: tagPath(g.key) }, cb, tagChip(g.key));
+  }));
   const listId = `tpl-titles-${t ? t.id : "yeni"}`;
   const dal = {};
   const dallar = Object.keys(SONUC).map((k) => {
@@ -1302,11 +1569,13 @@ function templateForm(t, done, titles) {
     const sonuclar = {};
     for (const k of Object.keys(SONUC)) {
       const b = dal[k].baslik.value.trim(), g = dal[k].gun.value;
-      sonuclar[k] = b || g !== "" ? { baslik: b || null, gun: g === "" ? null : Number(g) } : null;
+      const ad = ((t && t.sonuclar && t.sonuclar[k]) || {}).ad || null;   // sonucun adı (formda değişmez, korunur)
+      sonuclar[k] = b || g !== "" ? { baslik: b || null, gun: g === "" ? null : Number(g), ad } : null;
     }
     await api("POST", t ? `/is-listesi/api/sablonlar/${t.id}` : "/is-listesi/api/sablonlar", {
       title: title.value, description: desc.value, due_days: due.value === "" ? null : Number(due.value),
-      priority: Number(prio.value), taraf: taraf.value || null, kontrol: kontrol.value, sonuclar });
+      priority: Number(prio.value), taraf: taraf.value || null, kontrol: kontrol.value, sonuclar,
+      asama: asm.value || null, etiketler: tagBoxes.filter(([, cb]) => cb.checked).map(([k]) => k) });
     toast(t ? "Şablon güncellendi." : "Şablon eklendi.", true); await done();
   });
   title.addEventListener("keydown", (e) => { if (e.key === "Enter") save(e); if (e.key === "Escape" && t) done(); });
@@ -1316,6 +1585,9 @@ function templateForm(t, done, titles) {
     h("label", { class: "lbl", style: "margin-bottom:12px" }, "Açıklama", desc),
     h("label", { class: "lbl", style: "margin-bottom:8px" }, "Kontrol sorusu (işi bitirirken sorulur)", kontrol),
     h("div", { class: "form-grid" }, dallar),
+    S.surecler.length ? h("div", { class: "form-grid" }, h("label", {}, "Süreç aşaması (işler bu aşamada görünür)", asm)) : null,
+    tagBoxes.length ? h("details", { class: "lbl" }, h("summary", { style: "cursor:pointer" },
+      `Varsayılan etiketler (iş açılınca takılır)${t && (t.etiketler || []).length ? ` · ${t.etiketler.length} seçili` : ""}`), tagPick) : null,
     h("datalist", { id: listId }, (titles || []).map((x) => h("option", { value: x }))),
     h("div", { class: "row" }, h("button", { type: "button", class: t ? "btn sm" : "btn", onclick: save }, t ? null : icon("plus"), t ? "Kaydet" : "Ekle"),
       t ? h("button", { type: "button", class: "btn-ghost sm", onclick: () => done() }, "Vazgeç")
@@ -1325,6 +1597,7 @@ function templateForm(t, done, titles) {
 }
 async function renderTemplates() {
   const d = await api("GET", "/is-listesi/api/sablonlar");
+  S.sablonlar = d.hazir.concat(d.buro);   // kontrol penceresi güncel şablonla açılsın
   if (S.view !== "sablonlar") return;
   const q = h("input", { type: "search", placeholder: "Şablonlarda ara…", value: S.tq || "" });
   const titles = d.hazir.concat(d.buro).map((t) => t.title);
@@ -1332,7 +1605,9 @@ async function renderTemplates() {
   const cells = (t) => [
     h("td", {}, h("b", {}, t.title), t.description ? h("div", { class: "small muted" }, t.description) : null,
       t.kontrol ? h("div", { class: "small" }, `❓ ${t.kontrol}`) : null,
-      sonucText(t) ? h("div", { class: "small muted" }, sonucText(t)) : null),
+      sonucText(t) ? h("div", { class: "small muted" }, sonucText(t)) : null,
+      asamaOf(t.asama || "") || (t.etiketler || []).length ? h("div", { class: "row", style: "gap:6px;flex-wrap:wrap;margin-top:4px" },
+        t.asama ? asamaTag(t.asama) : null, (t.etiketler || []).map((k) => tagChip(k))) : null),
     h("td", {}, t.due_days != null ? `${t.due_days} gün` : "—"),
     h("td", {}, h("span", { class: "tag" + (t.priority === 2 ? " off" : "") }, PRIO[t.priority])),
     h("td", {}, TARAF[t.taraf] || "—"),
@@ -1361,7 +1636,148 @@ async function renderTemplates() {
       h("table", {}, h("thead", {}, head), tbody)),
     h("details", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
       h("summary", { style: "cursor:pointer;padding:6px;font-weight:600" }, `Hazır şablonlar (${d.hazir.length}) — her büroda var, değiştirilemez`),
-      h("table", {}, h("thead", {}, head.cloneNode(true)), h("tbody", {}, d.hazir.map((t) => h("tr", {}, cells(t), h("td")))))));
+      h("table", {}, h("thead", {}, head.cloneNode(true)), h("tbody", {}, d.hazir.map((t) => h("tr", {}, cells(t), h("td")))))),
+    tagManager());
+}
+
+// ── etiketler: hazırlar değişmez; büro etiketini ekleyen ya da yönetici, kişiseli sahibi düzenler ──
+const canEditTag = (g) => !!g.id && (!!g.owner_id || isAdmin() || g.created_by === S.me.id);
+function swatches(cur) {
+  const st = { v: cur || S.tagDefs.renkler[0] };
+  const el = h("div", { class: "swatches", role: "radiogroup", "aria-label": "Renk" });
+  const draw = () => el.replaceChildren(...S.tagDefs.renkler.map((c) => h("button", { type: "button", class: "swatch" + (st.v === c ? " on" : ""),
+    style: `--c:${c}`, role: "radio", "aria-checked": st.v === c ? "true" : "false", "aria-label": c,
+    onclick: () => { st.v = c; draw(); } })));
+  draw();
+  return { el, value: () => st.v };
+}
+// Üst etiket seçimi: 3. katmandakilerin altına etiket konmaz; büro etiketi kişisel etiketin altına konmaz.
+function parentSelect(cur, self) {
+  const maxD = (S.tagDefs.derinlik || 3) - 1;
+  return h("select", { "aria-label": "Üst etiket" }, h("option", { value: "" }, "Üst etiket yok (genel)"),
+    tagTree(allTags()).filter(({ g, d }) => d < maxD && g.key !== self && !(self && tagChain(g.key).includes(self)))
+      .map(({ g, d }) => h("option", { value: g.key, selected: cur === g.key }, `${indent(d)}${g.name}${g.owner_id ? " (kişisel)" : ""}`)));
+}
+function tagManager() {
+  const again = async () => { await loadMeta(); await renderTemplates(); };
+  const nm = h("input", { maxlength: 40, placeholder: "ör. Banka müvekkili" }), sw = swatches();
+  const par = parentSelect("e-icra");
+  const kisi = h("input", { type: "checkbox", checked: !isAdmin() });
+  const add = act(async () => {
+    await api("POST", "/is-listesi/api/etiketler", { name: nm.value, color: sw.value(), kisisel: kisi.checked, parent: par.value || null });
+    toast("Etiket eklendi.", true); await again();
+  });
+  nm.addEventListener("keydown", (e) => { if (e.key === "Enter") add(e); });
+  const row = ({ g, d }) => {
+    const tr = h("tr", {}, h("td", { style: `padding-left:${10 + d * 24}px` }, d ? h("span", { class: "muted" }, "└ ") : null, tagChip(g.key)),
+      h("td", { class: "small muted" }, g.owner_id ? "Yalnız siz" : g.id ? name(g.created_by) : !g.parent && g.tur ? "Dosya türü"
+        : g.asama ? "Süreç aşaması (işin aşamasından gelir)" : g.surec ? "Süreç" : "Hazır"),
+      h("td", { style: "text-align:right" }, canEditTag(g) ? h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { type: "button", class: "btn-ghost sm", onclick: () => {
+          const n2 = h("input", { value: g.name, maxlength: 40 }), s2 = swatches(g.color), p2 = parentSelect(g.parent || "", g.key);
+          const save = act(async () => {
+            await api("POST", `/is-listesi/api/etiketler/${g.id}`, { name: n2.value, color: s2.value(), parent: p2.value || null });
+            toast("Etiket güncellendi.", true); await again(); });
+          n2.addEventListener("keydown", (e) => { if (e.key === "Enter") save(e); if (e.key === "Escape") again(); });
+          tr.replaceChildren(h("td", { colspan: 3 }, h("div", { class: "row", style: "flex-wrap:wrap" }, n2, p2, s2.el,
+            h("button", { type: "button", class: "btn sm", onclick: save }, "Kaydet"),
+            h("button", { type: "button", class: "btn-ghost sm", onclick: () => again() }, "Vazgeç"))));
+          n2.focus(); } }, icon("edit"), "Düzenle"),
+        confirmBtn("Sil", async () => { await api("DELETE", `/is-listesi/api/etiketler/${g.id}`); toast("Etiket silindi.", true); await again(); },
+          "btn-ghost sm")) : null));
+    return tr;
+  };
+  const tree = tagTree(allTags());
+  return h("div", { class: "card", style: "overflow-x:auto" }, h("h3", {}, `Etiketler (${tree.length})`),
+    h("div", { class: "small muted", style: "margin-bottom:10px" },
+      "Ağaç en çok üç katmandır: dosya türü (İcra, Hukuk…) → süreç / grup → alt etiket. Bir dosya türünün altındaki etiket ",
+      "yalnız o türdeki dosyanın işine takılır; dosya türü etiketi işe dosyadan kendiliğinden gelir. Üst etiketle süzünce altındakiler de ",
+      "gelir. Kişisel etiketi yalnız siz görürsünüz."),
+    h("div", { class: "row", style: "flex-wrap:wrap;margin-bottom:12px" }, nm, par, sw.el,
+      h("label", { class: "row small", style: "gap:6px" }, kisi, "Yalnız bana (kişisel)"),
+      h("button", { type: "button", class: "btn sm", onclick: add }, icon("plus"), "Ekle")),
+    h("table", {}, h("tbody", {}, tree.map(row))));
+}
+
+// ── süreç görünümü: her satır bir dosya + taraf, her sütun bir aşama; hücre o aşamadaki son iş ──
+// İade dalından sonra süreç baştan başlar (yeni tebligat turu): tablo yalnız son turu gösterir.
+// Üstteki rapor her dosyanın ŞU AN hangi aşamada beklediğini sayar; çipe basınca yalnız o aşamadakiler kalır.
+function processRows(s) {
+  const rows = new Map();
+  const tasks = S.tasks.filter((t) => t.surec === s.key && s.asamalar.some((a) => a.key === t.asama))
+    .sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+  for (const t of tasks) {
+    const i = s.asamalar.findIndex((a) => a.key === t.asama);
+    // Dosyası olmayan iş kendi satırında kalır (ilgisiz işler birleşmesin).
+    const key = t.dosya_id ? `${t.birim_id || t.birim_adi || ""}|${t.dosya_no || ""}|${t.taraf_adi || ""}` : `#${t.id}`;
+    let r = rows.get(key);
+    if (!r) rows.set(key, r = { dosya: dosyaText(t) || t.title, taraf: t.taraf_adi || "", tur: 1, cells: [], last: null });
+    if (i === 0 && r.cells.some((c, j) => c && j > 0)) { r.tur += 1; r.cells = []; }   // yeni tebligat turu
+    (r.cells[i] = r.cells[i] || []).push(t);
+    r.last = t;
+  }
+  for (const r of rows.values()) {
+    const t = r.last, i = s.asamalar.findIndex((a) => a.key === t.asama);
+    // Şu anki yer: son işin aşaması; son aşama olumlu bittiyse süreç tamam.
+    r.bitti = i === s.asamalar.length - 1 && isDone(t) && t.sonuc !== "olumsuz";
+    r.yer = r.bitti ? "bitti" : s.asamalar[i].key;
+    r.gec = !isDone(t) && isLate(t);
+    r.i = i;
+  }
+  return [...rows.values()];
+}
+function renderProcess() {
+  S.order = [];
+  const q = S.q.trim().toLocaleLowerCase("tr-TR"), kids = [];
+  for (const s of S.surecler) {
+    const all = processRows(s);
+    let list = all;
+    if (q) list = list.filter((r) => `${r.dosya} ${r.taraf}`.toLocaleLowerCase("tr-TR").includes(q));
+    const qList = list;
+    if (S.pa === "gec") list = list.filter((r) => r.gec);
+    else if (S.pa) list = list.filter((r) => r.yer === S.pa);
+    // Önce bekleyenler, en geride kalan önce; bitenler sonda.
+    list.sort((a, b) => (a.bitti - b.bitti) || (a.i - b.i) || a.dosya.localeCompare(b.dosya, "tr"));
+    const pick = (k) => () => { S.pa = S.pa === k ? "" : k; renderProcess(); };
+    const chip = (k, label, n, cls) => h("button", { type: "button", class: "chip" + (S.pa === k ? " on" : "") + (cls || ""),
+      "aria-pressed": S.pa === k ? "true" : "false", onclick: pick(k) }, label, h("span", { class: "n" }, ` ${n}`));
+    const rapor = [chip("", "Tümü", qList.length)];
+    s.asamalar.forEach((a, i) => {
+      const n = qList.filter((r) => r.yer === a.key).length;
+      if (n || S.pa === a.key) rapor.push(chip(a.key, `${i + 1}. ${a.title}`, n, a.dal ? " iade" : ""));
+    });
+    rapor.push(chip("bitti", "✓ Kesinleşti", qList.filter((r) => r.bitti).length, " ok"));
+    const gec = qList.filter((r) => r.gec).length;
+    if (gec || S.pa === "gec") rapor.push(chip("gec", "Gecikmiş", gec, " late"));
+    const cell = (arr, a) => {
+      const iade = a.dal ? " pc-iade" : "";
+      if (!arr) return h("td", { class: "pc" + iade });
+      const t = arr[arr.length - 1];
+      const st = !isDone(t) ? (isLate(t) ? "late" : "open") : t.sonuc === "olumsuz" ? "neg" : "ok";
+      const dal = ((tplOf(t) || {}).sonuclar || {})[t.sonuc];
+      return h("td", { class: `pc ${st}${iade}` }, h("button", { type: "button", class: "pc-b",
+        title: `${t.title} — ${STATUS[t.status] || t.status}${t.sonuc ? ` · sonuç: ${(dal && dal.ad) || SONUC[t.sonuc]}` : ""}` +
+          `${t.due_at ? " · " + fmtShort(t.due_at) : ""}${arr.length > 1 ? ` (bu aşamada ${arr.length} iş)` : ""}`,
+        onclick: () => openDetail(t.id) }, icon(st === "ok" ? "check" : st === "neg" ? "undo" : st === "late" ? "alert" : "clock")));
+    };
+    const grp = [];   // üst başlık: ardışık aşamalar dal adına göre gruplanır
+    s.asamalar.forEach((a) => { const l = a.dal ? "İade dalı (yeniden tebliğ)" : "";
+      if (grp.length && grp[grp.length - 1].l === l) grp[grp.length - 1].n++; else grp.push({ l, n: 1 }); });
+    const head = [h("tr", { class: "pt-grp" }, h("th", {}), grp.map((g) => h("th", { colspan: g.n, class: g.l ? "pc-iade" : "" }, g.l))),
+      h("tr", {}, h("th", {}, "Dosya / taraf"), s.asamalar.map((a, i) => h("th", { class: "pc" + (a.dal ? " pc-iade" : ""), title: a.title }, `${i + 1}. ${a.title}`)))];
+    kids.push(h("div", { class: "card", style: "padding:6px 8px;overflow-x:auto" },
+      h("div", { class: "row", style: "justify-content:space-between;flex-wrap:wrap;padding:6px 6px 4px" },
+        h("b", {}, s.title), h("span", { class: "small muted" }, `${all.length} dosya / taraf · ✓ olumlu · ↺ iade / olumsuz · saat: bekliyor · ! gecikti`)),
+      h("div", { class: "facet-row", style: "padding:0 6px 8px" }, h("span", { class: "facet-l" }, "Şu an"), h("div", { class: "chips" }, rapor)),
+      list.length ? h("table", { class: "pt" }, h("thead", {}, head), h("tbody", {}, list.map((r) => h("tr", { class: r.bitti ? "pt-bitti" : "" },
+        h("td", {}, h("b", {}, r.dosya), r.taraf ? h("div", { class: "small muted" }, r.taraf) : null,
+          r.tur > 1 ? h("div", { class: "small tur-n", title: "İade sonrası tebligat baştan izleniyor; önceki turlar işlerin geçmişinde" }, `${r.tur}. tebligat turu`) : null),
+        s.asamalar.map((a, i) => cell(r.cells[i], a))))))
+        : h("div", { class: "none-txt", style: "padding:10px 6px" }, q || S.pa ? "Eşleşen dosya yok."
+          : "Bu süreçte iş yok. Şablondan açılan işler (ör. “Tebliğ kontrol”) aşamasıyla burada görünür.")));
+  }
+  if (!kids.length) kids.push(h("div", { class: "card empty" }, h("b", {}, "Tanımlı süreç yok")));
+  $("list").replaceChildren(...kids);
 }
 
 // ── raporlar (yönetici) ──────────────────────────────────────────────────────────
@@ -2315,7 +2731,13 @@ async function openFromLink(url) {
 document.addEventListener("DOMContentLoaded", async () => {
   $("logo").append(icon("check"));
   applyTheme(getTheme());
-  const s = store.get("zs-sort"); if (s === "tarih" || s === "oncelik" || s === "eklenme") S.sort = s;
+  const s = store.get("zs-sort"); if (["tarih", "oncelik", "asama", "eklenme"].includes(s)) S.sort = s;
+  try {
+    const f = JSON.parse(store.get("zs-facet") || "{}");
+    S.fd = typeof f.fd === "string" ? f.fd : ""; S.fg = typeof f.fg === "string" ? f.fg : "";
+    S.fa = typeof f.fa === "string" ? f.fa : "";
+    S.ft = Array.isArray(f.ft) ? f.ft.filter((k) => typeof k === "string") : [];
+  } catch (_) { /* bozuk kayıt: süzgeçsiz başla */ }
   $("btn-theme").addEventListener("click", () => {
     const t = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
     store.set("zs-theme", t); applyTheme(t);
@@ -2325,6 +2747,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("me").addEventListener("click", () => { if (matchMedia("(max-width:900px)").matches) accountSheet(); });
   document.addEventListener("keydown", onKey);
   try { await loadMe(); } catch (e) { toast(e.message); return; }
+  await loadMeta();
   await refresh();
   await openFromLink();
   addEventListener("hashchange", () => openFromLink());

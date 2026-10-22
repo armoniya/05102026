@@ -1958,6 +1958,16 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const k = kucukHarf(ad);
         return sablonlar.hazir.concat(sablonlar.buro).find(function(s) { return kucukHarf(s.title) === k; }) || null;
     }
+    // İşin kaydedilmiş şablon bağı (sunucu: "h-tebligat" | "b-12"); yoksa başlıktan tahmin.
+    function isinSablonu(t) {
+        if (sablonlar && t.sablon) {
+            const s = sablonlar.hazir.concat(sablonlar.buro).find(function(x) {
+                return String(x.id) === t.sablon || 'b-' + x.id === t.sablon;
+            });
+            if (s) return s;
+        }
+        return sablonBul(isAdi(t));
+    }
     function kapanisPenceresi(t, ey) {
         pencereBasi(ey === 'tamamla' ? 'İşi tamamla' : 'Onaya gönder', t);
         const sonucYeri = el('div', '');
@@ -2013,11 +2023,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const soru = sablon && sablon.kontrol;
             sonucYeri.appendChild(el('div', 'margin-top:8px;font-weight:600;', soru ? soru : 'Kontrol sonucu (isteğe bağlı)'));
             SONUC.forEach(function(x) {
-                const b = el('button', null, x[1]);
+                const dal = sablon && sablon.sonuclar && sablon.sonuclar[x[0]];
+                const b = el('button', null, (dal && dal.ad) || x[1]);
                 b.type = 'button';
                 b.className = 'ia-cip';
                 b.setAttribute('data-k', x[0]);
-                const dal = sablon && sablon.sonuclar && sablon.sonuclar[x[0]];
                 if (dal) b.title = 'Sonraki iş: ' + (dal.baslik || 'aynı iş') + (dal.gun != null ? ' (+' + dal.gun + ' gün)' : '');
                 b.addEventListener('click', function(ev) { ev.stopPropagation(); sonucSec(x[0]); });
                 sonucYeri.appendChild(b);
@@ -2025,7 +2035,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
         sonucCiz();
         sablonlariGetir().then(function() {
-            sablon = sablonBul(isAdi(t));
+            sablon = isinSablonu(t);
             sonucCiz();
         }).catch(function() {});
 
@@ -2034,12 +2044,21 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const sonraki = ac_.checked && sAd.value.trim() && !t.is_private;
             b.disabled = true;
             mesajEl.textContent = '';
-            const etiket = sonuc ? SONUC.find(function(x) { return x[0] === sonuc; })[1].toLocaleLowerCase('tr-TR') : '';
+            const sDal = sonuc && sablon && sablon.sonuclar ? sablon.sonuclar[sonuc] : null;
+            const etiket = sonuc ? ((sDal && sDal.ad) || SONUC.find(function(x) { return x[0] === sonuc; })[1]).toLocaleLowerCase('tr-TR') : '';
             const neden = [sonuc ? 'Kontrol: ' + etiket + (sablon && sablon.kontrol ? ' (' + sablon.kontrol + ')' : '') : '',
                            not.value.trim(), sonraki ? 'Sonraki iş: ' + sAd.value.trim() : ''].filter(Boolean).join(' — ');
+            // Sonuç seçildiyse sonraki işi sunucu açar (süreçte sıradaki aşama); eski sunucu "sonraki"
+            // döndürmezse pencere kendisi açar.
+            const govde = { action: ey, reason: neden };
+            if (sonuc) {
+                govde.sonuc = sonuc;
+                govde.sonraki = sonraki ? { baslik: sAd.value.trim(), gun: sGun.value === '' ? null : Number(sGun.value) } : false;
+            }
+            let yanit;
             try {
-                await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: ey, reason: neden }) });
+                yanit = await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(govde) });
             } catch (e) {
                 mesajEl.style.color = '#fca5a5';
                 mesajEl.textContent = 'Gönderilemedi: ' + e.message;
@@ -2047,7 +2066,11 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 return;
             }
             let ek = '';
-            if (sonraki) {
+            if (yanit && 'sonraki' in yanit) {
+                const n = yanit.sonraki;
+                if (n && n.hata) ek = ' Sonraki iş açılamadı: ' + n.hata;
+                else if (n) ek = ' Sonraki iş açıldı: ' + n.title;
+            } else if (sonraki) {
                 try { ek = ' Sonraki iş açıldı: ' + (await sonrakiIsiAc(t, sAd.value.trim(), sGun.value)); }
                 catch (e) { ek = ' Sonraki iş açılamadı: ' + e.message; }
             }
@@ -2066,7 +2089,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         try { uyap = t.dosya_uyap ? JSON.parse(t.dosya_uyap) : null; } catch (e) {}
         const baslik = t.taraf_adi ? t.taraf_adi + ' – ' + ad : ad;
         await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-            title: baslik, description: s ? s.description || '' : '',
+            title: baslik, description: s ? s.description || '' : '', sablon: s ? s.id : null,
             assignee_id: ben && ben.me.role === 'admin' ? (t.assignee_id || null) : null,
             due_at: n == null ? null : Math.floor(new Date(gunSonra(n)).getTime() / 1000),
             priority: s && s.priority != null ? s.priority : (t.priority == null ? 1 : t.priority),
@@ -2539,6 +2562,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             try {
                 await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
                     title: tamBaslik(), description: aciklama.value,
+                    // Şablon seçilip adı değiştirilmediyse bağ gider; değiştiyse sunucu başlıktan arar.
+                    sablon: seciliSablon && baslik.value.trim() === seciliSablon.title ? seciliSablon.id : null,
                     assignee_id: admin ? Number(kisi.value) : null,
                     due_at: son.value ? Math.floor(new Date(son.value).getTime() / 1000) : null,
                     priority: Number(oncelik.value),

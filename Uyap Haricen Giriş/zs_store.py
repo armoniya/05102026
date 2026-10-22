@@ -37,8 +37,19 @@ class ZsError(Exception):
     """Kullanıcıya gösterilebilir hata (mesajı Türkçe)."""
 
 
+# Güncellemede "bu alan verilmedi, eskisi kalsın" işareti.
+KEEP = object()
+
+
 def _now() -> int:
     return int(time.time())
+
+
+def _gun_sonra(gun, saat=17):
+    """Bugünden gun gün sonra saat:00 (Türkiye saati, UTC+3) — sonraki işin son tarihi."""
+    tr = 3 * 3600
+    gece = (_now() + tr) // 86400 * 86400 - tr
+    return gece + int(gun) * 86400 + saat * 3600
 
 
 def _tg_uname(v):
@@ -134,6 +145,15 @@ _SCHEMA = [
         due_days INTEGER, priority INTEGER NOT NULL DEFAULT 1, taraf TEXT, action TEXT,
         created_by BIGINT, created_at BIGINT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS zs_templates_office ON zs_templates(office_id)",
+    # Özel etiketler (hazırlar kodda: HAZIR_ETIKETLER). owner_id boş = büroya açık; dolu = yalnız sahibine.
+    """CREATE TABLE IF NOT EXISTS zs_tags (
+        id {pk}, office_id TEXT, owner_id BIGINT, name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '',
+        created_by BIGINT, created_at BIGINT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS zs_tags_office ON zs_tags(office_id)",
+    # Ana işin etiketleri: tag = hazır anahtar ("h-tebligat") ya da zs_tags kimliği ("12").
+    """CREATE TABLE IF NOT EXISTS zs_task_tags (
+        task_id BIGINT NOT NULL, tag TEXT NOT NULL, added_by BIGINT, created_at BIGINT NOT NULL,
+        PRIMARY KEY (task_id, tag))""",
 ]
 
 # Sonradan eklenen sütunlar: tablo → ((sütun, tür), ...)
@@ -150,12 +170,20 @@ _ADDED_COLS = {
                  # İşin yapıldığı taraf (dosya kartının taraf listesinden; ör. borçlulardan biri).
                  ("taraf_adi", "TEXT"),
                  # Tebligatın PTT barkodu (iş açılırken belgeden alınır; "Tebliğ durumu kontrol").
-                 ("barkod", "TEXT")),
+                 ("barkod", "TEXT"),
+                 # İşin açıldığı şablon ("h-tebligat" | büro şablonu "b-12" | '' = eşleşmedi) ve
+                 # şablondan gelen süreç + aşama (bkz. HAZIR_SURECLER; elle düzeltilebilir).
+                 ("sablon", "TEXT"), ("surec", "TEXT"), ("asama", "TEXT"),
+                 # Kontrol sonucu (olumlu | olumsuz | bekliyor) — onaya gönderirken / tamamlarken seçilir.
+                 ("sonuc", "TEXT")),
     "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
     # Aşama 2: kontrol sorusu + sonuç dalları (JSON, bkz. TEMPLATE_SONUCLAR).
-    "zs_templates": (("kontrol", "TEXT"), ("sonuclar", "TEXT")),
+    # asama: "surec/asama" (ör. "icra-kesinlesme/teblig"); etiketler: JSON etiket anahtarı listesi.
+    "zs_templates": (("kontrol", "TEXT"), ("sonuclar", "TEXT"), ("asama", "TEXT"), ("etiketler", "TEXT")),
     # Telegram kullanıcı adı (küçük harf, @ siz) — grupta @etiketle kişi bulmak için.
     "zs_telegram": (("tg_username", "TEXT"),),
+    # Özel etiketin ana etiketi (dosya türü, ör. "e-icra"); boş = genel etiket.
+    "zs_tags": (("parent", "TEXT"),),
     # Ana CokluUyap hesabına bağ (ahmet@ofis) + o hesabın bürosu. Boşsa eski /zs kullanıcısı.
     "zs_users": (("account_username", "TEXT"), ("office_id", "TEXT")),
 }
@@ -165,6 +193,7 @@ _POST_INDEXES = (
     "WHERE account_username IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS zs_tasks_office_dosya ON zs_tasks(office_id, dosya_id)",
     "CREATE INDEX IF NOT EXISTS zs_tasks_office_birim_dosya ON zs_tasks(office_id, birim_id, dosya_no)",
+    "CREATE INDEX IF NOT EXISTS zs_tasks_office_surec ON zs_tasks(office_id, surec, asama)",
 )
 # UYAP dosya alanları (görevde).
 DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap", "evrak_id", "evrak_adi",
@@ -178,78 +207,234 @@ UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod"
 # taraf: işin bir tarafa yapılıp yapılmadığı (borclu | alacakli | herhangi | None).
 # action: önerilen UYAP aksiyonu (Aşama 3, henüz yürütülmez) — bkz. "yapılacak iş.md".
 # kontrol + sonuclar (Aşama 2): iş bitirilirken sorulan soru ve sonuca göre önerilen sonraki iş
-# {olumlu|olumsuz|bekliyor: {baslik, gun}}; baslik None = aynı iş yeniden (ör. bekliyor → +3 gün).
+# {olumlu|olumsuz|bekliyor: {baslik, gun, ad}}; baslik None = aynı iş yeniden (ör. bekliyor → +3 gün);
+# ad: sonucun bu şablondaki adı (ör. mazbatada olumlu "Tebliğ edildi", olumsuz "İade").
 def _sonuc(olumlu=None, olumsuz=None, bekliyor=None):
     def one(x):
         if x is None:
             return None
         if isinstance(x, int):
-            return {"baslik": None, "gun": x}
-        return {"baslik": x[0], "gun": x[1]}
+            return {"baslik": None, "gun": x, "ad": None}
+        return {"baslik": x[0], "gun": x[1], "ad": x[2] if len(x) > 2 else None}
     return {"olumlu": one(olumlu), "olumsuz": one(olumsuz), "bekliyor": one(bekliyor)}
 
 
+# Hazır süreçler (kodda, değiştirilemez). Aşamalar sıralıdır; iş aşamasını şablondan alır. Her aşamanın
+# alt etiketi (süreç etiketinin altında) işe aşamasıyla birlikte takılır. dal "iade": tebligat iade
+# dönünce yeniden tebliğ için izlenen yan yol; talep kabul edilince süreç baştan (yeni tur) başlar.
+# otomatik: ileride ofis ajanının (UyapMasa) yapacağı denetimin anahtarı (Aşama 4) — şimdi yürütülmez.
+def _asama(key, title, otomatik, dal=None):
+    return {"key": key, "title": title, "etiket": f"e-ik-{key}", "otomatik": otomatik, "dal": dal}
+
+
+HAZIR_SURECLER = (
+    {"key": "icra-kesinlesme", "title": "Tebligat → Kesinleştirme", "tur": "icra", "etiket": "e-icra-kesinlesme",
+     "taraf": "borclu", "asamalar": (
+        _asama("teb-olustu", "Tebligat oluşturuldu", "db:tebligat_olustu"),
+        _asama("ptt", "Tebligat PTT'ye verildi", "db:ptt_kabul"),
+        _asama("yolda", "Tebligat yola çıktı", "db:ptt_yolda"),
+        _asama("teblig", "Tebliğ kontrol", "db:teblig"),
+        _asama("mazbata", "Mazbata dönüşü", "db:mazbata"),
+        _asama("mernis", "Mernis adresine tebliğ", "uyap:talep_mernis", "iade"),
+        _asama("21-2", "21/2 adresine tebliğ", "uyap:talep_21_2", "iade"),
+        _asama("talep-kabul", "Talep kabul", "uyap:talep_kabul", "iade"),
+        _asama("itiraz", "İtiraz kontrol", "db:itiraz"),
+        _asama("kes-tarih", "Kesinleşme tarihi", "db:kesinlesme_tarihi"),
+        _asama("kes-gonder", "Kesinleştirme talebi gönderme", "uyap:kesinlestirme_gonder"),
+        _asama("kes-kabul", "Kesinleştirme talebi kabul", "uyap:kesinlestirme_talebi"),
+        _asama("kesinlesti", "Kesinleşme", "uyap:sorgu_kesinlesme"),
+    )},
+)
+# Dosya türleri: her biri bir ANA etiket ("e-icra" …). Tür, dosyanın tür açıklamasından, yoksa birim adından
+# bulunur (ilk eşleşen; uyap_proxy DOSYA_TURLERI ile aynı sıra, CBS ayrı). Dosyaya bağlı işe ana etiket
+# kendiliğinden takılır; alt etiketler ve süreçler yalnız kendi türündeki işe takılır.
+DOSYA_TURLERI = (
+    ("arabuluculuk", "Arabuluculuk", "#0d9488", r"arabulucu"),
+    ("icra", "İcra", "#4f46e5", r"icra dosya|icra dairesi|icra müdürlüğü|^icra"),
+    ("cbs", "CBS", "#b45309", r"başsavcı|savcılı|soruşturma"),
+    ("ceza", "Ceza", "#be123c", r"ceza"),
+    ("idare", "İdare", "#0369a1", r"idare|vergi mahkeme|danıştay"),
+    ("hukuk", "Hukuk", "#15803d", r"hukuk|asliye|sulh|aile|iş mahkeme|tüketici|ticaret|kadastro"),
+)
+
+
+def _tr_lower(s):
+    return str(s or "").replace("İ", "i").replace("I", "ı").lower()
+
+
+def dosya_turu(dosya_tur=None, birim_adi=None):
+    """Dosyanın türü (DOSYA_TURLERI anahtarı) ya da None."""
+    for metin in (_tr_lower(dosya_tur).strip(), _tr_lower(birim_adi).strip()):
+        if metin:
+            for key, _, _, desen in DOSYA_TURLERI:
+                if re.search(desen, metin):
+                    return key
+    return None
+
+
+def task_turu(t):
+    """İşin dosya türü; dosyasız işte None (her etiket / süreç uyar)."""
+    return dosya_turu(t.get("dosya_tur"), t.get("birim_adi")) if t and t.get("dosya_id") else None
+
+
+# Hazır etiketler (her büroya açık). Anahtarlar "e-" önekli; özel etiketin anahtarı zs_tags kimliğidir ("12").
+# parent: ana etiket (dosya türü) anahtarı; boş = her türde kullanılabilen genel etiket.
+HAZIR_ETIKETLER = tuple({"key": f"e-{k}", "name": ad, "color": renk, "parent": None}
+                        for k, ad, renk, _ in DOSYA_TURLERI) + (
+    # 2. katman: icra süreçleri ve iş grupları; 3. katman: sürecin aşamaları (aşamadan gelir, elle takılmaz).
+    {"key": "e-icra-kesinlesme", "name": "Tebligat – Kesinleştirme", "color": "#4338ca", "parent": "e-icra",
+     "surec": "icra-kesinlesme"},
+    *({"key": a["etiket"], "name": a["title"], "color": "#be123c" if a["dal"] else "#2563eb" if i < 5 else "#7c3aed",
+       "parent": s["etiket"], "surec": s["key"], "asama": a["key"]}
+      for s in HAZIR_SURECLER for i, a in enumerate(s["asamalar"])),
+    {"key": "e-haciz", "name": "Haciz", "color": "#dc2626", "parent": "e-icra"},
+    {"key": "e-tahsilat", "name": "Tahsilat", "color": "#059669", "parent": "e-icra"},
+    {"key": "e-muvekkil", "name": "Müvekkil bildirimi", "color": "#d97706", "parent": None},
+    {"key": "e-acil-dosya", "name": "Acil dosya", "color": "#e11d48", "parent": None},
+)
+ANA_ETIKETLER = {f"e-{k}": k for k, _, _, _ in DOSYA_TURLERI}
+# Etiket ağacı en çok 3 katman: dosya türü → süreç / grup → alt etiket.
+ETIKET_DERINLIK = 3
+
+
+def tag_zinciri(key, tags):
+    """[key, üstü, üstünün üstü, …] — tags: {anahtar: etiket}; döngüye karşı sınırlı."""
+    out = []
+    while key and key not in out and len(out) <= ETIKET_DERINLIK:
+        out.append(key)
+        key = (tags.get(key) or {}).get("parent")
+    return out
+
+
+def tag_turu(key, tags):
+    """Etiketin ait olduğu dosya türü (kök ana etiket); genel etikette None."""
+    return next((ANA_ETIKETLER[k] for k in tag_zinciri(key, tags) if k in ANA_ETIKETLER), None)
+
+
+def tag_uyar(tag, tur):
+    """Etiket (tur alanı hesaplanmış) bu türdeki işe takılabilir mi? Dosyasız işe (tur None) her etiket uyar."""
+    return tur is None or tag.get("tur") is None or tag["tur"] == tur
+
+
+_HAZIR_AGAC = {e["key"]: e for e in HAZIR_ETIKETLER}
+HAZIR_ETIKETLER = tuple(dict(e, tur=tag_turu(e["key"], _HAZIR_AGAC)) for e in HAZIR_ETIKETLER)
+
+ETIKET_RENKLERI = ("#2563eb", "#7c3aed", "#dc2626", "#059669", "#d97706", "#e11d48", "#0891b2", "#4b5563")
+
+# asama: "surec/asama" (bkz. HAZIR_SURECLER); etiketler: işe varsayılan olarak eklenen etiket anahtarları
+# (aşamanın alt etiketi ayrıca aşamadan gelir). eski: önceki adlar — eski işler başlıktan bunlarla da bağlanır.
+# Zincir (Tebligat → Kesinleştirme): her kontrol olumlu çıkınca sıradaki aşamanın işi açılır; mazbata iade
+# dönerse Mernis / 21/2 adresine tebliğ → talep kabul → süreç baştan (yeni tebligat turu).
+_KES = "icra-kesinlesme/"
+
+
+def _kontrol(id, title, asama, kontrol, sonuclar, description, action=None, due_days=2, eski=()):
+    return {"id": id, "title": title, "due_days": due_days, "priority": 1, "taraf": "borclu",
+            "description": description, "action": action, "kontrol": kontrol, "asama": _KES + asama,
+            "etiketler": [], "sonuclar": sonuclar, "eski": tuple(eski)}
+
+
 HAZIR_SABLONLAR = (
-    {"id": "h-tebligat", "title": "Tebligat kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
-     "description": "Safahat / tebligat barkodundan tebliğ sonucunu kontrol et.", "action": "ekran:safahat",
-     "kontrol": "Tebligat tebliğ edildi mi?",
-     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("Adres araştırması", 2), 3)},
-    {"id": "h-odeme-emri", "title": "Ödeme emri kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
-     "description": "Ödeme emrinin gönderilip gönderilmediğini kontrol et.", "action": "ekran:evrak",
-     "kontrol": "Ödeme emri gönderildi mi?",
-     "sonuclar": _sonuc(("Tebligat kontrol", 10), ("Ödeme emri yeniden gönder", 1), 3)},
-    {"id": "h-kesinlesme", "title": "Kesinleşme kontrol", "due_days": 7, "priority": 1, "taraf": "borclu",
-     "description": "Takibin borçlu yönünden kesinleşip kesinleşmediğini kontrol et.", "action": "ekran:safahat",
-     "kontrol": "Takip kesinleşti mi?",
-     "sonuclar": _sonuc(("Haciz talepleri", 2), ("Tebligat kontrol", 3), 3)},
-    {"id": "h-takyidat", "title": "Takyidat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "Araç / tapu takyidat sorgu sonucunu kontrol et.", "action": "sorgu:takyidat",
-     "kontrol": "Borçlu adına araç / taşınmaz var mı?",
-     "sonuclar": _sonuc(("Haciz / yakalama talebi", 2), ("Mal varlığı sorgusu", 3), 2)},
-    {"id": "h-barkod", "title": "Barkod takip", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "PTT barkodunda tebligatın son durumunu kontrol et.", "action": None,
-     "kontrol": "Barkodda teslim görünüyor mu?",
-     "sonuclar": _sonuc(("Tebligat kontrol", 3), ("Adres araştırması", 2), 2)},
+    _kontrol("h-odeme-emri", "Tebligat oluşturuldu kontrol", "teb-olustu",
+             "Ödeme emri tebligatı oluşturuldu mu?",
+             _sonuc(("PTT'ye verildi kontrol", 2, "Oluşturuldu"), (None, 1, "Oluşturulmadı"), 2),
+             "Ödeme emri tebligatının UYAP'ta oluşturulup gönderildiğini evrak listesinden kontrol et.",
+             "ekran:evrak", 3, eski=("Ödeme emri kontrol",)),
     # action "ptt:barkod": iş açılırken tebligatın PTT barkodu da alınır (görevde barkod alanı);
     # UYAP'taki iş satırında tek tuşla PTT sorgusu yapılır (ofisin /__uyap_agent__/ptt_sorgu ucu).
-    {"id": "h-teblig-durum", "title": "Tebliğ durumu kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
-     "description": "Tebligatın PTT barkodundan tebliğ durumunu sorgula.", "action": "ptt:barkod",
-     "kontrol": "Tebligat tebliğ edildi mi?",
-     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("Adres araştırması", 2), 3)},
-    {"id": "h-21-2", "title": "21/2 akıbet kontrol", "due_days": 5, "priority": 1, "taraf": "borclu",
-     "description": "21/2 tebligatın akıbetini kontrol et.", "action": "ekran:safahat",
-     "kontrol": "21/2 tebligat tebliğ edildi mi?",
-     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("İlanen tebligat talebi", 2), 5)},
+    _kontrol("h-ptt-teslim", "PTT'ye verildi kontrol", "ptt",
+             "Barkodda tebligat PTT'ye verilmiş görünüyor mu (“kayıt yok” değil)?",
+             _sonuc(("Yola çıktı kontrol", 1, "PTT'ye verildi"), (None, 2, "Kayıt yok"), 2),
+             "PTT barkodunda tebligatın “kayıt yok” durumundan çıkıp PTT'ye verildiğini kontrol et.",
+             "ptt:barkod", 3, eski=("PTT teslim kontrol",)),
+    _kontrol("h-yolda", "Yola çıktı kontrol", "yolda",
+             "Barkodda tebligat yola çıkmış (dağıtımda) görünüyor mu?",
+             _sonuc(("Tebliğ kontrol", 3, "Yola çıktı"), None, 2),
+             "PTT barkodunda tebligatın dağıtıma çıktığını kontrol et.", "ptt:barkod", 2),
+    _kontrol("h-teblig-durum", "Tebliğ kontrol", "teblig",
+             "Barkodda tebliğ sonucu (tebliğ ya da iade) belli oldu mu?",
+             _sonuc(("Mazbata dönüşü kontrol", 3, "Sonuç belli"), None, (None, 2, "Henüz sonuç yok")),
+             "Tebligatın PTT barkodundan tebliğ durumunu sorgula.", "ptt:barkod", 3,
+             eski=("Tebliğ durumu kontrol", "Tebligat kontrol", "Barkod takip")),
+    _kontrol("h-mazbata", "Mazbata dönüşü kontrol", "mazbata",
+             "Mazbata icra dosyasına döndü mü; tebliğ mi, iade mi?",
+             _sonuc(("İtiraz kontrol", 7, "Tebliğ edildi"), ("Mernis adresine tebliğ", 1, "İade"),
+                    (None, 3, "Henüz dönmedi")),
+             "Tebliğ mazbatasının icra dosyasına dönüp dönmediğini evrak listesinden kontrol et.",
+             "ekran:evrak", 3, eski=("Mazbata kontrol",)),
+    # İade dalı: yeniden tebliğ talebi → talep kabul → süreç baştan.
+    _kontrol("h-mernis", "Mernis adresine tebliğ", "mernis",
+             "Mernis adresine tebligat talebi gönderildi mi?",
+             _sonuc(("Talep kabul kontrol", 2, "Talep gönderildi"), ("21/2 adresine tebliğ", 1, "Mernis adresi aynı"), 1),
+             "İade dönen tebligat için borçlunun Mernis adresine tebligat çıkarılmasını talep et. Tebligat zaten "
+             "Mernis adresine yapıldıysa 21/2 tebliğe geç.", "talep:adres_arastirmasi", 1),
+    _kontrol("h-21-2", "21/2 adresine tebliğ", "21-2",
+             "Tebligat Kanunu 21/2'ye göre tebligat talebi gönderildi mi?",
+             _sonuc(("Talep kabul kontrol", 2, "Talep gönderildi"), None, 1),
+             "Mernis adresine iade dönen tebligat için 21/2 tebligat talebi gönder.", None, 1,
+             eski=("21/2 akıbet kontrol",)),
+    _kontrol("h-talep-kabul", "Talep kabul kontrol", "talep-kabul",
+             "Yeniden tebligat talebi icra dairesince kabul edildi mi?",
+             _sonuc(("Tebligat oluşturuldu kontrol", 2, "Kabul edildi"), ("Mernis adresine tebliğ", 1, "Reddedildi"), 2),
+             "Talebin kabul edildiğini evrak listesinden kontrol et; kabul edilince tebligat süreci baştan izlenir.",
+             "ekran:evrak", 2),
+    _kontrol("h-itiraz", "İtiraz kontrol", "itiraz",
+             "Süresinde itiraz edilmedi mi?",
+             _sonuc(("Kesinleşme tarihi kontrol", 0, "İtiraz yok"), ("Müvekkile bildirim", 1, "İtiraz var"), 2),
+             "İtiraz süresi dolunca borçlunun itiraz edip etmediğini evrak / safahattan kontrol et.", "ekran:evrak", 7),
+    _kontrol("h-kes-tarih", "Kesinleşme tarihi kontrol", "kes-tarih",
+             "Kesinleşme tarihi geldi mi (tebliğ + itiraz süresi doldu mu)?",
+             _sonuc(("Kesinleştirme talebi gönder", 0, "Tarih geldi"), None, (None, 2, "Henüz gelmedi")),
+             "Tebliğ tarihine göre kesinleşme tarihini hesapla; tarih gelmediyse bekle.", None, 1),
+    _kontrol("h-kes-gonder", "Kesinleştirme talebi gönder", "kes-gonder",
+             "Kesinleştirme talebi gönderildi mi?",
+             _sonuc(("Kesinleştirme talebi kabul kontrol", 2, "Gönderildi"), None, 1),
+             "İcra dairesine takibin kesinleştirilmesi talebini gönder.", "talep:kesinlestirme", 1),
+    _kontrol("h-kes-talep", "Kesinleştirme talebi kabul kontrol", "kes-kabul",
+             "Kesinleştirme talebi kabul edildi mi?",
+             _sonuc(("Kesinleşme kontrol", 1, "Kabul edildi"), ("Kesinleştirme talebi gönder", 1, "Reddedildi"), 2),
+             "Kesinleştirme talebinin icra dairesince kabul edilip edilmediğini kontrol et.", "ekran:evrak", 2,
+             eski=("Kesinleştirme talebi kontrol",)),
+    _kontrol("h-kesinlesme", "Kesinleşme kontrol", "kesinlesti",
+             "Takip kesinleşti mi (sorgu yapılabiliyor mu)?",
+             _sonuc(("Haciz talepleri", 2, "Kesinleşti"), ("Kesinleştirme talebi kabul kontrol", 2, "Kesinleşmedi"), 3),
+             "Sorgu ekranında bir sorgu dene: “kesinleşmediği için sorgu yapılamaz” uyarısı gelmiyorsa takip "
+             "borçlu yönünden kesinleşmiştir.", "ekran:safahat", 2),
+    {"id": "h-adres", "title": "Adres araştırması", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "MERNİS / SGK / GSM adres araştırması yap, yeni adrese tebligat çıkar.",
+     "action": "talep:adres_arastirmasi", "kontrol": "Yeni adres bulundu mu?", "asama": None, "etiketler": [],
+     "sonuclar": _sonuc(("Talep kabul kontrol", 3), ("21/2 adresine tebliğ", 1), 3)},
+    {"id": "h-takyidat", "title": "Takyidat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
+     "description": "Araç / tapu takyidat sorgu sonucunu kontrol et.", "action": "sorgu:takyidat",
+     "kontrol": "Borçlu adına araç / taşınmaz var mı?", "asama": None, "etiketler": ["e-haciz"],
+     "sonuclar": _sonuc(("Haciz / yakalama talebi", 2), ("Mal varlığı sorgusu", 3), 2)},
     {"id": "h-reddiyat", "title": "Reddiyat kontrol", "due_days": 2, "priority": 1, "taraf": None,
      "description": "Reddiyatın hesaba geçip geçmediğini kontrol et.", "action": None,
-     "kontrol": "Reddiyat hesaba geçti mi?",
+     "kontrol": "Reddiyat hesaba geçti mi?", "asama": None, "etiketler": ["e-tahsilat"],
      "sonuclar": _sonuc(("Müvekkile bildirim", 1), ("Muhasebe ile görüş", 1), 2)},
     {"id": "h-tahsilat", "title": "Tahsilat kontrol", "due_days": 2, "priority": 1, "taraf": "borclu",
      "description": "Tahsilatı kontrol et, müvekkile bildir.", "action": None,
-     "kontrol": "Tahsilat hesaba geçti mi?",
+     "kontrol": "Tahsilat hesaba geçti mi?", "asama": None, "etiketler": ["e-tahsilat"],
      "sonuclar": _sonuc(("Müvekkile bildirim", 1), ("Muhasebe ile görüş", 1), 2)},
     {"id": "h-aranacak", "title": "Borçlu aranacak", "due_days": 1, "priority": 1, "taraf": "borclu",
      "description": "Borçluya ulaş, sonucu nota yaz.", "action": None,
-     "kontrol": "Borçluya ulaşıldı mı?",
+     "kontrol": "Borçluya ulaşıldı mı?", "asama": None, "etiketler": [],
      "sonuclar": _sonuc(("Ödeme planı takibi", 7), 2, None)},
-    {"id": "h-adres", "title": "Adres araştırması", "due_days": 2, "priority": 1, "taraf": "borclu",
-     "description": "MERNİS / SGK / GSM adres araştırması yap, yeni adrese tebligat çıkar.",
-     "action": "talep:adres_arastirmasi",
-     "kontrol": "Yeni adres bulundu mu?",
-     "sonuclar": _sonuc(("Tebligat kontrol", 10), ("İlanen tebligat talebi", 2), 3)},
     {"id": "h-haciz", "title": "Haciz talepleri", "due_days": 2, "priority": 1, "taraf": "borclu",
      "description": "SGK, banka, araç ve tapu haciz taleplerini hazırla.", "action": None,
-     "kontrol": None, "sonuclar": _sonuc()},
+     "kontrol": None, "asama": None, "etiketler": ["e-haciz"], "sonuclar": _sonuc()},
     {"id": "h-muvekkil", "title": "Müvekkile bildirim", "due_days": 1, "priority": 1, "taraf": None,
      "description": "Dosyadaki gelişmeyi müvekkile bildir.", "action": None,
-     "kontrol": None, "sonuclar": _sonuc()},
+     "kontrol": None, "asama": None, "etiketler": ["e-muvekkil"], "sonuclar": _sonuc()},
 )
+
+
 TEMPLATE_TARAF = ("borclu", "alacakli", "herhangi")
 TEMPLATE_SONUCLAR = ("olumlu", "olumsuz", "bekliyor")
 
 
 def clean_sonuclar(d):
-    """{olumlu|olumsuz|bekliyor: {baslik, gun} | None} → temiz sözlük (bilinmeyen anahtarlar atılır)."""
+    """{olumlu|olumsuz|bekliyor: {baslik, gun, ad} | None} → temiz sözlük (bilinmeyen anahtarlar atılır)."""
     out = {}
     for k in TEMPLATE_SONUCLAR:
         x = d.get(k) if isinstance(d, dict) else None
@@ -264,8 +449,46 @@ def clean_sonuclar(d):
             raise ZsError("Sonraki iş süresi gün sayısı olmalı.")
         if gun is not None and not 0 <= gun <= 365:
             raise ZsError("Sonraki iş süresi 0–365 gün olmalı.")
-        out[k] = {"baslik": baslik, "gun": gun} if baslik or gun is not None else None
+        ad = " ".join(str(x.get("ad") or "").split())[:40] or None
+        out[k] = {"baslik": baslik, "gun": gun, "ad": ad} if baslik or gun is not None or ad else None
     return out
+
+
+_ASAMALAR = {f"{s['key']}/{a['key']}": (s["key"], a["key"]) for s in HAZIR_SURECLER for a in s["asamalar"]}
+_HAZIR_ETIKET = {e["key"]: e for e in HAZIR_ETIKETLER}
+_HAZIR_SABLON = {t["id"]: t for t in HAZIR_SABLONLAR}
+
+
+def asama_coz(v):
+    """"surec/asama" → (surec, asama); boş → (None, None); tanımsızsa ZsError."""
+    v = str(v or "").strip()
+    if not v:
+        return None, None
+    if v not in _ASAMALAR:
+        raise ZsError("Tanımsız süreç aşaması.")
+    return _ASAMALAR[v]
+
+
+def asama_etiketi(surec, asama):
+    """Aşamanın alt etiketi (ör. icra-kesinlesme/mazbata → "e-ik-mazbata") ya da None."""
+    s = next((x for x in HAZIR_SURECLER if x["key"] == surec), None)
+    return next((a.get("etiket") for a in (s or {}).get("asamalar", ()) if a["key"] == asama), None)
+
+
+# Aşama etiketleri işin aşamasından gelir: elle takılmaz / çıkarılmaz, şablona konmaz.
+ASAMA_ETIKETLERI = {a["etiket"] for s in HAZIR_SURECLER for a in s["asamalar"]}
+
+
+def ad_key(s):
+    """Ad karşılaştırma anahtarı. Python'da yapılır: SQLite LOWER() Türkçe harfleri (Ş/ş, İ/i) eşlemez."""
+    return " ".join(str(s or "").replace("İ", "i").replace("I", "i").lower().replace("ı", "i").split())
+
+
+def is_adi(title):
+    """İş başlığının şablon kısmı: "HAMZA OĞUZ – Tebligat kontrol" → "Tebligat kontrol"."""
+    title = title or ""
+    i = title.rfind(" – ")
+    return title[i + 3:] if i >= 0 else title
 
 
 def office_of(user) -> str:
@@ -309,6 +532,7 @@ class ZsStore:
         self._conn = None
         self._connect()
         self._ensure_schema()
+        self.backfill_sablon()
 
     # ── bağlantı ─────────────────────────────────────────────────────────────────────
     def _connect(self):
@@ -764,6 +988,7 @@ class ZsStore:
                     gnot[tid] = body[len("Onaya gönderme notu: "):]
             rem = dict(self._q(cur, f"SELECT task_id, MIN(remind_at) FROM zs_reminders WHERE user_id = ? AND sent_at IS NULL "
                                     f"AND task_id IN ({marks}) GROUP BY task_id", [uid] + ids).fetchall())
+            tags = self._task_tags(cur, ids, user)
             by_parent = {}
             for s_ in subs:
                 if s_["id"] > cuts.get(s_["parent_id"], nocut)["task"]:
@@ -780,6 +1005,8 @@ class ZsStore:
                 r["ext"] = pend.get(r["id"])
                 r["submit_note"] = gnot.get(r["id"])
                 r["reminder_at"] = rem.get(r["id"])
+                r["tags"] = tags.get(r["id"], [])
+                r["tur"] = task_turu(r)
             idx = {r["id"]: r for r in roots}
             for tid, muid, role in members:
                 key = "assignees" if role == "assignee" else "approvers"
@@ -818,6 +1045,8 @@ class ZsStore:
             t.update(self._roles(cur, task_id, t["assignee_id"]))
             t["extensions"] = self._rows(self._q(cur, "SELECT * FROM zs_extensions WHERE task_id = ? ORDER BY id DESC",
                                                  (task_id,)))
+            t["tags"] = self._task_tags(cur, [task_id], viewer).get(task_id, [])
+            t["tur"] = task_turu(t)
             return t
         return self._run(fn)
 
@@ -984,7 +1213,9 @@ class ZsStore:
         return int(assignee_id)
 
     def create_task(self, actor, title, parent_id=None, description="", assignee_id=None, due_at=None,
-                    private=False, priority=1, dosya=None):
+                    private=False, priority=1, dosya=None, sablon=None, etiketler=None):
+        """sablon: işin açıldığı şablonun anahtarı; verilmezse başlıktan bulunur. Ana işin süreç/aşaması
+        şablondan gelir, şablonun etiketleri + etiketler işe takılır (yalnız ana işte)."""
         title = (title or "").strip()
         if not title:
             raise ZsError("Başlık boş olamaz.")
@@ -1005,15 +1236,26 @@ class ZsStore:
             now = _now()
             status = "acik"
             d = dosya or {}
+            skey, tpl, surec, asama, tags, tur = None, None, None, None, [], None
+            if not parent_id:
+                tur = task_turu(d)
+                skey, tpl = self._sablon_bul(cur, office_of(actor), sablon, title)
+                surec, asama, tags = self._sablondan(cur, office_of(actor), tpl, tur)
+                given = self._check_tags(cur, actor, etiketler)
+                self._check_fit(given, tur)
+                tags += [t["key"] for t in given]
             tid = self._insert(cur, "INSERT INTO zs_tasks (parent_id, title, description, assignee_id, created_by, "
                                     "due_at, status, sort_order, created_at, updated_at, is_private, priority, office_id, "
-                                    f"{', '.join(DOSYA_FIELDS)}) "
-                                    f"VALUES ({', '.join('?' * (13 + len(DOSYA_FIELDS)))})",
+                                    f"sablon, surec, asama, {', '.join(DOSYA_FIELDS)}) "
+                                    f"VALUES ({', '.join('?' * (16 + len(DOSYA_FIELDS)))})",
                                (parent_id, title[:300], (description or "")[:5000], aid, actor["id"], due_at,
                                 status, self._next_sort(cur, parent_id), now, now,
                                 1 if (private and not parent_id) else 0, 1 if parent_id else priority,
-                                office_of(actor) or None, *(d.get(k) for k in DOSYA_FIELDS)))
+                                office_of(actor) or None, skey, surec, asama, *(d.get(k) for k in DOSYA_FIELDS)))
             root = parent_id or tid
+            self._tag_task(cur, tid, list(dict.fromkeys(tags)), actor["id"])
+            if not parent_id:
+                self._ana_etiket(cur, tid, tur, actor["id"])
             self._event(cur, root, actor["id"], "created", title=title[:300], sub=bool(parent_id))
             if aid:
                 self._event(cur, root, actor["id"], "assigned", title=title[:300], assignee_id=aid)
@@ -1049,6 +1291,17 @@ class ZsStore:
                 d = clean_dosya(fields["dosya"]) or {}      # boş/None → bağ kaldırılır
                 for k in DOSYA_FIELDS:
                     sets.append(f"{k} = ?"); params.append(d.get(k))
+                self._ana_etiket(cur, task_id, task_turu(d), actor["id"])
+            if "asama" in fields:
+                if t["parent_id"]:
+                    raise ZsError("Süreç aşaması yalnız ana işte olur.")
+                surec, asama = asama_coz(fields["asama"])     # boş → süreçten çıkarılır
+                tur = task_turu(clean_dosya(fields["dosya"]) or {}) if "dosya" in fields else task_turu(t)
+                st = next((s.get("tur") for s in HAZIR_SURECLER if s["key"] == surec), None)
+                if surec and tur and st and st != tur:
+                    raise ZsError("Bu süreç bu dosya türüne ait değil.")
+                sets += ["surec = ?", "asama = ?"]; params += [surec, asama]
+                self._asama_yaz(cur, task_id, surec, asama, actor["id"])   # aşamanın alt etiketi
             if "assignee_id" in fields:
                 aid = self._check_assignee(cur, fields["assignee_id"], actor)
                 root = t if not t["parent_id"] else self._one(self._q(
@@ -1073,7 +1326,7 @@ class ZsStore:
                 self._q(cur, f"UPDATE zs_tasks SET {', '.join(sets)} WHERE id = ?", params + [task_id])
                 if t["parent_id"]:
                     self._q(cur, "UPDATE zs_tasks SET updated_at = ? WHERE id = ?", (now, t["parent_id"]))
-                changed = [k for k in ("title", "description", "due_at", "priority", "dosya") if k in fields]
+                changed = [k for k in ("title", "description", "due_at", "priority", "dosya", "asama") if k in fields]
                 if changed:
                     self._event(cur, root_id, actor["id"], "edited", title=t["title"], fields=changed)
             return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
@@ -1114,6 +1367,7 @@ class ZsStore:
                       "DELETE FROM zs_transfers WHERE task_id = ?", "DELETE FROM zs_seen WHERE task_id = ?",
                       "DELETE FROM zs_members WHERE task_id = ?", "DELETE FROM zs_extensions WHERE task_id = ?",
                       "DELETE FROM zs_reminders WHERE task_id = ?", "DELETE FROM zs_tg_msgs WHERE task_id = ?",
+                      "DELETE FROM zs_task_tags WHERE task_id = ?",
                       "DELETE FROM zs_tasks WHERE parent_id = ?", "DELETE FROM zs_tasks WHERE id = ?"):
                 self._q(cur, q, (task_id,))
             # Silme izi kalsın: olaylar silinmez, task_id'si silinmiş işe işaret eder.
@@ -1122,9 +1376,17 @@ class ZsStore:
         return self._run(fn)
 
     # ── onay akışı ───────────────────────────────────────────────────────────────────
-    def transition(self, actor, task_id, action, reason=""):
-        """action: basla | gonder | tamamla | onayla | reddet | yeniden_ac. Yetki kontrolü burada."""
+    def transition(self, actor, task_id, action, reason="", sonuc=None, sonraki=None):
+        """action: basla | gonder | tamamla | onayla | reddet | yeniden_ac. Yetki kontrolü burada.
+        sonuc (gonder / tamamla): kontrol sonucu (olumlu | olumsuz | bekliyor) işe yazılır ve şablonun o
+        sonuç dalındaki sonraki iş (süreçte sıradaki aşama) aynı dosya / taraf / atananla açılır.
+        sonraki: {baslik, gun} öneriyi değiştirir; False sonraki işi açmaz. sonuc verilmezse sonraki iş
+        açılmaz (eski istemciler sonraki işi kendileri açar). Dönüş: (iş, sonraki iş | None)."""
         is_admin = actor["role"] == "admin"
+        if sonuc is not None and sonuc not in TEMPLATE_SONUCLAR:
+            raise ZsError("Geçersiz kontrol sonucu.")
+        if sonuc is not None and action not in ("gonder", "tamamla"):
+            raise ZsError("Kontrol sonucu yalnız onaya gönderirken ya da tamamlarken seçilir.")
 
         def fn(cur):
             t = self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
@@ -1172,16 +1434,69 @@ class ZsStore:
             now = _now()
             self._q(cur, "UPDATE zs_tasks SET status = ?, updated_at = ? WHERE id = ?", (new, now, task_id))
             if kind in ("submitted", "completed"):
-                self._q(cur, "UPDATE zs_tasks SET submitted_at = ? WHERE id = ?", (now, task_id))
+                self._q(cur, "UPDATE zs_tasks SET submitted_at = ?, sonuc = ? WHERE id = ?", (now, sonuc, task_id))
             reason_txt = (reason or "").strip()[:2000]
-            self._event(cur, task_id, actor["id"], kind, old=st, new=new, reason=reason_txt)
+            self._event(cur, task_id, actor["id"], kind, old=st, new=new, reason=reason_txt,
+                        **({"sonuc": sonuc} if sonuc else {}))
             if reason_txt:
                 label = {"rejected": "Ret gerekçesi", "approved": "Onay notu", "submitted": "Onaya gönderme notu",
                          "completed": "Tamamlama notu", "reopened": "Yeniden açma gerekçesi"}.get(kind, "Not")
                 self._q(cur, "INSERT INTO zs_notes (task_id, author_id, body, note_at, created_at) "
                              "VALUES (?, ?, ?, NULL, ?)", (task_id, actor["id"], f"{label}: {reason_txt}", now))
-            return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
-        return self._run(fn)
+            nxt = None
+            if sonuc and not t["is_private"] and sonraki is not False:
+                nxt = self._sonraki_oneri(cur, t, sonuc, sonraki)
+            return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,))), nxt
+        task, nxt = self._run(fn)
+        if not nxt:
+            return task, None
+        try:    # iş durumu değişti; sonraki iş açılamazsa (ör. atanan kapatıldı) yalnız bildirilir
+            return task, self.create_task(actor, nxt["title"], description=nxt["description"],
+                                          assignee_id=task["assignee_id"], due_at=nxt["due_at"],
+                                          priority=nxt["priority"], dosya=nxt["dosya"])
+        except ZsError as e:
+            return task, {"hata": str(e), "title": nxt["title"]}
+
+    def _sonraki_oneri(self, cur, t, sonuc, sonraki):
+        """Biten kontrolün sonraki işi: {title, description, due_at, priority, dosya} ya da None.
+        Başlık şablonun sonuç dalından (boşsa aynı şablon) ya da istemcinin sonraki.baslik'ından;
+        süre dalın gününden, yoksa sonraki şablonun süresinden (bugünden gün sayısı, 17:00)."""
+        office = t["office_id"] or ""
+        _, tpl = self._sablon_bul(cur, office, t["sablon"], t["title"])
+        if isinstance(sonraki, dict):
+            baslik = " ".join(str(sonraki.get("baslik") or "").split())[:200]
+            gun = sonraki.get("gun")
+            try:
+                gun = None if gun in (None, "") else int(gun)
+            except (TypeError, ValueError):
+                raise ZsError("Sonraki iş süresi gün sayısı olmalı.")
+        else:
+            dal = ((tpl or {}).get("sonuclar") or {}).get(sonuc)
+            if not dal:
+                return None
+            baslik = dal.get("baslik") or tpl["title"]
+            gun = dal.get("gun")
+        if not baslik:
+            return None
+        if gun is not None and not 0 <= gun <= 365:
+            raise ZsError("Sonraki iş süresi 0–365 gün olmalı.")
+        _, ntpl = self._sablon_bul(cur, office, None, baslik)
+        if gun is None:
+            gun = (ntpl or {}).get("due_days")
+        dosya = None
+        if t["dosya_id"]:
+            dosya = {k: t[k] for k in DOSYA_FIELDS if k != "dosya_uyap"}
+            try:
+                dosya["uyap"] = json.loads(t["dosya_uyap"]) if t["dosya_uyap"] else None
+            except ValueError:
+                dosya["uyap"] = None
+            if (ntpl or {}).get("asama") == _KES + "teb-olustu":   # yeni tebligat turu: eski barkod / belge kalmaz
+                dosya.update(barkod=None, evrak_id=None, evrak_adi=None)
+        return {"title": f"{t['taraf_adi']} – {baslik}" if t["taraf_adi"] else baslik,
+                "description": (ntpl or {}).get("description") or "",
+                "due_at": None if gun is None else _gun_sonra(gun),
+                "priority": t["priority"] if (ntpl or {}).get("priority") is None else ntpl["priority"],
+                "dosya": dosya}
 
     # ── rapor ham verisi (hesap zs_rapor.py'de) ──────────────────────────────────────
     def report_source(self, viewer_id, office=""):
@@ -1297,6 +1612,7 @@ class ZsStore:
                 t["members"] = one("SELECT * FROM zs_members WHERE task_id = ? ORDER BY id")
                 t["extensions"] = one("SELECT * FROM zs_extensions WHERE task_id = ? ORDER BY id")
                 t["transfers"] = one("SELECT * FROM zs_transfers WHERE task_id = ? ORDER BY id")
+                t["tags"] = one("SELECT * FROM zs_task_tags WHERE task_id = ? ORDER BY created_at, tag")
             return t
         return self._run(fn)
 
@@ -1562,19 +1878,28 @@ class ZsStore:
 
     # ── iş şablonları ────────────────────────────────────────────────────────────────
     def list_templates(self, user):
-        """{hazir: [...], buro: [...]} — büro şablonları kullanıcının bürosununkiler (ada göre)."""
+        """{hazir: [...], buro: [...], surecler: [...]} — büro şablonları kullanıcının bürosununkiler (ada göre)."""
         def fn(cur):
             return self._rows(self._q(cur, "SELECT t.*, u.display_name AS created_by_name FROM zs_templates t "
                                            "LEFT JOIN zs_users u ON u.id = t.created_by "
                                            "WHERE COALESCE(t.office_id, '') = ? ORDER BY LOWER(t.title), t.id",
                                       (office_of(user),)))
-        buro = self._run(fn)
-        for t in buro:
-            try:
-                t["sonuclar"] = clean_sonuclar(json.loads(t.get("sonuclar") or "{}"))
-            except (ValueError, ZsError):
-                t["sonuclar"] = clean_sonuclar({})
-        return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": buro}
+        buro = [self._template_row(t) for t in self._run(fn)]
+        return {"hazir": [dict(t) for t in HAZIR_SABLONLAR], "buro": buro, "surecler": HAZIR_SURECLER}
+
+    @staticmethod
+    def _template_row(t):
+        """Büro şablon satırı → istemci biçimi (sonuclar ve etiketler JSON'dan çözülür)."""
+        try:
+            t["sonuclar"] = clean_sonuclar(json.loads(t.get("sonuclar") or "{}"))
+        except (ValueError, ZsError):
+            t["sonuclar"] = clean_sonuclar({})
+        try:
+            et = json.loads(t.get("etiketler") or "[]")
+        except ValueError:
+            et = []
+        t["etiketler"] = [str(k) for k in et if isinstance(k, (str, int))] if isinstance(et, list) else []
+        return t
 
     @staticmethod
     def _template_fields(title, description, due_days, priority, taraf, action, kontrol=None, sonuclar=None):
@@ -1592,12 +1917,9 @@ class ZsStore:
 
     def _template_name_taken(self, cur, user, title, except_id=None):
         # Hazır şablonların adları da dolu sayılır: İş Ata penceresinde aynı adlı iki şablon görünmesin.
-        # Karşılaştırma Python'da: SQLite LOWER() Türkçe harfleri (Ş/ş, İ/i) eşlemez.
-        def key(s):
-            return s.replace("İ", "i").replace("I", "i").lower().replace("ı", "i")
         rows = self._q(cur, "SELECT title FROM zs_templates WHERE COALESCE(office_id, '') = ? AND id <> ?",
                        (office_of(user), except_id or 0)).fetchall()
-        return key(title) in {key(t["title"]) for t in HAZIR_SABLONLAR} | {key(r[0]) for r in rows}
+        return ad_key(title) in {ad_key(t["title"]) for t in HAZIR_SABLONLAR} | {ad_key(r[0]) for r in rows}
 
     def _own_template(self, cur, user, template_id, verb):
         t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ? AND COALESCE(office_id, '') = ?",
@@ -1609,14 +1931,24 @@ class ZsStore:
         return t
 
     def _template_out(self, cur, tid):
-        t = self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,)))
-        t["sonuclar"] = clean_sonuclar(json.loads(t.get("sonuclar") or "{}"))
-        return t
+        return self._template_row(self._one(self._q(cur, "SELECT * FROM zs_templates WHERE id = ?", (tid,))))
+
+    def _template_tags(self, cur, user, etiketler):
+        """Şablonun varsayılan etiketleri: yalnız hazır ve büroya açık etiketler (şablon büronundur)."""
+        tags = self._check_tags(cur, user, etiketler)
+        if any(t.get("owner_id") for t in tags):
+            raise ZsError("Şablona kişisel etiket eklenemez; büroya açık bir etiket seçin.")
+        if any(t["key"] in ANA_ETIKETLER for t in tags):
+            raise ZsError("Dosya türü etiketi işin dosyasından gelir; şablona konmaz.")
+        if any(t["key"] in ASAMA_ETIKETLERI for t in tags):
+            raise ZsError("Aşama etiketi şablonun aşamasından gelir; aşamayı seçin.")
+        return json.dumps([t["key"] for t in tags], ensure_ascii=False)
 
     def create_template(self, user, title, description="", due_days=None, priority=1, taraf=None, action=None,
-                        kontrol=None, sonuclar=None):
+                        kontrol=None, sonuclar=None, asama=None, etiketler=None):
         title, description, due_days, priority, taraf, action, kontrol, sonuclar = self._template_fields(
             title, description, due_days, priority, taraf, action, kontrol, sonuclar)
+        asama = "/".join(asama_coz(asama)) if asama else None
 
         def fn(cur):
             n = self._q(cur, "SELECT COUNT(*) FROM zs_templates WHERE COALESCE(office_id, '') = ?",
@@ -1626,36 +1958,328 @@ class ZsStore:
             if self._template_name_taken(cur, user, title):
                 raise ZsError("Bu adla bir şablon zaten var.")
             tid = self._insert(cur, "INSERT INTO zs_templates (office_id, title, description, due_days, priority, "
-                                    "taraf, action, kontrol, sonuclar, created_by, created_at) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    "taraf, action, kontrol, sonuclar, asama, etiketler, created_by, created_at) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                (office_of(user) or None, title, description, due_days, priority, taraf, action,
-                                kontrol, sonuclar, user["id"], _now()))
+                                kontrol, sonuclar, asama, self._template_tags(cur, user, etiketler), user["id"], _now()))
             return self._template_out(cur, tid)
         return self._run(fn)
 
     def update_template(self, user, template_id, title, description="", due_days=None, priority=1, taraf=None,
-                        action=None, kontrol=None, sonuclar=None):
-        """Şablonu ekleyen ya da büro yöneticisi düzenler (İş Listesi → Şablonlar)."""
+                        action=None, kontrol=None, sonuclar=None, asama=KEEP, etiketler=KEEP):
+        """Şablonu ekleyen ya da büro yöneticisi düzenler (İş Listesi → Şablonlar). asama / etiketler
+        verilmezse (KEEP) eskisi kalır — bu alanları bilmeyen UYAP penceresi düzenlerken silinmesin."""
         title, description, due_days, priority, taraf, action, kontrol, sonuclar = self._template_fields(
             title, description, due_days, priority, taraf, action, kontrol, sonuclar)
+        if asama is not KEEP:
+            asama = "/".join(asama_coz(asama)) if asama else None
 
         def fn(cur):
-            self._own_template(cur, user, template_id, "düzenleyebilir")
+            old = self._own_template(cur, user, template_id, "düzenleyebilir")
             if self._template_name_taken(cur, user, title, except_id=template_id):
                 raise ZsError("Bu adla bir şablon zaten var.")
+            a = old["asama"] if asama is KEEP else asama
+            e = old["etiketler"] if etiketler is KEEP else self._template_tags(cur, user, etiketler)
             self._q(cur, "UPDATE zs_templates SET title = ?, description = ?, due_days = ?, priority = ?, taraf = ?, "
-                         "action = ?, kontrol = ?, sonuclar = ? WHERE id = ?",
-                    (title, description, due_days, priority, taraf, action, kontrol, sonuclar, template_id))
+                         "action = ?, kontrol = ?, sonuclar = ?, asama = ?, etiketler = ? WHERE id = ?",
+                    (title, description, due_days, priority, taraf, action, kontrol, sonuclar, a, e, template_id))
             return self._template_out(cur, template_id)
         return self._run(fn)
 
     def delete_template(self, user, template_id):
-        """Şablonu ekleyen ya da büro yöneticisi siler."""
+        """Şablonu ekleyen ya da büro yöneticisi siler. Bu şablondan açılmış işler süreç ve aşamasını korur."""
         def fn(cur):
             t = self._own_template(cur, user, template_id, "silebilir")
             self._q(cur, "DELETE FROM zs_templates WHERE id = ?", (template_id,))
             return t
         return self._run(fn)
+
+    def _sablon_bul(self, cur, office, sablon=None, title=None, cache=None):
+        """İşin şablonu: önce verilen anahtar ("h-mazbata" | "b-12" | 12), yoksa başlığın şablon kısmı
+        hazır + büro şablon adlarıyla, sonra hazır şablonların eski adlarıyla eşlenir.
+        (anahtar, {asama, etiketler}) ya da ('', None)."""
+        if cache is not None and office in cache:
+            buro = cache[office]
+        else:
+            buro = self._rows(self._q(cur, "SELECT id, title, asama, etiketler FROM zs_templates "
+                                           "WHERE COALESCE(office_id, '') = ?", (office or "",)))
+            if cache is not None:
+                cache[office] = buro
+        s = str(sablon or "").strip()
+        if s in _HAZIR_SABLON:
+            return s, _HAZIR_SABLON[s]
+        m = re.fullmatch(r"(?:b-)?(\d{1,12})", s)
+        for t in buro:
+            if m and t["id"] == int(m.group(1)):
+                return f"b-{t['id']}", self._template_row(dict(t))
+        k = ad_key(is_adi(title))
+        if k:
+            for t in HAZIR_SABLONLAR:
+                if ad_key(t["title"]) == k:
+                    return t["id"], t
+            for t in buro:
+                if ad_key(t["title"]) == k:
+                    return f"b-{t['id']}", self._template_row(dict(t))
+            for t in HAZIR_SABLONLAR:
+                if k in {ad_key(e) for e in t.get("eski", ())}:
+                    return t["id"], t
+        return "", None
+
+    def _tag_task(self, cur, task_id, keys, actor_id):
+        for k in keys:
+            self._q(cur, "INSERT INTO zs_task_tags (task_id, tag, added_by, created_at) VALUES (?, ?, ?, ?) "
+                         "ON CONFLICT (task_id, tag) DO NOTHING", (task_id, k, actor_id, _now()))
+
+    def _asama_yaz(self, cur, task_id, surec, asama, actor_id):
+        """İşin aşama etiketi: eski aşamanınki kalkar, yenisi takılır (aşama boşsa hiçbiri)."""
+        self._q(cur, f"DELETE FROM zs_task_tags WHERE task_id = ? AND tag IN ({','.join('?' * len(ASAMA_ETIKETLERI))})",
+                (task_id, *sorted(ASAMA_ETIKETLERI)))
+        if asama:
+            self._tag_task(cur, task_id, [asama_etiketi(surec, asama)], actor_id)
+
+    def _sablondan(self, cur, office, tpl, tur):
+        """Şablonun işe verdikleri: (süreç, aşama, etiket anahtarları). Süreç ve alt etiketler yalnız
+        işin dosya türüne uyuyorsa gelir (ör. icra süreci hukuk dosyasındaki işe verilmez)."""
+        surec = asama = None
+        if tpl and tpl.get("asama") in _ASAMALAR:
+            sk, ak = _ASAMALAR[tpl["asama"]]
+            st = next((s.get("tur") for s in HAZIR_SURECLER if s["key"] == sk), None)
+            if tur is None or st is None or st == tur:
+                surec, asama = sk, ak
+        keys = list((tpl or {}).get("etiketler") or []) + ([asama_etiketi(surec, asama)] if asama else [])
+        return surec, asama, self._known_tags(cur, office, keys, tur)
+
+    def _ana_etiket(self, cur, task_id, tur, actor_id):
+        """Dosyaya bağlı işin ana etiketi (dosya türü) kendiliğinden takılır; başka türün ana etiketi kalkar."""
+        for k in ANA_ETIKETLER:
+            if tur and k != f"e-{tur}":
+                self._q(cur, "DELETE FROM zs_task_tags WHERE task_id = ? AND tag = ?", (task_id, k))
+        if tur:
+            self._tag_task(cur, task_id, [f"e-{tur}"], actor_id)
+
+    def backfill_sablon(self):
+        """Şablon bağı olmayan (bu özellikten önce açılmış) ana işleri başlıktan şablonlarına bağlar:
+        süreç, aşama, şablonun etiketleri ve dosya türünün ana etiketi yazılır. Eşleşmeyen iş '' olur,
+        bir daha taranmaz."""
+        def fn(cur):
+            rows = self._rows(self._q(cur, "SELECT id, title, office_id, dosya_id, dosya_tur, birim_adi FROM zs_tasks "
+                                           "WHERE parent_id IS NULL AND sablon IS NULL"))
+            cache, n = {}, 0
+            for r in rows:
+                tur = task_turu(r)
+                key, tpl = self._sablon_bul(cur, r["office_id"] or "", None, r["title"], cache)
+                surec, asama, tags = self._sablondan(cur, r["office_id"] or "", tpl, tur)
+                self._q(cur, "UPDATE zs_tasks SET sablon = ?, surec = ?, asama = ? WHERE id = ?",
+                        (key, surec, asama, r["id"]))
+                self._tag_task(cur, r["id"], tags, None)
+                self._ana_etiket(cur, r["id"], tur, None)
+                n += 1 if tpl else 0
+            return n
+        return self._run(fn)
+
+    # ── etiketler ────────────────────────────────────────────────────────────────────
+    # Ağaç (en çok 3 katman): dosya türü (ana etiket, kodda) → süreç / grup → alt etiket. Bir dosya türünün
+    # altındaki etiket yalnız o türdeki dosyanın işine takılır; kökü dosya türü olmayan etiket geneldir.
+    @staticmethod
+    def _tag_out(t):
+        return {"key": str(t["id"]), "id": t["id"], "name": t["name"], "color": t["color"] or ETIKET_RENKLERI[-1],
+                "parent": t.get("parent") or None, "owner_id": t["owner_id"], "created_by": t["created_by"]}
+
+    @staticmethod
+    def _agac(tags):
+        """{anahtar: etiket} sözlüğüne tur (kök dosya türü) ve derinlik (1 = kök) ekler."""
+        for k, t in tags.items():
+            t["tur"] = tag_turu(k, tags)
+            t["derinlik"] = len(tag_zinciri(k, tags))
+        return tags
+
+    def _visible_tags(self, cur, user):
+        """{anahtar: etiket} — hazır + büroya açık + kullanıcının kendi kişisel etiketleri."""
+        out = {e["key"]: dict(e, owner_id=None, created_by=None) for e in HAZIR_ETIKETLER}
+        for t in self._rows(self._q(cur, "SELECT * FROM zs_tags WHERE COALESCE(office_id, '') = ? "
+                                         "AND (owner_id IS NULL OR owner_id = ?) ORDER BY LOWER(name), id",
+                                    (office_of(user), user["id"]))):
+            out[str(t["id"])] = self._tag_out(t)
+        return self._agac(out)
+
+    def _shared_tags(self, cur, office):
+        """Hazır + büroya açık etiketler (ağaç bilgisiyle) — kullanıcıdan bağımsız işlemler için."""
+        out = {e["key"]: dict(e, owner_id=None, created_by=None) for e in HAZIR_ETIKETLER}
+        for t in self._rows(self._q(cur, "SELECT * FROM zs_tags WHERE COALESCE(office_id, '') = ? AND owner_id IS NULL",
+                                    (office or "",))):
+            out[str(t["id"])] = self._tag_out(t)
+        return self._agac(out)
+
+    def _known_tags(self, cur, office, keys, tur=None):
+        """Büroda var olan, paylaşılan ve işin türüne uyan etiket anahtarları (şablondan gelen listede
+        silinmişler düşer; dosya türü etiketi dosyadan geldiği için atlanır)."""
+        keys = [str(k) for k in (keys or [])]
+        if not keys:
+            return []
+        tags = self._shared_tags(cur, office)
+        return [k for k in dict.fromkeys(keys) if k in tags and k not in ANA_ETIKETLER and tag_uyar(tags[k], tur)]
+
+    def _check_tags(self, cur, user, keys):
+        """Kullanıcının görebildiği etiketler (anahtar sırasıyla); tanımadığı anahtar varsa ZsError."""
+        if keys is None:
+            return []
+        if not isinstance(keys, (list, tuple)):
+            raise ZsError("Geçersiz etiket listesi.")
+        vis = self._visible_tags(cur, user)
+        out = []
+        for k in dict.fromkeys(str(k) for k in keys):
+            if k not in vis:
+                raise ZsError("Etiket bulunamadı.")
+            out.append(vis[k])
+        return out
+
+    @staticmethod
+    def _check_fit(tags, tur):
+        for g in tags:
+            if g["key"] in ASAMA_ETIKETLERI:
+                raise ZsError("Aşama etiketi işin aşamasından gelir; aşamayı “Düzenle”den değiştirin.")
+            if g["key"] in ANA_ETIKETLER and tur is not None:
+                raise ZsError("Dosya türü etiketi dosyadan gelir; elle değiştirilemez.")
+            if not tag_uyar(g, tur):
+                raise ZsError(f"“{g['name']}” etiketi bu dosya türüne ait değil.")
+
+    def list_tags(self, user):
+        def fn(cur):
+            vis = self._visible_tags(cur, user)
+            custom = [t for k, t in vis.items() if k not in _HAZIR_ETIKET]
+            return {"hazir": [vis[e["key"]] for e in HAZIR_ETIKETLER], "buro": [t for t in custom if not t["owner_id"]],
+                    "kisisel": [t for t in custom if t["owner_id"]], "renkler": ETIKET_RENKLERI,
+                    "derinlik": ETIKET_DERINLIK,
+                    "turler": [{"key": k, "name": ad, "etiket": f"e-{k}"} for k, ad, _, _ in DOSYA_TURLERI]}
+        return self._run(fn)
+
+    def _tag_name(self, cur, user, name, color, parent, except_key=None):
+        """Ad aynı üst etiketin altında (ya da kökte) tekil olmalı; dosya türü adları her yerde dolu sayılır."""
+        name = " ".join(str(name or "").split())[:40]
+        if not name:
+            raise ZsError("Etiket adı yazın.")
+        taken = {ad_key(t["name"]) for k, t in self._visible_tags(cur, user).items()
+                 if k != except_key and ((t.get("parent") or None) == parent or k in ANA_ETIKETLER)}
+        if ad_key(name) in taken:
+            raise ZsError("Bu adla bir etiket zaten var.")
+        return name, color if color in ETIKET_RENKLERI else ETIKET_RENKLERI[0]
+
+    def _parent(self, cur, user, parent, kisisel, tag_key=None):
+        """Üst etiket: görünen bir etiket olmalı; büro etiketi kişisel etiketin altına konamaz; ağaç
+        ETIKET_DERINLIK katmanı aşamaz ve etiket kendi altına taşınamaz."""
+        parent = str(parent or "").strip() or None
+        if not parent:
+            return None
+        vis = self._visible_tags(cur, user)
+        p = vis.get(parent)
+        if not p:
+            raise ZsError("Üst etiket bulunamadı.")
+        if p["owner_id"] and not kisisel:
+            raise ZsError("Büro etiketi kişisel bir etiketin altına konamaz.")
+        if tag_key and tag_key in tag_zinciri(parent, vis):
+            raise ZsError("Etiket kendi altına taşınamaz.")
+        alt = 0
+        if tag_key:     # taşınan etiketin altındaki katman sayısı
+            alt = max((len(tag_zinciri(k, vis)) - vis[tag_key]["derinlik"] for k in vis
+                       if tag_key in tag_zinciri(k, vis)), default=0)
+        if p["derinlik"] + 1 + alt > ETIKET_DERINLIK:
+            raise ZsError(f"Etiket ağacı en çok {ETIKET_DERINLIK} katman olabilir.")
+        return parent
+
+    def create_tag(self, user, name, color=None, kisisel=False, parent=None):
+        """Herkes etiket ekler: kişisel (yalnız kendisi görür) ya da büroya açık; bir etiketin altında
+        (ör. İcra → İcra takibi – Kesinleşme → yeni etiket) ya da kökte (genel)."""
+        def fn(cur):
+            n = self._q(cur, "SELECT COUNT(*) FROM zs_tags WHERE COALESCE(office_id, '') = ?",
+                        (office_of(user),)).fetchone()[0]
+            if n >= 300:
+                raise ZsError("Bir büroda en çok 300 etiket olabilir.")
+            p = self._parent(cur, user, parent, kisisel)
+            nm, col = self._tag_name(cur, user, name, color, p)
+            tid = self._insert(cur, "INSERT INTO zs_tags (office_id, owner_id, name, color, parent, created_by, created_at) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (office_of(user) or None, user["id"] if kisisel else None, nm, col, p, user["id"], _now()))
+            return self._visible_tags(cur, user)[str(tid)]
+        return self._run(fn)
+
+    def _own_tag(self, cur, user, tag_id, verb):
+        t = self._one(self._q(cur, "SELECT * FROM zs_tags WHERE id = ? AND COALESCE(office_id, '') = ?",
+                              (tag_id, office_of(user))))
+        if not t or (t["owner_id"] and t["owner_id"] != user["id"]):
+            raise ZsError("Etiket bulunamadı.")
+        if not t["owner_id"] and user["role"] != "admin" and t["created_by"] != user["id"]:
+            raise ZsError(f"Büro etiketini yalnız ekleyen ya da yönetici {verb}.")
+        return t
+
+    def update_tag(self, user, tag_id, name, color=None, parent=KEEP):
+        """Ad / renk / üst etiket. Taşınan etiket artık uymadığı işlerde de kalır (iz silinmez)."""
+        def fn(cur):
+            t = self._own_tag(cur, user, tag_id, "düzenleyebilir")
+            p = (t.get("parent") or None) if parent is KEEP else \
+                self._parent(cur, user, parent, bool(t["owner_id"]), tag_key=str(tag_id))
+            nm, col = self._tag_name(cur, user, name, color or t["color"], p, except_key=str(tag_id))
+            self._q(cur, "UPDATE zs_tags SET name = ?, color = ?, parent = ? WHERE id = ?", (nm, col, p, tag_id))
+            return self._visible_tags(cur, user)[str(tag_id)]
+        return self._run(fn)
+
+    def delete_tag(self, user, tag_id):
+        """Etiketi siler; işlerdeki bağları da kalkar (şablonlardaki anahtar okurken düşer). Altında
+        etiket olan etiket silinmez (önce alt etiketler silinir ya da taşınır)."""
+        def fn(cur):
+            t = self._own_tag(cur, user, tag_id, "silebilir")
+            if self._q(cur, "SELECT COUNT(*) FROM zs_tags WHERE parent = ?", (str(tag_id),)).fetchone()[0]:
+                raise ZsError("Bu etiketin altında etiket var; önce onları silin ya da taşıyın.")
+            self._q(cur, "DELETE FROM zs_task_tags WHERE tag = ?", (str(tag_id),))
+            self._q(cur, "DELETE FROM zs_tags WHERE id = ?", (tag_id,))
+            return self._tag_out(t)
+        return self._run(fn)
+
+    def set_task_tags(self, actor, task_id, add=(), remove=(), can_shared=False):
+        """Ana işe etiket ekler / çıkarır. Kişisel etiketi işi görebilen herkes kendisi için takar;
+        hazır ve büro etiketleri için can_shared (atanan / yönetici — çağıran denetler) gerekir.
+        Etiket işin dosya türüne uymalı; dosya türü (ana) etiketi dosyadan gelir.
+        Olay yalnız paylaşılan etiketler için yazılır (kişisel etiket adları başkasına görünmesin)."""
+        def fn(cur):
+            t = self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
+            if not t or t["parent_id"]:
+                raise ZsError("Etiket yalnız ana işe eklenir.")
+            tags_add, tags_rem = self._check_tags(cur, actor, list(add or ())), self._check_tags(cur, actor, list(remove or ()))
+            if not can_shared and any(not x["owner_id"] for x in tags_add + tags_rem):
+                raise ZsError("Bu işe büro etiketi yalnız işe atanan ya da yönetici ekler; kişisel etiket kullanın.")
+            tur = task_turu(t)
+            self._check_fit(tags_add, tur)
+            if tur is not None and any(x["key"] in ANA_ETIKETLER for x in tags_rem):
+                raise ZsError("Dosya türü etiketi dosyadan gelir; elle değiştirilemez.")
+            if any(x["key"] in ASAMA_ETIKETLERI for x in tags_rem):
+                raise ZsError("Aşama etiketi işin aşamasından gelir; aşamayı “Düzenle”den değiştirin.")
+            have = {r[0] for r in self._q(cur, "SELECT tag FROM zs_task_tags WHERE task_id = ?", (task_id,)).fetchall()}
+            added = [x for x in tags_add if x["key"] not in have]
+            removed = [x for x in tags_rem if x["key"] in have]
+            self._tag_task(cur, task_id, [x["key"] for x in added], actor["id"])
+            for x in removed:
+                self._q(cur, "DELETE FROM zs_task_tags WHERE task_id = ? AND tag = ?", (task_id, x["key"]))
+            shared_add = [x["name"] for x in added if not x["owner_id"]]
+            shared_rem = [x["name"] for x in removed if not x["owner_id"]]
+            if shared_add or shared_rem:
+                self._event(cur, task_id, actor["id"], "tags", added=shared_add, removed=shared_rem)
+                self._q(cur, "UPDATE zs_tasks SET updated_at = ? WHERE id = ?", (_now(), task_id))
+            vis = self._visible_tags(cur, actor)
+            return [r[0] for r in self._q(cur, "SELECT tag FROM zs_task_tags WHERE task_id = ? ORDER BY created_at, tag",
+                                          (task_id,)).fetchall() if r[0] in vis]
+        return self._run(fn)
+
+    def _task_tags(self, cur, ids, viewer):
+        """{task_id: [görünen etiket anahtarları]}"""
+        if not ids:
+            return {}
+        vis = self._visible_tags(cur, viewer) if viewer else None
+        marks = ",".join("?" * len(ids))
+        out = {}
+        for tid, tag in self._q(cur, f"SELECT task_id, tag FROM zs_task_tags WHERE task_id IN ({marks}) "
+                                     "ORDER BY created_at, tag", list(ids)).fetchall():
+            if vis is None or tag in vis:
+                out.setdefault(tid, []).append(tag)
+        return out
 
     def get_reminder(self, rid):
         return self._run(lambda cur: self._one(self._q(cur, "SELECT * FROM zs_reminders WHERE id = ?", (rid,))))

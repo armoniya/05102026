@@ -1011,7 +1011,7 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         ahmet = await self.login("kemal", "ahmet")
         mehmet = await self.login("kemal", "mehmet")
         s = await self.j(await mehmet.get("/is-listesi/api/sablonlar"))
-        self.assertIn("Tebligat kontrol", [x["title"] for x in s["hazir"]])
+        self.assertIn("Tebliğ kontrol", [x["title"] for x in s["hazir"]])
         self.assertEqual(s["buro"], [])
         m = (await self.j(await mehmet.post("/is-listesi/api/sablonlar", headers=H, json={
             "title": "  Haciz   ihbarnamesi kontrol ", "description": "89/1", "due_days": 10, "priority": 2,
@@ -1025,8 +1025,8 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(a["taraf"])
         buro = (await self.j(await mehmet.get("/is-listesi/api/sablonlar")))["buro"]
         self.assertEqual([x["title"] for x in buro], ["Haciz ihbarnamesi kontrol", "Yönetici şablonu"])
-        # Hazır şablonun adı alınamaz (pencerede iki "Tebligat kontrol" olmasın).
-        await self.j(await mehmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": "tebligat KONTROL"}), 400)
+        # Hazır şablonun adı alınamaz (pencerede iki "Tebliğ kontrol" olmasın).
+        await self.j(await mehmet.post("/is-listesi/api/sablonlar", headers=H, json={"title": "TEBLİĞ kontrol"}), 400)
         # Düzenleme (Şablonlar sekmesi): ekleyen ya da yönetici; ad çakışması reddedilir.
         u = (await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={
             "title": "Haciz ihbarnamesi 89/1", "description": "", "due_days": None, "priority": 0, "taraf": "herhangi"})))["template"]
@@ -1037,19 +1037,22 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         await self.j(await ahmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={"title": "Haciz ihbarnamesi 89/1",
                                                                                             "due_days": 7}))
         # Aşama 2: kontrol sorusu + sonuç dalları (hazırlarda kodda, büroda JSON).
-        teb = next(x for x in s["hazir"] if x["title"] == "Tebligat kontrol")
-        self.assertEqual((teb["kontrol"], teb["sonuclar"]["olumlu"], teb["sonuclar"]["bekliyor"]),
-                         ("Tebligat tebliğ edildi mi?", {"baslik": "Kesinleşme kontrol", "gun": 7}, {"baslik": None, "gun": 3}))
+        maz = next(x for x in s["hazir"] if x["title"] == "Mazbata dönüşü kontrol")
+        self.assertEqual((maz["sonuclar"]["olumlu"], maz["sonuclar"]["olumsuz"], maz["sonuclar"]["bekliyor"]),
+                         ({"baslik": "İtiraz kontrol", "gun": 7, "ad": "Tebliğ edildi"},
+                          {"baslik": "Mernis adresine tebliğ", "gun": 1, "ad": "İade"},
+                          {"baslik": None, "gun": 3, "ad": "Henüz dönmedi"}))
         u = (await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={
             "title": "Haciz ihbarnamesi 89/1", "kontrol": "  Cevap   geldi mi? ",
             "sonuclar": {"olumlu": {"baslik": " Haciz talepleri ", "gun": "2"}, "olumsuz": {"baslik": "", "gun": None},
                          "bekliyor": {"gun": 5}, "baska": {"baslik": "x"}}})))["template"]
         self.assertEqual((u["kontrol"], u["sonuclar"]), ("Cevap geldi mi?", {
-            "olumlu": {"baslik": "Haciz talepleri", "gun": 2}, "olumsuz": None, "bekliyor": {"baslik": None, "gun": 5}}))
+            "olumlu": {"baslik": "Haciz talepleri", "gun": 2, "ad": None}, "olumsuz": None,
+            "bekliyor": {"baslik": None, "gun": 5, "ad": None}}))
         await self.j(await mehmet.post(f"/is-listesi/api/sablonlar/{m['id']}", headers=H, json={
             "title": "Haciz ihbarnamesi 89/1", "sonuclar": {"olumlu": {"gun": 999}}}), 400)
         buro = (await self.j(await mehmet.get("/is-listesi/api/sablonlar")))["buro"]
-        self.assertEqual(next(x for x in buro if x["id"] == m["id"])["sonuclar"]["bekliyor"], {"baslik": None, "gun": 5})
+        self.assertEqual(next(x for x in buro if x["id"] == m["id"])["sonuclar"]["bekliyor"], {"baslik": None, "gun": 5, "ad": None})
         # Başka büro görmez / silemez; üye yalnız kendininkini, yönetici hepsini siler.
         zeynep = await self.login("deniz", "zeynep")
         self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/sablonlar")))["buro"], [])
@@ -1064,7 +1067,7 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             "title": "Hamza Oğuz – Tebligat kontrol", "dosya": dict(self.DOSYA, taraf_adi="Hamza Oğuz")})))["task"]
         self.assertEqual(t["taraf_adi"], "Hamza Oğuz")
         # "Tebliğ durumu kontrol": PTT barkodu işle saklanır (yalnız rakamlar; Code-39 yıldızları atılır).
-        ptt = next(x for x in s["hazir"] if x["title"] == "Tebliğ durumu kontrol")
+        ptt = next(x for x in s["hazir"] if x["title"] == "Tebliğ kontrol")
         self.assertEqual(ptt["action"], "ptt:barkod")
         t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
             "title": "Tebliğ durumu kontrol", "dosya": dict(self.DOSYA, barkod="*4007770084489*")})))["task"]
@@ -1072,6 +1075,228 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
             "title": "Tebligat kontrol", "dosya": dict(self.DOSYA)})))["task"]
         self.assertIsNone(t["barkod"])
+
+    async def test_surec_asama_ve_sablon_bagi(self):
+        """İş şablonundan süreç + aşama + varsayılan etiket alır; şablon anahtarı ya da başlıktan bulunur."""
+        ahmet = await self.login("kemal", "ahmet")
+        s = await self.j(await ahmet.get("/is-listesi/api/surecler"))
+        kes = s["surecler"][0]
+        self.assertEqual(kes["key"], "icra-kesinlesme")
+        self.assertEqual([a["key"] for a in kes["asamalar"]],
+                         ["teb-olustu", "ptt", "yolda", "teblig", "mazbata", "mernis", "21-2", "talep-kabul",
+                          "itiraz", "kes-tarih", "kes-gonder", "kes-kabul", "kesinlesti"])
+        self.assertEqual([a["key"] for a in kes["asamalar"] if a["dal"] == "iade"], ["mernis", "21-2", "talep-kabul"])
+        # Başlıktan (taraf adıyla birlikte) hazır şablon bulunur; eski adı da tanınır.
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "HAMZA OĞUZ – Mazbata kontrol", "dosya": dict(self.DOSYA, taraf_adi="HAMZA OĞUZ")})))["task"]
+        self.assertEqual((t["sablon"], t["surec"], t["asama"]), ("h-mazbata", "icra-kesinlesme", "mazbata"))
+        lst = (await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu")))["tasks"]
+        self.assertCountEqual(next(x for x in lst if x["id"] == t["id"])["tags"], ["e-ik-mazbata", "e-icra"])
+        # Açık anahtar başlıktan önce gelir; şablonsuz iş '' olur.
+        t2 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Elle yazılmış iş", "sablon": "h-kes-talep"})))["task"]
+        self.assertEqual((t2["sablon"], t2["asama"]), ("h-kes-talep", "kes-kabul"))
+        t3 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Serbest iş"})))["task"]
+        self.assertEqual((t3["sablon"], t3["surec"], t3["asama"]), ("", None, None))
+        # Büro şablonu aşama + paylaşılan etiket taşır; kişisel etiket şablona konamaz.
+        et = (await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "Banka müvekkili"})))["tag"]
+        kisi = (await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H,
+                                               json={"name": "Benim takip", "kisisel": True})))["tag"]
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={
+            "title": "Kişisel etiketli", "etiketler": [kisi["key"]]}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={
+            "title": "Yanlış aşama", "asama": "icra-kesinlesme/yok"}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={
+            "title": "Aşama etiketli", "etiketler": ["e-ik-itiraz"]}), 400)
+        b = (await self.j(await ahmet.post("/is-listesi/api/sablonlar", headers=H, json={
+            "title": "Banka itiraz kontrol", "asama": "icra-kesinlesme/itiraz",
+            "etiketler": [et["key"], "e-icra-kesinlesme"]})))["template"]
+        self.assertEqual((b["asama"], b["etiketler"]), ("icra-kesinlesme/itiraz", [et["key"], "e-icra-kesinlesme"]))
+        # UYAP penceresi aşamayı/etiketi bilmeden düzenlerse eskisi kalır.
+        b2 = (await self.j(await ahmet.post(f"/is-listesi/api/sablonlar/{b['id']}", headers=H, json={
+            "title": "Banka itiraz kontrol", "due_days": 4})))["template"]
+        self.assertEqual((b2["asama"], b2["etiketler"]), (b["asama"], b["etiketler"]))
+        t4 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "X – banka İTİRAZ kontrol", "etiketler": [kisi["key"]]})))["task"]
+        self.assertEqual((t4["sablon"], t4["asama"]), (f"b-{b['id']}", "itiraz"))
+        d = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t4['id']}")))["task"]
+        self.assertCountEqual(d["tags"], [et["key"], "e-icra-kesinlesme", "e-ik-itiraz", kisi["key"]])
+        # Aşama etiketi elle takılmaz / çıkarılmaz; aşama değişince etiketi de değişir.
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t4['id']}/etiketler", headers=H,
+                                      json={"remove": ["e-ik-itiraz"]}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t4['id']}/etiketler", headers=H,
+                                      json={"add": ["e-ik-mazbata"]}), 400)
+        # Şablon silinince iş aşamasını korur; aşama elle düzeltilir ya da boşaltılır.
+        await self.j(await ahmet.delete(f"/is-listesi/api/sablonlar/{b['id']}", headers=H))
+        self.assertEqual((await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t4['id']}")))["task"]["asama"], "itiraz")
+        u = (await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t4['id']}", headers=H,
+                                             json={"asama": "icra-kesinlesme/kesinlesti"})))["task"]
+        self.assertEqual((u["surec"], u["asama"]), ("icra-kesinlesme", "kesinlesti"))
+        d = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t4['id']}")))["task"]
+        self.assertCountEqual(d["tags"], [et["key"], "e-icra-kesinlesme", "e-ik-kesinlesti", kisi["key"]])
+        await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t4['id']}", headers=H, json={"asama": "x/y"}), 400)
+        u = (await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t4['id']}", headers=H, json={"asama": ""})))["task"]
+        self.assertEqual((u["surec"], u["asama"]), (None, None))
+        d = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t4['id']}")))["task"]
+        self.assertCountEqual(d["tags"], [et["key"], "e-icra-kesinlesme", kisi["key"]])
+
+    async def test_etiketler(self):
+        """Hazır + büro + kişisel etiketler: kişisel yalnız sahibine görünür, olaylara yazılmaz; büro yalıtımı."""
+        ahmet = await self.login("kemal", "ahmet")
+        mehmet = await self.login("kemal", "mehmet")
+        zeynep = await self.login("deniz", "zeynep")
+        tl = await self.j(await mehmet.get("/is-listesi/api/etiketler"))
+        self.assertIn("e-ik-mazbata", [x["key"] for x in tl["hazir"]])
+        buro = (await self.j(await mehmet.post("/is-listesi/api/etiketler", headers=H, json={"name": " Acil  takip "})))["tag"]
+        self.assertEqual(buro["name"], "Acil takip")
+        await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "acil TAKİP"}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "icra"}), 400)
+        kisi = (await self.j(await mehmet.post("/is-listesi/api/etiketler", headers=H,
+                                                json={"name": "Yarın bak", "kisisel": True})))["tag"]
+        # Kişisel etiket başkasına görünmez; aynı adı başkası kendisi için açabilir.
+        al = await self.j(await ahmet.get("/is-listesi/api/etiketler"))
+        self.assertEqual(([x["name"] for x in al["buro"]], al["kisisel"]), (["Acil takip"], []))
+        await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "Yarın bak", "kisisel": True}))
+        self.assertEqual((await self.j(await zeynep.get("/is-listesi/api/etiketler")))["buro"], [])
+        # İş: yönetici Mehmet'e atar. Mehmet büro + kişisel etiket takar.
+        pp = await self.people(ahmet)
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Etiketli iş", "assignee_id": pp["Mehmet Yılmaz"]})))["task"]
+        r = await self.j(await mehmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H,
+                                           json={"add": [buro["key"], kisi["key"], "e-haciz"]}))
+        self.assertCountEqual(r["tags"], [buro["key"], kisi["key"], "e-haciz"])
+        await self.j(await zeynep.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H,
+                                       json={"add": ["e-haciz"]}), 400)
+        await self.j(await mehmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H,
+                                       json={"add": ["yok-boyle"]}), 400)
+        # Yönetici kişisel etiketi görmez; olayda yalnız paylaşılan etiket adları var.
+        d = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t['id']}")))["task"]
+        self.assertCountEqual(d["tags"], [buro["key"], "e-haciz"])
+        ev = next(e for e in d["events"] if e["kind"] == "tags")
+        self.assertEqual(ev["detail"], {"added": ["Acil takip", "Haciz"], "removed": []})
+        # Üye büro etiketini başkasının işine takamaz, kişisel etiketini takabilir.
+        t2 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Yönetici işi"})))["task"]
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t2['id']}/kisiler", headers=H, json={
+            "user_id": pp["Mehmet Yılmaz"], "role": "approver", "note": "bak"}))
+        await self.j(await mehmet.post(f"/is-listesi/api/tasks/{t2['id']}/etiketler", headers=H,
+                                       json={"add": [buro["key"]]}), 400)
+        await self.j(await mehmet.post(f"/is-listesi/api/tasks/{t2['id']}/etiketler", headers=H,
+                                       json={"add": [kisi["key"]]}))
+        # Düzenleme / silme: ekleyen ya da yönetici; kişisel yalnız sahibi. Silinen etiket işlerden düşer.
+        await self.j(await ahmet.post(f"/is-listesi/api/etiketler/{kisi['id']}", headers=H, json={"name": "z"}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/etiketler/{buro['id']}", headers=H,
+                                      json={"name": "Çok acil", "color": "#059669"}))
+        await self.j(await zeynep.delete(f"/is-listesi/api/etiketler/{buro['id']}", headers=H), 400)
+        await self.j(await mehmet.delete(f"/is-listesi/api/etiketler/{kisi['id']}", headers=H))
+        lst = (await self.j(await mehmet.get("/is-listesi/api/tasks?filtre=benim")))["tasks"]
+        self.assertCountEqual(next(x for x in lst if x["id"] == t["id"])["tags"], [buro["key"], "e-haciz"])
+        r = await self.j(await mehmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H,
+                                           json={"remove": ["e-haciz"]}))
+        self.assertEqual(r["tags"], [buro["key"]])
+        # İş silinince etiket bağları da silinir.
+        await self.j(await ahmet.delete(f"/is-listesi/api/tasks/{t['id']}", headers=H))
+        n = self.store._run(lambda cur: cur.execute("SELECT COUNT(*) FROM zs_task_tags WHERE task_id = ?",
+                                                    (t["id"],)).fetchone()[0])
+        self.assertEqual(n, 0)
+
+    async def test_etiket_agaci_dosya_turu(self):
+        """Dosya türü (ana etiket) → süreç → alt etiket: ana etiket dosyadan gelir, başka türün etiketi takılmaz."""
+        ahmet = await self.login("kemal", "ahmet")
+        tl = await self.j(await ahmet.get("/is-listesi/api/etiketler"))
+        hz = {x["key"]: x for x in tl["hazir"]}
+        self.assertEqual((hz["e-ik-mazbata"]["parent"], hz["e-icra-kesinlesme"]["parent"], hz["e-ik-mazbata"]["tur"],
+                          hz["e-ik-mazbata"]["name"]), ("e-icra-kesinlesme", "e-icra", "icra", "Mazbata dönüşü"))
+        self.assertEqual([x["key"] for x in tl["turler"]][:2], ["arabuluculuk", "icra"])
+        hukuk = dict(self.DOSYA, dosya_id="555", birim_id="2002", birim_adi="Ankara 3. Asliye Hukuk Mahkemesi",
+                     dosya_no="2026/7", dosya_tur="Hukuk Dava Dosyası")
+        # Hukuk dosyasında icra şablonu: süreç ve icra alt etiketi gelmez, ana etiket "Hukuk" olur.
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Tebliğ kontrol", "dosya": hukuk})))["task"]
+        self.assertEqual((t["sablon"], t["surec"], t["asama"]), ("h-teblig-durum", None, None))
+        d = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t['id']}")))["task"]
+        self.assertEqual((d["tags"], d["tur"]), (["e-hukuk"], "hukuk"))
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H, json={"add": ["e-icra-kesinlesme"]}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H, json={"remove": ["e-hukuk"]}), 400)
+        await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t['id']}", headers=H,
+                                       json={"asama": "icra-kesinlesme/teblig"}), 400)
+        # Hukuk altına alt etiket + onun altına bir katman: 3 katmanı aşan reddedilir.
+        g1 = (await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H,
+                                             json={"name": "Dava süreci", "parent": "e-hukuk"})))["tag"]
+        g2 = (await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H,
+                                             json={"name": "Tebligat", "parent": g1["key"]})))["tag"]
+        self.assertEqual((g2["tur"], g2["derinlik"]), ("hukuk", 3))
+        await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "x", "parent": g2["key"]}), 400)
+        await self.j(await ahmet.post("/is-listesi/api/etiketler", headers=H, json={"name": "y", "parent": "yok"}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/etiketler/{g1['id']}", headers=H,
+                                      json={"name": "Dava süreci", "parent": g2["key"]}), 400)
+        await self.j(await ahmet.delete(f"/is-listesi/api/etiketler/{g1['id']}", headers=H), 400)
+        r = await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t['id']}/etiketler", headers=H, json={"add": [g2["key"]]}))
+        self.assertCountEqual(r["tags"], ["e-hukuk", g2["key"]])
+        # İcra dosyasında aşama elle verilince aşamanın alt etiketi de takılır.
+        t2 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Serbest iş", "dosya": dict(self.DOSYA)})))["task"]
+        await self.j(await ahmet.patch(f"/is-listesi/api/tasks/{t2['id']}", headers=H, json={"asama": "icra-kesinlesme/itiraz"}))
+        d2 = (await self.j(await ahmet.get(f"/is-listesi/api/tasks/{t2['id']}")))["task"]
+        self.assertCountEqual(d2["tags"], ["e-icra", "e-ik-itiraz"])
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t2['id']}/etiketler", headers=H, json={"add": [g2["key"]]}), 400)
+
+    async def test_eski_isler_sablona_baglanir(self):
+        """backfill_sablon: başlığın şablon kısmı eşleşen eski iş bağlanır, eşleşmeyen '' olur ve bir daha taranmaz."""
+        ahmet = await self.login("kemal", "ahmet")
+        a = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H,
+                                            json={"title": "Ali Veli – İtiraz kontrol"})))["task"]
+        b = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Bir şey"})))["task"]
+        self.store._run(lambda cur: cur.execute("UPDATE zs_tasks SET sablon = NULL, surec = NULL, asama = NULL"))
+        self.store._run(lambda cur: cur.execute("DELETE FROM zs_task_tags"))
+        self.assertEqual(self.store.backfill_sablon(), 1)
+        ga, gb = self.store.get_task(a["id"]), self.store.get_task(b["id"])
+        self.assertEqual((ga["sablon"], ga["asama"]), ("h-itiraz", "itiraz"))
+        self.assertEqual((gb["sablon"], gb["asama"]), ("", None))
+        self.assertEqual(self.store.backfill_sablon(), 0)
+        lst = (await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu")))["tasks"]
+        self.assertEqual(next(x for x in lst if x["id"] == a["id"])["tags"], ["e-ik-itiraz"])
+
+    async def test_kontrol_sonucu_sonraki_asamayi_acar(self):
+        """Onaya gönderirken seçilen kontrol sonucu işe yazılır; şablonun o dalındaki sonraki iş aynı dosya /
+        taraf / atananla açılır. İade dalı talep kabulünden sonra süreci baştan başlatır (barkod düşer)."""
+        ahmet = await self.login("kemal", "ahmet")
+        dosya = dict(self.DOSYA, taraf_adi="HAMZA OĞUZ", barkod="4007770084489")
+        me = (await self.j(await ahmet.get("/is-listesi/api/me")))["me"]["id"]
+
+        async def gonder(tid, sonuc, **kw):
+            r = await self.j(await ahmet.post(f"/is-listesi/api/tasks/{tid}/durum", headers=H,
+                                              json=dict({"action": "gonder", "sonuc": sonuc}, **kw)))
+            return r["task"], r.get("sonraki")
+
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "HAMZA OĞUZ – Mazbata dönüşü kontrol", "assignee_id": me, "dosya": dosya})))["task"]
+        # İade → Mernis adresine tebliğ (aynı dosya, taraf, barkod; 1 gün sonra 17:00).
+        g, n = await gonder(t["id"], "olumsuz")
+        self.assertEqual((g["status"], g["sonuc"]), ("onayda", "olumsuz"))
+        self.assertEqual((n["title"], n["asama"], n["taraf_adi"], n["barkod"], n["assignee_id"]),
+                         ("HAMZA OĞUZ – Mernis adresine tebliğ", "mernis", "HAMZA OĞUZ", "4007770084489", me))
+        self.assertEqual((n["due_at"] + 3 * 3600) % 86400, 17 * 3600)
+        # Talep gönderildi → Talep kabul → kabul edildi → yeni tur: Tebligat oluşturuldu (barkod yok).
+        _, n = await gonder(n["id"], "olumlu")
+        self.assertEqual(n["asama"], "talep-kabul")
+        _, n = await gonder(n["id"], "olumlu")
+        self.assertEqual((n["title"], n["asama"], n["barkod"]), ("HAMZA OĞUZ – Tebligat oluşturuldu kontrol", "teb-olustu", None))
+        # Bekliyor: aynı kontrol yeniden; istemci sonraki işi değiştirebilir ya da açmayabilir.
+        _, n2 = await gonder(n["id"], "bekliyor")
+        self.assertEqual((n2["title"], n2["asama"]), (n["title"], "teb-olustu"))
+        _, n3 = await gonder(n2["id"], "olumlu", sonraki={"baslik": "Müvekkile bildirim", "gun": 0})
+        self.assertEqual((n3["title"], n3["asama"]), ("HAMZA OĞUZ – Müvekkile bildirim", None))
+        _, n4 = await gonder(n3["id"], "olumlu", sonraki=False)
+        self.assertIsNone(n4)
+        # Sonuçsuz gönderme eski davranış: sonraki iş açılmaz, yanıtta "sonraki" yok.
+        t5 = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "İtiraz kontrol", "assignee_id": me, "dosya": dosya})))["task"]
+        r = await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t5['id']}/durum", headers=H, json={"action": "gonder"}))
+        self.assertNotIn("sonraki", r)
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t5['id']}/durum", headers=H,
+                                      json={"action": "onayla", "sonuc": "olumlu"}), 400)
+        await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t5['id']}/durum", headers=H,
+                                      json={"action": "gonder", "sonuc": "belki"}), 400)
 
     async def test_eski_kullanici_ve_owner_yeni_arayuze_giremez(self):
         c = await self.client()

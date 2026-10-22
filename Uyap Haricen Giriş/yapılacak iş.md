@@ -160,6 +160,81 @@ verir; yalnız icranınki tanımlı. Diğer türlerin menüsü maddeleri belirle
 
 ---
 
+## 5b. Süreç, aşama ve etiket ağacı
+
+İşler **dosya türü → süreç → aşama** sırasıyla süzülür, gruplanır ve raporlanır. İcra takibi açıldıktan
+sonraki ilk kısım (tebligat → kesinleştirme) aşama aşama izlenir; her kontrol bitince sıradaki aşamanın
+işi kendiliğinden açılır.
+
+**Etiket ağacı** (en çok 3 katman, `zs_store.HAZIR_ETIKETLER` + büronun `zs_tags`):
+
+```
+İcra                                  ← 1. dosya türü (ana etiket; Hukuk, Ceza, CBS, İdare, Arabuluculuk da var)
+ ├ Tebligat – Kesinleştirme           ← 2. süreç
+ │  ├ Tebligat oluşturuldu            ← 3. aşama etiketleri (işin aşamasından gelir, elle takılmaz)
+ │  ├ Tebligat PTT'ye verildi
+ │  ├ …                               (13 aşama, aşağıda)
+ │  └ Kesinleşme
+ ├ Haciz                              ← 2. grup
+ └ Tahsilat
+Müvekkil bildirimi, Acil dosya        ← genel (her dosya türünde)
+```
+
+- Dosya türü işin UYAP dosyasından bulunur (`dosya_turu`: tür açıklaması, yoksa birim adı) ve **ana
+  etiket kendiliğinden takılır**; elle değiştirilemez. Bir türün altındaki etiket yalnız o türdeki
+  dosyanın işine takılır. Dosyasız işe her etiket uyar.
+- **Aşama etiketi** işin aşamasından gelir: aşama değişince eskisi kalkar, yenisi takılır
+  (`_asama_yaz`); elle takılmaz / çıkarılmaz, şablona konmaz.
+- Üst etiketle süzünce altındaki etiketlerin takılı olduğu işler de gelir (İcra → bütün icra işleri).
+- Herkes etiket ekler: **kişisel** (yalnız kendisi görür; olay geçmişine yazılmaz) ya da **büroya açık**.
+  Büro etiketini ekleyen ya da yönetici düzenler/siler; altında etiket olan silinmez.
+
+**Süreç "Tebligat → Kesinleştirme"** (`HAZIR_SURECLER`, kodda; borçlu bazlı). Her aşamanın bir hazır
+kontrol şablonu, şablonun kontrol sorusu ve sonuç dalları vardır. `otomatik`: ileride ofis ajanının
+(UyapMasa) yapacağı denetimin anahtarı (henüz yürütülmez).
+
+| # | Aşama | Şablon | Sonuç → sonraki iş | `otomatik` |
+|---|---|---|---|---|
+| 1 | Tebligat oluşturuldu | Tebligat oluşturuldu kontrol | Oluşturuldu → 2 | `db:tebligat_olustu` |
+| 2 | Tebligat PTT'ye verildi | PTT'ye verildi kontrol | PTT'ye verildi → 3 | `db:ptt_kabul` |
+| 3 | Tebligat yola çıktı | Yola çıktı kontrol | Yola çıktı → 4 | `db:ptt_yolda` |
+| 4 | Tebliğ kontrol | Tebliğ kontrol | Sonuç belli → 5 | `db:teblig` |
+| 5 | Mazbata dönüşü | Mazbata dönüşü kontrol | **Tebliğ edildi → 9**; **İade → 6**; Henüz dönmedi → 5 | `db:mazbata` |
+| 6 | Mernis adresine tebliğ *(iade)* | Mernis adresine tebliğ | Talep gönderildi → 8; Mernis adresi aynı → 7 | `uyap:talep_mernis` |
+| 7 | 21/2 adresine tebliğ *(iade)* | 21/2 adresine tebliğ | Talep gönderildi → 8 | `uyap:talep_21_2` |
+| 8 | Talep kabul *(iade)* | Talep kabul kontrol | **Kabul edildi → 1 (yeni tebligat turu)**; Reddedildi → 6 | `uyap:talep_kabul` |
+| 9 | İtiraz kontrol | İtiraz kontrol | İtiraz yok → 10; İtiraz var → Müvekkile bildirim | `db:itiraz` |
+| 10 | Kesinleşme tarihi | Kesinleşme tarihi kontrol | Tarih geldi → 11 | `db:kesinlesme_tarihi` |
+| 11 | Kesinleştirme talebi gönderme | Kesinleştirme talebi gönder | Gönderildi → 12 | `uyap:kesinlestirme_gonder` |
+| 12 | Kesinleştirme talebi kabul | Kesinleştirme talebi kabul kontrol | Kabul edildi → 13; Reddedildi → 11 | `uyap:kesinlestirme_talebi` |
+| 13 | Kesinleşme | Kesinleşme kontrol | Kesinleşti → Haciz talepleri; Kesinleşmedi → 12 | `uyap:sorgu_kesinlesme` |
+
+"Bekliyor" dalı (ör. barkodda henüz sonuç yok) aynı kontrolü birkaç gün sonraya yeniden açar.
+
+- **Sıradaki aşamaya geçiş sunucuda:** "Onaya gönder" / "Tamamla"da kontrol sonucu (`sonuc`: olumlu |
+  olumsuz | bekliyor; ekranda şablondaki adıyla, ör. "Tebliğ edildi" / "İade") seçilir → işe yazılır,
+  şablonun o dalındaki sonraki iş aynı dosya / taraf / atananla, bugünden gün sayısı sonra 17:00'ye
+  açılır (`transition(…, sonuc, sonraki)`). Kullanıcı öneriyi değiştirebilir ya da açmayabilir
+  (`sonraki: {baslik, gun} | false`). Yeni tebligat turunda eski barkod / belge bağı taşınmaz.
+  `sonuc` gönderilmezse sonraki iş açılmaz — güncellenmemiş UYAP penceresi kendisi açar (çift iş olmaz).
+- İş, açıldığı şablonu `sablon` alanında tutar ("h-mazbata" | büro şablonu "b-12"); seçilmediyse başlığın
+  şablon kısmından (hazır şablonların eski adları da: "Mazbata kontrol", "Tebliğ durumu kontrol" …)
+  bulunur. Eski işler sunucu açılışında bir kez başlıktan bağlanır (`backfill_sablon`).
+- Web:
+  - **Benim işlerim / Tüm işler / Özel**: üstte süzgeç — *Dosya türü* (İcra, Hukuk davası, Arabuluculuk,
+    CBS, …) → *Süreç* (Tebligat – Kesinleştirme, Haciz, Tahsilat) → *Aşama* (13 aşama, iade dalı ayrı),
+    her çipte iş sayısı; ayrıca serbest etiket. "Aşamaya göre" sıralama.
+  - **Süreçler**: her satır dosya + borçlu, her sütun aşama (iade dalı ayrı renkte); hücrede o aşamadaki
+    son iş (✓ olumlu, ↺ iade/olumsuz, saat: bekliyor, ! gecikti). İade sonrası yalnız son tur gösterilir
+    ("2. tebligat turu"). Üstte **"Şu an"** raporu: kaç dosyanın hangi aşamada beklediği, kaçının
+    kesinleştiği; çipe basınca yalnız o dosyalar kalır.
+  - Kontrol şablonlu işte "Onaya gönder" önce sonucu ve sonraki aşamayı soran pencereyi açar.
+- API: `GET /surecler`, `GET|POST /etiketler`, `POST|DELETE /etiketler/{id}` (`parent` ile),
+  `POST /tasks/{id}/etiketler {add, remove}`, `POST /tasks/{id}/durum {action, reason, sonuc?, sonraki?}`
+  (yanıtta `sonraki`); iş açma/düzenlemede `sablon`, `etiketler`, `asama`.
+
+---
+
 ## 6. Aşamalar
 
 | Aşama | İçerik | Durum |

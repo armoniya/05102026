@@ -94,6 +94,44 @@ kbd{font:600 11px/1 ui-monospace,Consolas,monospace;background:var(--surface-3);
 .chip.late.on{background:var(--danger);color:#fff;border-color:var(--danger)}
 .chip-sep{width:1px;align-self:stretch;background:var(--border-2);margin:2px 4px}
 .sortsel{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)} .sortsel select{padding:5px 8px;font-size:13px}
+/* süreç / aşama / etiket süzgeci ve rozetleri */
+.facets{display:flex;flex-direction:column;gap:8px;margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+.facet-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 10px}
+.facet-row .chips{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.facet-l{flex:0 0 78px;font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)}
+.facet-dal{font-size:11px;font-weight:600;color:var(--muted);margin-left:6px}
+.chip.surec{border-color:var(--accent);color:var(--accent)} .chip.surec.on{background:var(--accent);color:var(--accent-text)}
+.chip.iade{border-style:dashed;border-color:color-mix(in srgb,var(--danger) 45%,transparent)}
+.chip.iade.on{background:var(--danger);border-color:var(--danger);color:#fff}
+.chip.ok.on{background:var(--ok);border-color:var(--ok);color:var(--ok-text)}
+.asama.iade{background:var(--danger-bg);color:var(--danger)}
+.next-box{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:10px 12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border)}
+.pt-grp th{font-size:10px;font-weight:700;text-align:center;color:var(--danger);padding-bottom:0}
+.pt .pc-iade{background:color-mix(in srgb,var(--danger) 5%,transparent)}
+.pt tr.pt-bitti td{opacity:.75}
+.pc.neg .pc-b{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,transparent);background:color-mix(in srgb,var(--danger) 8%,transparent)}
+.tur-n{color:var(--danger);font-weight:600}
+@media (max-width:640px){ .facet-l{flex-basis:100%} }
+.etk{--c:#4b5563;display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;
+  color:var(--c);background:color-mix(in srgb,var(--c) 12%,transparent);border:1px solid color-mix(in srgb,var(--c) 32%,transparent)}
+.etk.kisisel{border-style:dashed}
+button.etk{cursor:pointer;font-size:12px;padding:3px 10px} button.etk svg.i{width:12px;height:12px}
+.asama{display:inline-flex;align-items:center;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;background:var(--accent-soft);color:var(--accent)}
+.etk-sec{display:flex;flex-wrap:wrap;gap:8px 14px;margin:6px 0 12px}
+.etk-opt{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.etk-agac{display:flex;flex-direction:column;gap:6px;margin:10px 0 12px;max-height:50vh;overflow-y:auto}
+.etk.kok{font-weight:700}
+.swatches{display:flex;gap:6px;align-items:center}
+.swatch{width:22px;height:22px;min-width:22px;border-radius:50%;padding:0;border:2px solid var(--surface);background:var(--c);box-shadow:0 0 0 1px var(--border-2)}
+.swatch.on{box-shadow:0 0 0 2px var(--text)}
+.pt th.pc{text-align:center;white-space:normal;font-size:10px;line-height:1.25;min-width:62px;max-width:92px;vertical-align:bottom}
+.pt td:first-child,.pt th:first-child{min-width:170px}
+.pt td.pc{text-align:center;padding:8px 4px}
+.pc-b{width:30px;height:30px;padding:0;border-radius:8px;display:inline-grid;place-items:center;border:1px solid var(--border);background:var(--surface-2);color:var(--muted)}
+.pc-b svg.i{width:15px;height:15px}
+.pc.ok .pc-b{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,transparent);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.pc.open .pc-b{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.pc.late .pc-b{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,transparent);background:var(--danger-bg)}
 
 .layout{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;max-width:1400px;margin:0 auto}
 .layout.split{grid-template-columns:minmax(0,1fr) minmax(0,1.1fr)}
