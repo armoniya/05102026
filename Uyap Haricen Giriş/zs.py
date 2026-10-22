@@ -213,6 +213,8 @@ def _account_login(office_code, username, password):
     if not C.accounts:
         return None, "Ana hesap girişi bu sunucuda kapalı."
     username = (username or "").strip()
+    if "@" not in username and not office_code:
+        return None, "Kullanıcı adınızı kullanıcıadı@ofisadı biçiminde girin (ör. ahmet@kemalburo)."
     scoped = username if "@" in username or not office_code else accounts.compose_username(office_code, username)
     ok, reason, info = C.accounts.authenticate(scoped, password or "")
     if not ok:
@@ -491,9 +493,9 @@ button:hover{background:var(--accent2)}
 </style>"""
 
 
-def _login_page(msg=None, status=200, p=OLD, office_code=""):
+def _login_page(msg=None, status=200, p=OLD, username=""):
     if p == NEW:
-        return _new_login_page(msg, status, office_code)
+        return _new_login_page(msg, status, username)
     if not msg and C.setup_error and C.store is not None:
         try:
             if C.store.user_count() == 0:
@@ -515,15 +517,15 @@ def _login_page(msg=None, status=200, p=OLD, office_code=""):
                         headers={"Cache-Control": "no-store"})
 
 
-def _new_login_page(msg, status, office_code=""):
+def _new_login_page(msg, status, username=""):
+    # Ana siteyle aynı giriş biçimi: tek alanda kullanıcıadı@ofisadı (ayrı ofis kodu kutusu yok).
     note = f"<div class='msg'>{html.escape(msg)}</div>" if msg else ""
     body = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='color-scheme' content='light dark'>
 {_pwa_head(NEW)}<title>İş Listesi — Giriş</title>{_LOGIN_CSS}</head><body><form class='box' method='post' action='{NEW}/login'>
 <div class='logo'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M20 6 9 17l-5-5'/></svg></div>
 <h1>İş Listesi</h1><p>CokluUyap hesabınızla girin</p>{note}
-<label for='o'>Ofis kodu</label><input id='o' name='office_code' value='{html.escape(office_code)}' autocomplete='organization' required>
-<label for='u'>Kullanıcı adı</label><input id='u' name='username' autocomplete='username' required autofocus>
+<label for='u'>Kullanıcı adı</label><input id='u' name='username' value='{html.escape(username, quote=True)}' placeholder='kullanıcıadı@ofisadı (ör. ahmet@kemalburo)' autocomplete='username' required autofocus>
 <label for='p'>Parola</label><input id='p' name='password' type='password' autocomplete='current-password' required>
 <button type='submit'>Giriş yap</button><div class='foot'>cokluuyap</div></form></body></html>"""
     return web.Response(text=body, content_type="text/html", charset="utf-8", status=status,
@@ -568,7 +570,7 @@ async def login_post(request):
     if not user:
         C.guard.record_fail(key)
         await _audit(request, None, "giris", 401, t0=t0, error=err, username=uname)
-        return _login_page(err, status=401, p=p, office_code=office_code)
+        return _login_page(err, status=401, p=p, username=uname)
     C.guard.record_ok(key)
     await _audit(request, user, "giris", 303, t0=t0)
     resp = _see_other(p)

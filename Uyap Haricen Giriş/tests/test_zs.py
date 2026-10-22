@@ -1084,6 +1084,17 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         eski = await self.legacy("ali")
         self.assertEqual((await eski.get("/is-listesi/api/me")).status, 401)
 
+    async def test_giris_tek_alanda_kullanici_at_ofis(self):
+        # Giriş formu ana siteyle aynı: ayrı ofis kodu kutusu yok, kullanıcıadı@ofisadı tek alanda.
+        c = await self.client()
+        sayfa = await (await c.get("/is-listesi")).text()
+        self.assertNotIn("name='office_code'", sayfa)
+        self.assertIn("kullanıcıadı@ofisadı", sayfa)
+        await self.login("", "ahmet@kemal", status=303)
+        r = await c.post("/is-listesi/login", data={"username": "ahmet", "password": PW}, allow_redirects=False)
+        self.assertEqual(r.status, 401)
+        self.assertIn("kullanıcıadı@ofisadı biçiminde", await r.text())
+
     async def test_ana_hesap_degisince_oturum_duser(self):
         ahmet = await self.login("kemal", "ahmet")
         await self.j(await ahmet.get("/is-listesi/api/me"))
@@ -1323,7 +1334,7 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
     async def test_eski_arayuz_yedek_olarak_durur(self):
         c = await self.client()
         self.assertIn("İş Takip", await (await c.get("/zs")).text())
-        self.assertIn("Ofis kodu", await (await c.get("/is-listesi")).text())
+        self.assertIn("kullanıcıadı@ofisadı", await (await c.get("/is-listesi")).text())
         for p in ("/zs", "/is-listesi"):
             r = await c.get(f"{p}/static/zs.js")
             self.assertEqual(r.status, 200)
