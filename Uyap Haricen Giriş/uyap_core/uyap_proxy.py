@@ -576,7 +576,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             'harc', 'tahsilat', 'baslat', 'onayla', 'reddet', 'iptal',
             'save', 'delete', 'update', 'add', 'sign', 'payment', 'confirm', 'cancel',
             'create', 'send', 'upload', 'download', 'cikis', 'logout',
-            'sifre', 'pin', 'parola', 'odemeYap', 'kart', 'nats', 'bakiye', 'bakiyesi'
+            'sifre', 'pin', 'parola', 'odemeYap', 'kart', 'nats', 'bakiye', 'bakiyesi',
+            'hazirla'   // getIcraTalepEvrakHazirla: her seferinde yeni talep evrakı (UDF) üretir
         ];
         for (let word of blacklist) {
             if (url_lower.includes(word)) return false;
@@ -2071,7 +2072,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             priority: s && s.priority != null ? s.priority : (t.priority == null ? 1 : t.priority),
             dosya: t.dosya_id ? { dosya_id: String(t.dosya_id), birim_id: t.birim_id || '', birim_adi: t.birim_adi || '',
                                   dosya_no: t.dosya_no || '', dosya_tur: t.dosya_tur || '', evrak_id: t.evrak_id || null,
-                                  evrak_adi: t.evrak_adi || null, taraf_adi: t.taraf_adi || null, uyap: uyap } : null }) });
+                                  evrak_adi: t.evrak_adi || null, taraf_adi: t.taraf_adi || null,
+                                  barkod: t.barkod || null, uyap: uyap } : null }) });
         return baslik + (n == null ? '' : ' (' + gunSonra(n).slice(8, 10) + '.' + gunSonra(n).slice(5, 7) + ')');
     }
     // İş açılınca / durumu değişince: kart bandı, belge işaretleri ve panel yeniden çekilir.
@@ -2186,6 +2188,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 .filter(Boolean).join(' · ')));
             if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
             if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+            if (t.barkod) s.appendChild(el('div', 'color:#cbd5e1;', 'Barkod: ' + t.barkod));
+            const pb = pttDugmesi(t, 'ia-cip');
+            if (pb) s.appendChild(pb);
             const kb = kapanisDugmesi(t, 'ia-cip sec');
             if (kb) s.appendChild(kb);
             const ab = aktarDugmesi(t, 'ia-cip');
@@ -2276,6 +2281,38 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             });
         })(koklar, null);
         return sonuc;
+    }
+    // Kartta görüntülenen belge (evrak ağacında seçili satır): {evrakId: belge anahtarı, ad, tur} | null.
+    function acikBelge(kart) {
+        const A = window.__uyapEvrakAgaci;
+        const tv = kart && A && kart.querySelector('.evrak-treeview');
+        const koklar = tv && A.veri(tv);
+        const node = tv && tv.querySelector('.dx-treeview-node.dx-state-selected');
+        const g = koklar && node ? A.harita(koklar)[node.getAttribute('data-item-id')] : null;
+        if (!g || !g.x.evrak || !g.x.evrak.evrakId) return null;
+        const o = A.ozet(g.x, g.ebeveyn);
+        return { evrakId: belgeAnahtari(o), ad: evrakAdi(o), tur: String(o.tur || '') };
+    }
+    // Görüntülenen belgedeki PTT barkodu: Code-39 yazısıyla "*4007770084489*" (13 hane).
+    function belgedekiBarkod(kart) {
+        const l = kart ? kart.querySelectorAll('.rpv-core__text-layer-text') : [];
+        for (let i = 0; i < l.length; i++) {
+            const m = /^\*\s*((?:\d\s*){13})\*$/.exec(l[i].textContent.trim());
+            if (m) return m[1].replace(/\s/g, '');
+        }
+        return '';
+    }
+    // "Tebliğ durumu kontrol" gibi barkodla çalışan şablonlar (sunucuda action "ptt:barkod").
+    const PTT_SABLONU = 'Tebliğ durumu kontrol';
+    function pttSablonu(s) { return !!(s && s.action === 'ptt:barkod'); }
+    function pttDugmesi(t, sinif) {
+        if (!t.barkod) return null;
+        const b = el('button', null, 'PTT sorgula');
+        b.type = 'button';
+        b.className = sinif;
+        b.title = 'Barkod ' + t.barkod + ' için PTT gönderi takip sorgusu';
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); pttSorgula(t.barkod); });
+        return b;
     }
     function evrakAdi(o) {
         return [o.tur, o.birimEvrakNo ? '(' + o.birimEvrakNo + ')' : '', o.onaylandigiTarih ? String(o.onaylandigiTarih).slice(0, 10) : '']
@@ -2372,8 +2409,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         if (on.aciklama) aciklama.value = on.aciklama;
         let sonSablonAciklamasi = '';
         let seciliSablon = null;
+        let barkodGoster = function() {};           // barkod alanı (aşağıda kurulur)
         function sablonUygula(s) {
             seciliSablon = s;
+            barkodGoster();
             baslik.value = s.title;
             // Elle yazılmış (ya da bildirimden gelen) açıklama korunur; boşsa / önceki şablonunsa değişir.
             if (!aciklama.value.trim() || aciklama.value === sonSablonAciklamasi) aciklama.value = s.description || '';
@@ -2469,8 +2508,31 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             belge.appendChild(o);
         });
         if (evraklar.length) f.appendChild(alan('Belge', belge));
+        // PTT barkodu: "Tebliğ durumu kontrol" gibi şablonda zorunlu; görüntülenen Kapalı Tebligat'tan
+        // (ya da sağ tıkta seçilen barkoddan) hazır gelir, böylece her kontrolde belgeye dönülmez.
+        const barkod = el('input'); barkod.maxLength = 30; barkod.inputMode = 'numeric';
+        barkod.placeholder = '13 haneli barkod (ör. 4007770084489)';
+        const acik = acikBelge(kart);
+        const acikTebligat = !!(acik && /^kapalı tebligat/.test(kucukHarf(acik.tur)));
+        barkod.value = on.barkod || (acikTebligat ? belgedekiBarkod(kart) : '');
+        const barkodAlani = alan('PTT barkodu', barkod);
+        barkodAlani.style.display = barkod.value ? '' : 'none';
+        f.appendChild(barkodAlani);
+        barkodGoster = function() {
+            if (!pttSablonu(seciliSablon)) { if (!barkod.value) barkodAlani.style.display = 'none'; return; }
+            barkodAlani.style.display = '';
+            // Belge seçilmediyse görüntülenen Kapalı Tebligat'a bağla.
+            if (!belge.value && acikTebligat
+                && Array.prototype.some.call(belge.options, function(o) { return o.value === acik.evrakId; })) belge.value = acik.evrakId;
+        };
+        barkodGoster();
         f.appendChild(dugme('Kaydet', '#4f46e5', async function(b) {
             if (!baslik.value.trim()) { mesajEl.textContent = 'Ne yapılacağını yazın ya da bir şablon seçin.'; baslik.focus(); return; }
+            const bk = barkod.value.replace(/\D/g, '');
+            if (pttSablonu(seciliSablon) && bk.length !== 13) {
+                mesajEl.textContent = 'Bu iş için 13 haneli PTT barkodunu girin (Kapalı Tebligat belgesindeki *…* numarası).';
+                barkodAlani.style.display = ''; barkod.focus(); return;
+            }
             b.disabled = true;
             mesajEl.textContent = '';
             const tarafSecili = taraf.value !== '' ? taraflar[Number(taraf.value)] : null;
@@ -2485,9 +2547,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                              evrak_id: belge.value || null,
                              evrak_adi: belge.value ? belge.options[belge.selectedIndex].textContent : null,
                              taraf_adi: tarafSecili ? adDuzelt(tarafSecili.adi) : null,
+                             barkod: bk || null,
                              uyap: kartAlanlari(d) } }) });
                 if (seciliSablon) sablonKullanildi(seciliSablon.id);
-                baslik.value = ''; aciklama.value = ''; sureSec(null);
+                baslik.value = ''; aciklama.value = ''; barkod.value = ''; sureSec(null);
                 seciliSablon = null; sonSablonAciklamasi = ''; sablonlariCiz(); onizle();
                 mesajEl.style.color = '#86efac';
                 mesajEl.textContent = 'İş açıldı.';
@@ -2928,7 +2991,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         s.appendChild(meta);
         if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
         if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+        if (t.barkod) s.appendChild(el('div', 'color:#cbd5e1;', 'Barkod: ' + t.barkod));
         const alt2 = el('div', 'display:flex;align-items:center;gap:6px;min-width:0;');
+        const pb = pttDugmesi(t, 'ip-aktar');
+        if (pb) alt2.appendChild(pb);
         if (t.dosya_id) {
             const d = el('button', null, [t.birim_adi, t.dosya_no].filter(Boolean).join(' ') || 'UYAP dosyası');
             d.type = 'button';
@@ -3076,6 +3142,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             a.addEventListener('click', function(ev) { ev.stopPropagation(); isAc(t.id); });
             satir.appendChild(a);
             if (t.status === 'onayda') satir.appendChild(el('span', 'font-size:11px;opacity:.8;', 'onayda'));
+            const pb = pttDugmesi(t, 'uyap-is-uyari-kucuk');
+            if (pb) satir.appendChild(pb);
             const kb = kapanisDugmesi(t, 'uyap-is-uyari-kucuk');
             if (kb) satir.appendChild(kb);
             const ab = aktarDugmesi(t, 'uyap-is-uyari-kucuk');
@@ -3315,7 +3383,265 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     function icraMenusu(c) {
         const bilgi = dosyaBilgisi(c.d);
         if (!bilgi) return null;
-        return [[[bilgi, null], ['Dosya bilgilerini kopyala', function() { panoya(bilgi); }]]];
+        const gruplar = [[[bilgi, null], ['Dosya bilgilerini kopyala', function() { panoya(bilgi); }]]];
+        if (c.d.dosyaId) gruplar.push([['121 Gönder', function() { talep121(c.d); }]]);
+        return gruplar;
+    }
+
+    // ── İİK 121 talebi: sağ tık → (borçlu seçimi) → açıklama kutusu → hazırla, e-imzala, gönder ──
+    // UYAP'ın Borçlu > Talep Gönder ekranının yaptığını tarayıcısız yapar (UYAP main.js'ten, 2026-10-20):
+    //   getPortalAvukatTalepList.ajx {dosyaId, islemTuru:'genel'} → talep türleri (121'inki adından bulunur)
+    //   talepBilgileri = [{...talepTuru, aciklama, masraf: talepMasrafi, fields:[aciklama], id:0}]
+    //   getIcraTalepEvrakHazirla.uyap → UDF ("Talep Evrakı Oluştur") → /__uyap_agent__/sign_udf
+    //   avukatIcraTalepEvrakiGonder.ajx (multipart; evrak türü ICR_AVUKAT_PORTAL_GENEL_TALEP, talepGrupId 2)
+    // Masraflı talepte ödeme bilgisi gerekir; o durumda gönderilmez, UYAP ekranına yönlendirilir.
+    const T121_GRUP_ID = '2';
+    const T121_EVRAK_TUR = 'ICR_AVUKAT_PORTAL_GENEL_TALEP';
+    let t121Konum = null, t121Mesgul = false;
+    // Önbellek katmanına uğramayan ham fetch: borçlu / talep listesi ve talep evrakı hep taze gelmeli.
+    let hamFetchFn = null;
+    function hamFetch(url, init) {
+        if (!hamFetchFn) {
+            try {
+                const f = document.createElement('iframe');
+                f.style.display = 'none';
+                document.documentElement.appendChild(f);
+                hamFetchFn = f.contentWindow.fetch.bind(window);
+            } catch (e) { hamFetchFn = window.fetch.bind(window); }
+        }
+        return hamFetchFn(url, Object.assign({ credentials: 'include', cache: 'no-store' }, init || {}));
+    }
+    async function uyapTaze(uc, govde) {
+        const r = await hamFetch('/' + uc, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
+            body: JSON.stringify(govde) });
+        if (!r.ok) throw new Error('UYAP ' + uc + ' HTTP ' + r.status);
+        return r.json();
+    }
+    async function borcluListesi(d) {
+        const j = await uyapTaze('dosya_borclu_list.ajx', { dosyaId: d.dosyaId });
+        return (Array.isArray(j) ? j : []).filter(function(b) { return b && b.kisiKurumId; }).map(function(b) {
+            const k = b.kisiTumDVO || {}, kr = b.kurumTumDVO || {};
+            const ad = [k.adi, k.soyadi].filter(Boolean).join(' ').trim() || kr.kurumAdi || kr.unvan || k.unvan || 'Borçlu';
+            return { kisiKurumId: b.kisiKurumId, ad: String(ad).replace(/\s+/g, ' ').trim() };
+        });
+    }
+    function hata121(m) {
+        kur();
+        kutu.replaceChildren(el('div', 'font-size:14px;font-weight:700;', '121 Talebi'),
+                             el('div', 'margin-top:8px;color:#fca5a5;word-break:break-word;', m),
+                             dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+        ort.style.display = 'flex';
+    }
+    async function talep121(d) {
+        const konum = t121Konum;
+        let borclular;
+        try { borclular = await borcluListesi(d); } catch (e) { hata121('Borçlular okunamadı: ' + e.message); return; }
+        if (!borclular.length) { hata121('Bu dosyada borçlu bulunamadı.'); return; }
+        if (borclular.length === 1) { kutu121(d, borclular[0]); return; }
+        // Birden çok borçlu: aynı yerde ikinci menü — talep kimin için?
+        const g = [['121 talebi — borçlu seçin', null]].concat(borclular.map(function(b) {
+            return [b.ad, function() { kutu121(d, b); }];
+        }));
+        sagMenuGoster(konum ? konum.x : innerWidth / 2, konum ? konum.y : innerHeight / 3, [g]);
+    }
+    function kutu121(d, borclu) {
+        kur();
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', 'İİK 121 — Yetki Verilmesi Talebi'));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', function() { if (!t121Mesgul) kapat(); });
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        kutu.appendChild(el('div', 'margin-top:2px;color:#cbd5e1;word-break:break-word;', dosyaBilgisi(d)));
+        kutu.appendChild(el('div', 'margin-top:2px;color:#cbd5e1;word-break:break-word;', 'Borçlu: ' + borclu.ad));
+        const etiket = el('label', 'display:block;margin-top:10px;font-weight:600;', 'Açıklama');
+        const ta = el('textarea', 'min-height:90px;resize:vertical;');
+        ta.maxLength = 250;   // UYAP'ın açıklama alanı sınırı; metni UYAP kendi şablonuna yerleştirir
+        ta.placeholder = 'Talep evrakına eklenecek açıklama';
+        etiket.appendChild(ta);
+        kutu.appendChild(etiket);
+        const sayac = el('div', 'margin-top:2px;font-size:11px;color:#9ca3af;text-align:right;');
+        const say = function() { sayac.textContent = ta.value.length + ' / 250'; };
+        ta.addEventListener('input', say);
+        say();
+        kutu.appendChild(sayac);
+        const durum = el('div', 'margin-top:8px;color:#cbd5e1;word-break:break-word;');
+        kutu.appendChild(durum);
+        const gonder = dugme('E-imzala ve Gönder', '#4f46e5', async function(b) {
+            const metin = ta.value.replace(/\s+/g, ' ').trim();
+            if (!metin) { durum.style.color = '#fca5a5'; durum.textContent = 'Açıklama boş olamaz.'; return; }
+            if (t121Mesgul) return;
+            t121Mesgul = true;
+            b.disabled = vazgec.disabled = ta.disabled = true;
+            b.style.opacity = '0.6';
+            try {
+                const sonuc = await gonder121(d, borclu, metin, function(m) { durum.style.color = '#cbd5e1'; durum.textContent = m; });
+                durum.style.color = '#86efac';
+                durum.textContent = '✓ Gönderildi. ' + (sonuc.message || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                b.remove();
+                vazgec.textContent = 'Kapat';
+                vazgec.disabled = false;
+            } catch (e) {
+                durum.style.color = '#fca5a5';
+                durum.textContent = e.message;
+                b.disabled = vazgec.disabled = ta.disabled = false;
+                b.style.opacity = '';
+            } finally {
+                t121Mesgul = false;
+            }
+        });
+        const vazgec = dugme('Vazgeç', 'rgba(255,255,255,0.15)', function() { if (!t121Mesgul) kapat(); });
+        kutu.appendChild(gonder);
+        kutu.appendChild(vazgec);
+        setTimeout(function() { ta.focus(); }, 0);
+    }
+    async function gonder121(d, borclu, metin, ilerle) {
+        ilerle('Talep türü UYAP\'tan alınıyor…');
+        const turler = await uyapTaze('getPortalAvukatTalepList.ajx', { dosyaId: d.dosyaId, islemTuru: 'genel' });
+        const tur = (Array.isArray(turler) ? turler : []).find(function(t) {
+            return t && /121/.test(t.talepAdi || '') && /yetki/i.test(kucukHarf(t.talepAdi));
+        });
+        if (!tur) throw new Error('UYAP\'ın genel talep listesinde "İİK. 121. Maddeye Göre Yetki Verilmesi" bulunamadı; '
+            + 'dosya durumu bu talebe izin vermiyor olabilir.');
+        const masraf = Number(tur.talepMasrafi) || 0;
+        if (masraf > 0) throw new Error('Bu talep ' + masraf + ' TL masraflı görünüyor; ödeme bilgisi gerektiği için '
+            + 'buradan gönderilmedi. UYAP\'ın Talep Gönder ekranını kullanın.');
+        const talepBilgileri = JSON.stringify([Object.assign({}, tur, {
+            aciklama: metin, masraf: masraf, fields: [{ id: 'aciklama', title: 'Açıklama' }], id: 0 })]);
+
+        ilerle('Talep evrakı hazırlanıyor…');
+        const hr = await hamFetch('/getIcraTalepEvrakHazirla.uyap', { method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
+            body: JSON.stringify({ dosyaId: d.dosyaId, filename: d.dosyaNo, kisiKurumId: borclu.kisiKurumId,
+                                   talepBilgileri: talepBilgileri }) });
+        const udf = new Uint8Array(await hr.arrayBuffer());
+        const bas = new TextDecoder().decode(udf.slice(0, 4000));
+        const zip = udf[0] === 0x50 && udf[1] === 0x4b;
+        if (!hr.ok || !(zip || (bas.indexOf('<template') >= 0))) {
+            throw new Error('UYAP talep evrakını hazırlamadı (HTTP ' + hr.status + '): ' + bas.slice(0, 160));
+        }
+
+        ilerle('E-imzalanıyor…');
+        const ad = String(d.dosyaNo || 'dosya').replace(/\//g, '_') + '_121_Talebi';
+        const sr = await hamFetch('/__uyap_agent__/sign_udf?name=' + encodeURIComponent(ad + '.udf'), {
+            method: 'POST', body: udf, headers: { 'Content-Type': 'application/octet-stream' } });
+        if (!sr.ok) {
+            let m = 'İmzalama başarısız (' + sr.status + ').';
+            try { const j = await sr.json(); if (j && j.error) m = j.error; } catch (e) {}
+            throw new Error(m);
+        }
+        const imzali = await sr.arrayBuffer();
+        const imzaliAd = ad + '_imzali.udf';
+
+        ilerle('Evrak UYAP\'a gönderiliyor…');
+        // Evrak listesi UYAP'ın evrak yükleme bileşeninin gönderdiği biçimde (bkz. teblig_212/gonder.py).
+        const item = {
+            id: Date.now(),
+            evrakTuruOptionDVO: { tur: T121_EVRAK_TUR, label: 'Genel Talebi', mandatory: true, max: 1, ekEvrakMax: 2,
+                sablonTurKodu: '', acceptTypeList: ['.udf', '.UDF'],
+                ekEvrakAcceptTypeList: ['.udf', '.pdf', '.jpg', '.jpeg', '.png', '.tif', '.tiff',
+                                        '.UDF', '.PDF', '.JPG', '.JPEG', '.PNG', '.TIF', '.TIFF'] },
+            tur: T121_EVRAK_TUR, turAciklama: 'Genel Talebi', mandatory: true, file: {},
+            path: 'C:/fakepath/' + imzaliAd, kullaniciEvrakAciklama: '',
+            parentId: -1, isVekalet: false, isVekaletBilgiFormu: false, fileId: 1,
+        };
+        const fd = new FormData();
+        fd.append('file_1', new File([imzali], imzaliAd, { type: 'application/octet-stream' }));
+        fd.append('items', JSON.stringify([item]));
+        fd.append('dosyaId', d.dosyaId);
+        fd.append('kisiKurumId', String(borclu.kisiKurumId));
+        fd.append('tutar', '0');
+        fd.append('talepGrupId', T121_GRUP_ID);
+        fd.append('talepBilgileri', talepBilgileri);
+        const gr = await hamFetch('/avukatIcraTalepEvrakiGonder.ajx', { method: 'POST', body: fd });
+        let sonuc = null;
+        try { sonuc = await gr.json(); } catch (e) {}
+        if (!sonuc || sonuc.type !== 'success') {
+            throw new Error('UYAP gönderimi kabul etmedi: '
+                + String((sonuc && sonuc.message) || ('HTTP ' + gr.status)).replace(/<[^>]+>/g, ' ').trim());
+        }
+        return sonuc;
+    }
+
+    // ── PTT barkodu: "Kapalı Tebligat" belgesinde seçili 13 haneli barkod ──
+    // Belgede barkod Code-39 yazısıyla "*4007770084489*" diye durur; seçim yıldızlı / boşluklu gelebilir.
+    // Belgenin adı görüntüleyici başlığından (.documentViewerHeader h6), yoksa evrak ağacında seçili
+    // satırdan okunur ("Kapalı Tebligat 19/10/2026").
+    function acikBelgeAdi(h) {
+        for (let a = h; a && a !== document.body; a = a.parentElement) {
+            const bas = a.querySelector && a.querySelector('.documentViewerHeader h6');
+            if (bas) return bas.textContent.trim();
+        }
+        const kart = h.closest('.dosya-sorgula-popup');
+        const s = kart && kart.querySelector('.dx-treeview-node.dx-state-selected');
+        return s ? s.textContent.trim() : '';
+    }
+    function barkodMenusu(h, secili) {
+        const m = /^\*?\s*((?:\d\s*){13})\*?$/.exec(secili);
+        if (!m || !/^kapalı tebligat/.test(kucukHarf(acikBelgeAdi(h)))) return null;
+        const barkod = m[1].replace(/\s/g, '');
+        const g = [['PTT barkodu · ' + barkod, null], ['Kopyala', function() { panoya(barkod); }],
+                   ['PTT barkod sorgula', function() { pttSorgula(barkod); }]];
+        const kart = h.closest('.dosya-sorgula-popup');
+        const d = kart && window.__uyapKartVerisi ? window.__uyapKartVerisi(kart) : null;
+        if (d) g.push([PTT_SABLONU + ' işi ata', function() {
+            const b = acikBelge(kart);
+            pencereAc(d, kart, b ? b.evrakId : null, { sablon: PTT_SABLONU, barkod: barkod });
+        }]);
+        return [g];
+    }
+    async function pttSorgula(barkod) {
+        kur();
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', 'PTT Gönderi Takip · ' + barkod));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', kapat);
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        const govde = el('div', 'margin-top:10px;color:#cbd5e1;', 'PTT sorgulanıyor… (ptt.gov.tr, 10–20 sn sürebilir)');
+        kutu.appendChild(govde);
+        let j = null;
+        try {
+            const r = await window.fetch('/__uyap_agent__/ptt_sorgu?barkod=' + encodeURIComponent(barkod), { cache: 'no-store' });
+            try { j = await r.json(); } catch (e) {}
+            if (!j) throw new Error('PTT sorgusu yanıt vermedi (HTTP ' + r.status + ').');
+            if (!j.ok) throw new Error(j.error || 'PTT sorgusu başarısız.');
+        } catch (e) {
+            govde.replaceChildren(el('div', 'color:#fca5a5;word-break:break-word;', e.message),
+                                  dugme('Yeniden dene', '#4f46e5', function() { pttSorgula(barkod); }),
+                                  dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+            return;
+        }
+        govde.innerHTML = '';
+        const satir = function(ad, deger, renk) {
+            if (!deger) return;
+            const s = el('div', 'display:flex;gap:8px;margin-top:3px;');
+            s.appendChild(el('div', 'flex:none;width:110px;color:#9ca3af;', ad));
+            s.appendChild(el('div', 'color:' + (renk || '#f3f4f6') + ';font-weight:600;word-break:break-word;', deger));
+            govde.appendChild(s);
+        };
+        const d = kucukHarf(j.durum);
+        satir('Durum', j.durum || '—', /teslim edildi/.test(d) ? '#86efac' : /iade/.test(d) ? '#fca5a5' : '#fde68a');
+        satir(/teslim edildi/.test(d) ? 'Teslim tarihi' : 'Son işlem', j.tarih);
+        satir(/iade/.test(d) ? 'İade nedeni' : 'Teslim şekli', j.teslim_sekli);
+        if (j.kabul) { satir('Kabul tarihi', j.kabul.tarih); satir('Gönderici', j.kabul.gonderici); satir('Alıcı', j.kabul.alici); }
+        if (j.hareketler && j.hareketler.length) {
+            govde.appendChild(el('div', 'margin-top:10px;font-weight:600;color:#cbd5e1;', 'Hareketler'));
+            j.hareketler.slice().reverse().forEach(function(hr) {   // en yeni üstte
+                const s = el('div', 'margin-top:4px;padding:5px 8px;border-radius:7px;background:rgba(255,255,255,0.06);');
+                s.appendChild(el('div', 'color:#f3f4f6;font-weight:600;', hr.aciklama || '—'));
+                s.appendChild(el('div', 'color:#9ca3af;font-size:11px;', [hr.tarih, hr.yer].filter(Boolean).join(' · ')));
+                if (hr.detay) s.appendChild(el('div', 'color:#cbd5e1;font-size:11px;', hr.detay));
+                govde.appendChild(s);
+            });
+        }
+        govde.appendChild(dugme('Barkodu kopyala', 'rgba(255,255,255,0.15)', function() { panoya(barkod); }));
+        govde.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
     }
 
     // Sağ tıklanan yerin menüsü; null → tarayıcı menüsü.
@@ -3380,8 +3706,18 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             sagMenuKapat();
             const h = ev.target && ev.target.closest ? ev.target : null;
             if (ev.shiftKey || ev.ctrlKey || !h || sagMenuKapali()) return;
-            // Seçili metin varsa tarayıcının menüsü (Kopyala, Google'da ara, Çevir …) kalsın.
-            if (String(window.getSelection ? window.getSelection() : '').trim()) return;
+            const secili = String(window.getSelection ? window.getSelection() : '').trim();
+            if (secili) {
+                // Kapalı Tebligat'taki PTT barkodu seçiliyse kendi menümüz; başka seçimde tarayıcının
+                // menüsü (Kopyala, Google'da ara, Çevir …) kalsın.
+                let g = null;
+                try { g = barkodMenusu(h, secili); } catch (e) {}
+                if (!g) return;
+                ev.preventDefault();
+                kur();
+                sagMenuGoster(ev.clientX, ev.clientY, g);
+                return;
+            }
             if (h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')) return;
             if (ort && ort.contains(h)) return;
             let gruplar;
@@ -3389,6 +3725,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (!gruplar) return;
             ev.preventDefault();
             kur();
+            t121Konum = { x: ev.clientX, y: ev.clientY };   // borçlu seçim menüsü aynı yerde açılsın
             sagMenuGoster(ev.clientX, ev.clientY, gruplar);
         }, true);
         document.addEventListener('mousedown', function(ev) { if (sagMenu && !sagMenu.contains(ev.target)) sagMenuKapat(); }, true);
@@ -3401,6 +3738,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     setInterval(kartlariTara, 700);
 })();
 </script>"""
+        # Betik UYAP'ın <meta charset>'ını ilk 1024 baytın dışına itiyor; UYAP da Content-Type'ta
+        # charset vermiyor → tarayıcı sayfayı (ve betikteki Türkçe metni) yanlış kodlamayla okuyordu
+        # ("OnaylandÄ±"). Gövde her zaman UTF-8'e yeniden kodlandığı için bildirimi en başa koy.
+        script = '<meta charset="utf-8">' + script
         if "<head>" in text:
             text = text.replace("<head>", f"<head>{script}", 1)
         elif "<body>" in text:
@@ -4028,6 +4369,16 @@ async def is_listesi_dosya_ac(request: Request):
                     headers={"Cache-Control": "no-store"})
 
 
+@app.get(is_listesi.PTT_PATH)
+async def is_listesi_ptt(request: Request):
+    """İş Listesi'nden "PTT sorgula": dosya-ac gibi yerel yetki aranmaz; sorguyu sayfa yapar."""
+    from .yerel_kapi import tarayici_reddi
+    if (request.client.host if request.client else "") not in _LOCAL_HOSTS or tarayici_reddi(request.headers, request.method):
+        return Response(content=b"Bulunamadi.", status_code=404)
+    return Response(content=is_listesi.PTT_SAYFASI, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/__uyap_lan__/giris")
 async def lan_giris_formu(request: Request, hedef: str = "/giris"):
     red = _lan_istegi_reddi(request)
@@ -4091,8 +4442,9 @@ async def proxy(full_path: str, request: Request, _user: str = Depends(require_a
     # yönlendirme tünel yolundaki (office_agent.handle_uyap_request) ile aynı olmalı.
     from . import jobs  # döngüsel import'tan kaçınmak için tembel
     if jobs.is_control_path(full_path):
+        kaynak = "yerel" if (request.client.host if request.client else "") in _LOCAL_HOSTS else f"LAN:{_user}"
         status, headers, out_body = await jobs.handle_control(
-            request.method, full_path, request.url.query, body)
+            request.method, full_path, request.url.query, body, kaynak=kaynak)
         return Response(content=out_body, status_code=status, headers=headers)
 
     gw.touch()

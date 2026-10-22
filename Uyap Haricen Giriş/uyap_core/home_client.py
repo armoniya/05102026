@@ -444,6 +444,10 @@ def make_app(tunnel: Tunnel):
             # Yerel yetki aranmaz (çerez çapraz-site gezinmede gelmez); sayfa yalnız yönlendirir.
             return web.Response(body=is_listesi.DOSYA_AC_SAYFASI, content_type="text/html", charset="utf-8",
                                 headers={"Cache-Control": "no-store"})
+        if request.rel_url.path == is_listesi.PTT_PATH and request.method == "GET":
+            # Aynı kural; PTT sorgusunu sayfa kendisi (aynı köken, çerezle) yapar.
+            return web.Response(body=is_listesi.PTT_SAYFASI, content_type="text/html", charset="utf-8",
+                                headers={"Cache-Control": "no-store"})
         if not _yerel_yetki(request):
             if request.method in ("GET", "HEAD") and "text/html" in request.headers.get("Accept", ""):
                 return _yerel_giris_sayfasi()

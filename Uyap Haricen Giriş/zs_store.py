@@ -12,6 +12,7 @@ Yöntemler senkron; zs.py bunları asyncio.to_thread ile çağırır (tek bağla
 """
 
 import os
+import re
 import json
 import time
 import sqlite3
@@ -147,7 +148,9 @@ _ADDED_COLS = {
                  # Dosyadaki belirli bir belgeye bağlı iş (UYAP evrakId + ağaçtaki adı).
                  ("evrak_id", "TEXT"), ("evrak_adi", "TEXT"),
                  # İşin yapıldığı taraf (dosya kartının taraf listesinden; ör. borçlulardan biri).
-                 ("taraf_adi", "TEXT")),
+                 ("taraf_adi", "TEXT"),
+                 # Tebligatın PTT barkodu (iş açılırken belgeden alınır; "Tebliğ durumu kontrol").
+                 ("barkod", "TEXT")),
     "zs_reminders": (("sub_id", "BIGINT"), ("title", "TEXT NOT NULL DEFAULT ''")),
     # Aşama 2: kontrol sorusu + sonuç dalları (JSON, bkz. TEMPLATE_SONUCLAR).
     "zs_templates": (("kontrol", "TEXT"), ("sonuclar", "TEXT")),
@@ -165,7 +168,7 @@ _POST_INDEXES = (
 )
 # UYAP dosya alanları (görevde).
 DOSYA_FIELDS = ("dosya_id", "birim_id", "birim_adi", "dosya_no", "dosya_tur", "dosya_uyap", "evrak_id", "evrak_adi",
-                "taraf_adi")
+                "taraf_adi", "barkod")
 # UYAP'ın dosya kartı (dosya-sorgula-popup) bu alanlarla açılır — UYAP'ın kendi arama sonucundan
 # kartı açarken verdiği nesneyle aynı anahtarlar.
 UYAP_KART_ALANLARI = ("dosyaId", "dosyaNo", "birimId", "birimAdi", "dosyaTurKod", "dosyaTurKodAciklama",
@@ -207,6 +210,12 @@ HAZIR_SABLONLAR = (
      "description": "PTT barkodunda tebligatın son durumunu kontrol et.", "action": None,
      "kontrol": "Barkodda teslim görünüyor mu?",
      "sonuclar": _sonuc(("Tebligat kontrol", 3), ("Adres araştırması", 2), 2)},
+    # action "ptt:barkod": iş açılırken tebligatın PTT barkodu da alınır (görevde barkod alanı);
+    # UYAP'taki iş satırında tek tuşla PTT sorgusu yapılır (ofisin /__uyap_agent__/ptt_sorgu ucu).
+    {"id": "h-teblig-durum", "title": "Tebliğ durumu kontrol", "due_days": 3, "priority": 1, "taraf": "borclu",
+     "description": "Tebligatın PTT barkodundan tebliğ durumunu sorgula.", "action": "ptt:barkod",
+     "kontrol": "Tebligat tebliğ edildi mi?",
+     "sonuclar": _sonuc(("Kesinleşme kontrol", 7), ("Adres araştırması", 2), 3)},
     {"id": "h-21-2", "title": "21/2 akıbet kontrol", "due_days": 5, "priority": 1, "taraf": "borclu",
      "description": "21/2 tebligatın akıbetini kontrol et.", "action": "ekran:safahat",
      "kontrol": "21/2 tebligat tebliğ edildi mi?",
@@ -271,6 +280,7 @@ def clean_dosya(d):
     if not isinstance(d, dict):
         return None
     out = {k: (str(d.get(k) or "").strip()[:200] or None) for k in DOSYA_FIELDS if k != "dosya_uyap"}
+    out["barkod"] = re.sub(r"\D", "", out["barkod"] or "")[:30] or None
     u = d.get("uyap")
     kart = {k: (v[:200] if isinstance(v, str) else v) for k, v in (u.items() if isinstance(u, dict) else ())
             if k in UYAP_KART_ALANLARI and isinstance(v, (str, int, float)) and not isinstance(v, bool)}
@@ -588,8 +598,8 @@ class ZsStore:
                 if role not in ROLES:
                     raise ZsError("Geçersiz rol.")
                 if u["role"] == "admin":
-                    n = self._q(cur, "SELECT COUNT(*) FROM zs_users WHERE role = 'admin' AND active = 1 AND id <> ?",
-                                (user_id,)).fetchone()[0]
+                    n = self._q(cur, "SELECT COUNT(*) FROM zs_users WHERE role = 'admin' AND active = 1 AND id <> ? "
+                                     "AND COALESCE(office_id, '') = ?", (user_id, u["office_id"] or "")).fetchone()[0]
                     if n == 0:
                         raise ZsError("Son etkin yönetici kullanıcıya çevrilemez.")
                 self._q(cur, "UPDATE zs_users SET role = ? WHERE id = ?", (role, user_id))
@@ -602,8 +612,8 @@ class ZsStore:
             if not u:
                 raise ZsError("Kullanıcı bulunamadı.")
             if not active and u["role"] == "admin":
-                n = self._q(cur, "SELECT COUNT(*) FROM zs_users WHERE role = 'admin' AND active = 1 AND id <> ?",
-                            (user_id,)).fetchone()[0]
+                n = self._q(cur, "SELECT COUNT(*) FROM zs_users WHERE role = 'admin' AND active = 1 AND id <> ? "
+                                 "AND COALESCE(office_id, '') = ?", (user_id, u["office_id"] or "")).fetchone()[0]
                 if n == 0:
                     raise ZsError("Son etkin yönetici kapatılamaz.")
             self._q(cur, "UPDATE zs_users SET active = ?, sess_epoch = sess_epoch + 1 WHERE id = ?",
@@ -747,8 +757,10 @@ class ZsStore:
             gnot = {}
             if onayda:
                 om = ",".join("?" * len(onayda))
+                # Desen parametreyle: sorgu metnindeki çıplak % psycopg2'de yer tutucu sayılır (IndexError → 500).
                 for tid, body in self._q(cur, f"SELECT task_id, body FROM zs_notes WHERE task_id IN ({om}) "
-                                              "AND body LIKE 'Onaya gönderme notu: %' ORDER BY id", onayda).fetchall():
+                                              "AND body LIKE ? ORDER BY id",
+                                         onayda + ["Onaya gönderme notu: %"]).fetchall():
                     gnot[tid] = body[len("Onaya gönderme notu: "):]
             rem = dict(self._q(cur, f"SELECT task_id, MIN(remind_at) FROM zs_reminders WHERE user_id = ? AND sent_at IS NULL "
                                     f"AND task_id IN ({marks}) GROUP BY task_id", [uid] + ids).fetchall())

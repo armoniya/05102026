@@ -38,6 +38,7 @@ from aiohttp import web
 
 import accounts
 import zs_r2
+import zs_push
 import zs_rapor
 import zs_bildirim
 import zs_tg_grup
@@ -560,6 +561,10 @@ async def login_post(request):
     else:
         user = await _db(C.store.authenticate, uname, form.get("password", ""))
         err = "Kullanıcı adı veya parola hatalı."
+        if user and user.get("account_username"):
+            # Ana hesaba eşlenmiş kişinin eski /zs parolası artık kimlik değildir: giriş ana hesapla,
+            # /is-listesi'nden yapılır (yoksa ana hesap parolası değişse de eski parola işlerdi).
+            user, err = None, "Bu hesap CokluUyap hesabına bağlandı; İş Listesi'nden (/is-listesi) girin."
     if not user:
         C.guard.record_fail(key)
         await _audit(request, None, "giris", 401, t0=t0, error=err, username=uname)
@@ -993,6 +998,12 @@ async def api_my_reminders(request, user):
 async def api_reminder_delete(request, user):
     r = await _db(C.store.get_reminder, int(request.match_info["id"]))
     admin_ok = user["role"] == "admin" and r and r["task_id"] is not None
+    if admin_ok:
+        # Yönetici yalnız kendi bürosunda görebildiği işin hatırlatıcısını siler (başka büro → bulunamadı).
+        try:
+            await _visible_task(user, r["task_id"])
+        except ZsError:
+            admin_ok = False
     if not r or (not admin_ok and user["id"] not in (r["user_id"], r["created_by"])):
         raise ZsError("Hatırlatıcı bulunamadı.")
     await _db(C.store.delete_reminder, r["id"])
@@ -1097,7 +1108,8 @@ async def api_notify_push_add(request, user):
         raise ZsError("Telefon bildirimi bu sunucuda kapalı.")
     d = await _body(request)
     ep, keys = str(d.get("endpoint") or ""), d.get("keys") or {}
-    if not ep.startswith("https://") or len(ep) > 1000 or not keys.get("p256dh") or not keys.get("auth"):
+    if not zs_push.endpoint_ok(ep) or len(ep) > 1000 or not isinstance(keys, dict) \
+            or not keys.get("p256dh") or not keys.get("auth"):
         raise ZsError("Bildirim aboneliği geçersiz.")
     await _db(C.store.push_add, user["id"], ep, str(keys["p256dh"])[:200], str(keys["auth"])[:100],
               request.headers.get("User-Agent", ""))

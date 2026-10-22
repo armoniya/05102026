@@ -212,7 +212,7 @@ ACTIVE_DOWNLOADS = {}  # path -> asyncio.Event
 # (jobs.py) ile AYNI kilidi paylaşırlar (anlık istek + toplu iş aynı oturumu bozmasın).
 
 
-async def handle_uyap_request(meta: dict, body: bytes):
+async def handle_uyap_request(meta: dict, body: bytes, kaynak: str = ""):
     """Bir HTTP isteğini UYAP'a uygular; (status, headers, body) döndürür.
     Önbellek ofiste tutulur ve TÜM istemciler tarafından PAYLAŞILIR: bir istemcinin
     çektiği kabuğu diğerleri UYAP'a hiç gitmeden alır. Eşzamanlı ilk istekler tek sefer
@@ -229,7 +229,7 @@ async def handle_uyap_request(meta: dict, body: bytes):
     # oturumu (gw) gerektirmeden de yanıtlanabilir (ör. iş listeleme), bu yüzden en başta.
     if jobs.is_control_path(path):
         return await jobs.handle_control(
-            meta.get("method", "GET"), path, meta.get("query", ""), body)
+            meta.get("method", "GET"), path, meta.get("query", ""), body, kaynak=kaynak)
 
     gw = uyap_proxy.gw
     gw.touch()
@@ -294,13 +294,13 @@ async def handle_uyap_request(meta: dict, body: bytes):
             event.set()
 
 
-def _wire_datachannel(channel):
-    """Gelen DataChannel'a istek işleyiciyi bağlar."""
+def _wire_datachannel(channel, cid=None):
+    """Gelen DataChannel'a istek işleyiciyi bağlar. cid: imza günlüğünde isteğin kaynağı."""
     reasm = Reassembler()
 
     async def _serve(msg):
         try:
-            status, headers, body = await handle_uyap_request(msg.meta, msg.body)
+            status, headers, body = await handle_uyap_request(msg.meta, msg.body, kaynak=f"tünel:{str(cid)[:8]}")
         except Exception as e:
             print(f"[!] Istek isleme hatasi: {e}")
             status = 502
@@ -398,7 +398,7 @@ class MultiAnswerer:
 
         @pc.on("datachannel")
         def on_datachannel(channel):
-            _wire_datachannel(channel)
+            _wire_datachannel(channel, cid)
 
         @pc.on("connectionstatechange")
         async def on_state():
@@ -510,7 +510,8 @@ async def run_signaling(args, ice_servers):
 
                 async def _serve_relay(sender, rmsg):
                     try:
-                        status, headers, body = await handle_uyap_request(rmsg.meta, rmsg.body)
+                        status, headers, body = await handle_uyap_request(
+                            rmsg.meta, rmsg.body, kaynak=f"relay:{str(sender.cid)[:8]}")
                     except Exception as e:
                         print(f"[!] Relay istek isleme hatasi: {e}")
                         status = 502

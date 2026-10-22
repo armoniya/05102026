@@ -25,6 +25,26 @@ class PushGone(Exception):
     """Abonelik artık geçersiz (404/410) — kaydı silinmeli."""
 
 
+# Abonelik adresi yalnız tarayıcıların push servisleri olabilir: sunucu bu adrese POST attığı için
+# serbest https adresi, sunucudan istenen yere istek attırmaya (kör SSRF) açıktı.
+PUSH_HOSTS = ("fcm.googleapis.com", "android.googleapis.com", "updates.push.services.mozilla.com",
+              "web.push.apple.com")
+PUSH_HOST_SUFFIXES = (".push.services.mozilla.com", ".notify.windows.com", ".push.apple.com")
+
+
+def endpoint_ok(endpoint) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(str(endpoint or ""))
+        host = (u.hostname or "").lower()
+        port = u.port
+    except ValueError:
+        return False
+    if u.scheme != "https" or u.username or u.password or port not in (None, 443):
+        return False
+    return host in PUSH_HOSTS or host.endswith(PUSH_HOST_SUFFIXES)
+
+
 def b64u(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
@@ -142,8 +162,8 @@ async def send(session: aiohttp.ClientSession, sub: dict, payload: dict, key, pu
                ttl: int = 24 * 3600):
     """sub: {endpoint, p256dh, auth}. Başarıda None; geçersiz abonelikte PushGone; diğer hatada RuntimeError."""
     endpoint = sub["endpoint"]
-    if not endpoint.startswith("https://"):
-        raise PushGone("https olmayan uç")
+    if not endpoint_ok(endpoint):
+        raise PushGone("izinli push servisi olmayan uç")   # eski kayıtlar da gönderilmeden silinir
     body = encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"), sub["p256dh"], sub["auth"])
     headers = {"Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": str(ttl),
                "Urgency": "high", "Authorization": vapid_header(endpoint, key, pub_b64, vapid_sub)}

@@ -53,7 +53,83 @@ DOSYA_AC_SAYFASI = (
     "JSON.stringify({t:Date.now(),dosya:d}));}}catch(e){}location.replace('/');})();</script></body></html>"
 ).encode("utf-8")
 
-_cfg = {"base": "", "office_code": "", "username": "", "password": ""}
+# ── İş Listesi'nden PTT sorgusu ──────────────────────────────────────────────────────
+# Web arayüzündeki "PTT sorgula" 127.0.0.1:8800/__uyap_kisi__/ptt#<barkod> açar. Sayfa yerel yetki
+# istemeden verilir (çerez çapraz-site gezinmede gelmez); sorguyu kullanıcı "Sorgula"ya basınca
+# kendisi (aynı köken → çerez gider) /__uyap_agent__/ptt_sorgu ile yapar — UYAP içindeki "PTT barkod
+# sorgula" ile aynı uç. Kendiliğinden sorgulamaz: başka bir site bu adresi açtırıp ofiste Chrome
+# başlatamasın.
+PTT_PATH = "/__uyap_kisi__/ptt"
+PTT_SAYFASI = r"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
+<meta name='referrer' content='no-referrer'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>PTT Gönderi Takip</title>
+<style>
+body{margin:0;background:#111827;color:#e5e7eb;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+main{max-width:560px;margin:0 auto;padding:20px 16px}
+h1{font-size:17px;margin:0 0 12px}
+.s{display:flex;gap:10px;margin-top:4px}.s .a{flex:none;width:120px;color:#9ca3af}.s .d{font-weight:600;word-break:break-word}
+.h{margin-top:6px;padding:7px 10px;border-radius:8px;background:rgba(255,255,255,.06)}
+.h .t{color:#9ca3af;font-size:12px}.h .x{color:#cbd5e1;font-size:12px}
+.hata{color:#fca5a5;word-break:break-word}
+button{margin:14px 8px 0 0;padding:7px 14px;border:0;border-radius:8px;background:#4f46e5;color:#fff;font:inherit;cursor:pointer}
+button.ik{background:rgba(255,255,255,.15)}
+</style></head><body><main><h1 id='bas'>PTT Gönderi Takip</h1><div id='govde'></div></main>
+<script>
+(function(){
+  var barkod = decodeURIComponent((location.hash || '').slice(1)).replace(/\D/g, '');
+  var govde = document.getElementById('govde');
+  function el(t, c, m){ var e = document.createElement(t); if (c) e.className = c; if (m != null) e.textContent = m; return e; }
+  function dugme(ad, ik, fn){ var b = el('button', ik ? 'ik' : null, ad); b.onclick = fn; govde.appendChild(b); }
+  function satir(ad, deger, renk){
+    if (!deger) return;
+    var s = el('div', 's'); s.appendChild(el('div', 'a', ad));
+    var d = el('div', 'd', deger); d.style.color = renk || '#f3f4f6'; s.appendChild(d); govde.appendChild(s);
+  }
+  function sorgula(){
+    govde.replaceChildren(el('div', null, 'PTT sorgulanıyor… (ptt.gov.tr, 10–20 sn sürebilir)'));
+    fetch('/__uyap_agent__/ptt_sorgu?barkod=' + encodeURIComponent(barkod), {cache: 'no-store', credentials: 'same-origin'})
+      .then(function(r){ return r.json().catch(function(){ return {ok: false, error: r.status === 401 || r.status === 403
+          ? 'Bu tarayıcıda CokluUyap girişi yok. CokluUyap penceresinden "Tarayıcıda aç" ile bir kez açıp yeniden deneyin.'
+          : 'PTT sorgusu yanıt vermedi (HTTP ' + r.status + ').'}; }); })
+      .catch(function(){ return {ok: false, error: 'CokluUyap\'a ulaşılamadı. Program bu bilgisayarda açık mı?'}; })
+      .then(goster);
+  }
+  function goster(j){
+    govde.replaceChildren();
+    if (!j || !j.ok) {
+      govde.appendChild(el('div', 'hata', (j && j.error) || 'PTT sorgusu başarısız.'));
+      dugme('Yeniden dene', false, sorgula);
+      return;
+    }
+    var d = (j.durum || '').toLocaleLowerCase('tr');
+    satir('Durum', j.durum || '—', /teslim edildi/.test(d) ? '#86efac' : /iade/.test(d) ? '#fca5a5' : '#fde68a');
+    satir(/teslim edildi/.test(d) ? 'Teslim tarihi' : 'Son işlem', j.tarih);
+    satir(/iade/.test(d) ? 'İade nedeni' : 'Teslim şekli', j.teslim_sekli);
+    if (j.kabul) { satir('Kabul tarihi', j.kabul.tarih); satir('Gönderici', j.kabul.gonderici); satir('Alıcı', j.kabul.alici); }
+    if (j.hareketler && j.hareketler.length) {
+      var b = el('div', null, 'Hareketler'); b.style.cssText = 'margin-top:14px;font-weight:600;color:#cbd5e1'; govde.appendChild(b);
+      j.hareketler.slice().reverse().forEach(function(hr){      // en yeni üstte
+        var s = el('div', 'h'); s.appendChild(el('div', 'd', hr.aciklama || '—'));
+        s.appendChild(el('div', 't', [hr.tarih, hr.yer].filter(Boolean).join(' · ')));
+        if (hr.detay) s.appendChild(el('div', 'x', hr.detay));
+        govde.appendChild(s);
+      });
+    }
+    dugme('Yeniden sorgula', true, sorgula);
+    dugme('Barkodu kopyala', true, function(){ navigator.clipboard && navigator.clipboard.writeText(barkod); });
+  }
+  if (!/^\d{13}$/.test(barkod)) { govde.appendChild(el('div', 'hata', 'Geçersiz barkod.')); return; }
+  document.getElementById('bas').textContent = 'PTT Gönderi Takip · ' + barkod;
+  document.title = 'PTT · ' + barkod;
+  // Sayfa yerel yetkisiz açılır (başka bir site de bu adrese yönlendirebilir); sorgu ofiste Chrome
+  // açtırdığı için kendiliğinden başlamaz, kullanıcı düğmeye basar. Sayfa başka siteye gömülemez
+  // (çapraz-site iframe'i yerel kapı reddeder) → tıklama da dışarıdan yaptırılamaz.
+  govde.appendChild(el('div', null, 'Barkod ' + barkod + ' ptt.gov.tr\'de sorgulanacak.'));
+  dugme('Sorgula', false, sorgula);
+})();
+</script></body></html>""".encode("utf-8")
+
+_cfg ={"base": "", "office_code": "", "username": "", "password": ""}
 _tok = {"value": "", "exp": 0.0}
 # Kilit oluşturulduğu olay döngüsüne bağlanır; uyap_app paylaşım/alıcı için ayrı (ve yeniden
 # başlatmada yeni) döngüler açtığından döngü değişince yenisi kurulur.

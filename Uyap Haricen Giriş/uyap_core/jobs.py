@@ -56,6 +56,8 @@ SIGN_UDF_PATH = AGENT_PREFIX + "/sign_udf"
 # "Tüm Evrakı İndir" (evrak_toplu.py): açık dosyanın tüm evrakı PDF + ZIP. Salt okuma,
 # kendi hız/eşzamanlılık/captcha kurallarıyla; toplu iş kapalıyken (light) de çalışır.
 TUM_EVRAK_PREFIX = AGENT_PREFIX + "/tum_evrak"
+# PTT gönderi takip (ptt_sorgu.py): seçili barkodun tek sorgusu. Salt okuma, UYAP'a gitmez.
+PTT_SORGU_PATH = AGENT_PREFIX + "/ptt_sorgu"
 # Light (yalnız UYAP paylaşımı, uyap_app.py) toplu işi kapatır: UYAP_TOPLU_IS=0 → iş kuyruğu
 # uçları 404, işleyiciler (job_handlers) hiç yüklenmez ve pakete girmez. Bağlanan her üye
 # ofisin e-imzalı oturumuyla toplu UYAP yazma işi başlatamasın diye. UDF köprüsü etkilenmez.
@@ -352,7 +354,7 @@ def is_control_path(path):
     """Verilen HTTP yolu ofis kontrol düzlemine mi ait? (UYAP'a İLETİLMEZ.)"""
     p = (path or "").lstrip("/")
     return (p == JOBS_PREFIX or p.startswith(JOBS_PREFIX + "/")
-            or p == SIGN_UDF_PATH
+            or p == SIGN_UDF_PATH or p == PTT_SORGU_PATH
             or p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"))
 
 
@@ -414,7 +416,31 @@ async def _handle_tum_evrak(method, p, body):
         return _resp(500, {"error": f"{type(e).__name__}: {e}"})
 
 
-async def _handle_sign_udf(method, query, body):
+def _imza_gunlugu_yolu():
+    kok = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(kok, "UyapIcra", "imza_gunlugu.jsonl")
+
+
+def _imza_gunlugu(kaynak, ad, girdi, cikti, hata):
+    """Ofis e-imzasıyla yapılan her imza denemesi (bağlanan her üye imzalatabilir — kabul edilmiş
+    risk, güvenlik notu §8 madde 5): ne zaman, hangi yoldan, hangi belge (özet), sonuç. Belgenin
+    kendisi yazılmaz. Günlük yazılamazsa imza bozulmaz, konsola düşer."""
+    import hashlib
+    kayit = {"zaman": time.strftime("%Y-%m-%d %H:%M:%S"), "kaynak": kaynak or "?", "ad": str(ad)[:200],
+             "boyut": len(girdi or b""), "girdi_sha256": hashlib.sha256(girdi or b"").hexdigest(),
+             "imzali_sha256": hashlib.sha256(cikti).hexdigest() if cikti else None,
+             "sonuc": "imzalandi" if cikti else "hata", "hata": (hata or None) and str(hata)[:300]}
+    print(f"[*] E-imza: {kayit['sonuc']} | {kayit['kaynak']} | {kayit['ad']} | {kayit['girdi_sha256'][:12]}")
+    try:
+        yol = _imza_gunlugu_yolu()
+        os.makedirs(os.path.dirname(yol), exist_ok=True)
+        with open(yol, "a", encoding="utf-8") as f:
+            f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"[!] İmza günlüğü yazılamadı: {e}")
+
+
+async def _handle_sign_udf(method, query, body, kaynak=""):
     """POST /__uyap_agent__/sign_udf?name=<dosyaadı> — yüklenen belgeyi (UDF/Word/PDF)
     gerekiyorsa UDF'ye çevirip ofisteki e-imzayla imzalar; imzalı `.udf`'i binary döndürür.
     PIN/sertifika aktif UYAP oturumundan gelir (headless, popup yok)."""
@@ -442,9 +468,12 @@ async def _handle_sign_udf(method, query, body):
         signed = await loop.run_in_executor(
             None, udf_signer.sign_document, body, filename, cert_id, pin)
     except udf_signer.SignError as e:
+        _imza_gunlugu(kaynak, filename, body, None, str(e))
         return _resp(400, {"error": str(e)})
     except Exception as e:
+        _imza_gunlugu(kaynak, filename, body, None, f"{type(e).__name__}: {e}")
         return _resp(502, {"error": f"İmzalama hatası: {type(e).__name__}: {e}"})
+    _imza_gunlugu(kaynak, filename, body, signed, None)
 
     headers = {
         "Content-Type": "application/octet-stream",
@@ -454,16 +483,24 @@ async def _handle_sign_udf(method, query, body):
     return 200, headers, signed
 
 
-async def handle_control(method, path, query, body):
-    """Kontrol-düzlemi HTTP isteğini işler; (status, headers, body) döndürür (proxy formatı)."""
+async def handle_control(method, path, query, body, kaynak=""):
+    """Kontrol-düzlemi HTTP isteğini işler; (status, headers, body) döndürür (proxy formatı).
+    kaynak: isteğin geldiği yol ("yerel", "LAN:<ad>", "tünel:<cid>") — imza günlüğüne yazılır."""
     method = (method or "GET").upper()
     p = (path or "").lstrip("/")
 
     # UDF e-imza köprüsü iş kuyruğundan ayrı (ikili gövde): en başta ele al.
     if p == SIGN_UDF_PATH:
-        return await _handle_sign_udf(method, query, body)
+        return await _handle_sign_udf(method, query, body, kaynak)
     if p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"):
         return await _handle_tum_evrak(method, p, body)
+    if p == PTT_SORGU_PATH:
+        if method != "GET":
+            return _resp(405, {"error": "Yöntem desteklenmiyor (GET bekleniyor)."})
+        from . import ptt_sorgu
+        barkod = (urllib.parse.parse_qs(query or "").get("barkod") or [""])[0]
+        sonuc = await ptt_sorgu.sorgula(barkod)
+        return _resp(200 if sonuc.get("ok") else 502, sonuc)
 
     if not TOPLU_IS_ACIK:
         return _resp(404, {"error": "Bu sürümde toplu iş kapalı."})

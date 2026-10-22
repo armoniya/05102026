@@ -573,8 +573,14 @@ class ZsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(zs_push.unb64u(st["push"]["key"])), 65)
         self.assertFalse(st["telegram"]["enabled"])  # jeton yok
         ua = zs_push.private_from_raw(zs_push.new_private_raw())
-        sub = {"endpoint": "https://push.example/abc", "keys": {"p256dh": zs_push.b64u(zs_push._pub_bytes(ua)), "auth": "BTBZMqHH6r4Tts7J_aSIgg"}}
+        sub = {"endpoint": "https://fcm.googleapis.com/fcm/send/abc", "keys": {"p256dh": zs_push.b64u(zs_push._pub_bytes(ua)), "auth": "BTBZMqHH6r4Tts7J_aSIgg"}}
         await self.j(await ali.post("/zs/api/bildirim/push", json={"endpoint": "http://x", "keys": {}}, headers=H), 400)
+        # Push servisi olmayan adres reddedilir (sunucudan keyfi adrese istek attırılamasın — SSRF).
+        for ep in ("https://ic-servis.local/x", "https://fcm.googleapis.com.saldirgan.com/x",
+                   "https://fcm.googleapis.com:8443/x", "https://u:p@fcm.googleapis.com/x"):
+            await self.j(await ali.post("/zs/api/bildirim/push", json=dict(sub, endpoint=ep), headers=H), 400)
+        self.assertTrue(zs_push.endpoint_ok("https://wns2-db5p.notify.windows.com/w/?token=x"))
+        self.assertTrue(zs_push.endpoint_ok("https://web.push.apple.com/abc"))
         self.assertEqual((await self.j(await ali.post("/zs/api/bildirim/push", json=sub, headers=H)))["devices"], 1)
         self.assertEqual((await self.j(await ali.post("/zs/api/bildirim/push", json=sub, headers=H)))["devices"], 1)  # tekrar: çoğalmaz
         self.assertEqual((await self.j(await ali.post("/zs/api/bildirim/push/sil", json={"endpoint": sub["endpoint"]}, headers=H)))["devices"], 0)
@@ -1057,6 +1063,15 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
             "title": "Hamza Oğuz – Tebligat kontrol", "dosya": dict(self.DOSYA, taraf_adi="Hamza Oğuz")})))["task"]
         self.assertEqual(t["taraf_adi"], "Hamza Oğuz")
+        # "Tebliğ durumu kontrol": PTT barkodu işle saklanır (yalnız rakamlar; Code-39 yıldızları atılır).
+        ptt = next(x for x in s["hazir"] if x["title"] == "Tebliğ durumu kontrol")
+        self.assertEqual(ptt["action"], "ptt:barkod")
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Tebliğ durumu kontrol", "dosya": dict(self.DOSYA, barkod="*4007770084489*")})))["task"]
+        self.assertEqual(t["barkod"], "4007770084489")
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+            "title": "Tebligat kontrol", "dosya": dict(self.DOSYA)})))["task"]
+        self.assertIsNone(t["barkod"])
 
     async def test_eski_kullanici_ve_owner_yeni_arayuze_giremez(self):
         c = await self.client()
@@ -1171,6 +1186,27 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
                          data={"csrf": zs._map_csrf("utku"), "zs_user_id": str(ayse["id"]),
                                "account_username": "mehmet@kemal"})
         self.assertIn("hata=1", r.headers["Location"])
+        # Eşlenen kişinin eski /zs parolası artık giriş vermez (ana hesap parolası değişse de işlerdi).
+        r = await c.post("/zs/login", data={"username": "ali", "password": PW}, allow_redirects=False)
+        self.assertEqual(r.status, 401)
+        self.assertIn("/is-listesi", await r.text())
+
+    async def test_hatirlatici_baska_buro_silinemez(self):
+        import time as _t
+        soon = int(_t.time()) + 3600
+        ahmet = await self.login("kemal", "ahmet")
+        t = (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={"title": "Kemal işi"})))["task"]
+        r = (await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t['id']}/hatirlatici", headers=H,
+                                           json={"remind_at": soon})))["reminder"]
+        # Başka büronun sahibi (yönetici) kimlik numarasıyla silemez; eski /zs havuzunun yöneticisi de.
+        zeynep = await self.login("deniz", "zeynep")
+        await self.j(await zeynep.delete(f"/is-listesi/api/hatirlatici/{r['id']}", headers=H), 400)
+        eski = await self.legacy("yonetici")
+        await self.j(await eski.delete(f"/zs/api/hatirlatici/{r['id']}", headers=H), 400)
+        self.assertIsNotNone(self.store.get_reminder(r["id"]))
+        # Büronun yöneticisi silebilir.
+        await self.j(await ahmet.delete(f"/is-listesi/api/hatirlatici/{r['id']}", headers=H))
+        self.assertIsNone(self.store.get_reminder(r["id"]))
 
     async def test_masaustu_koprusu(self):
         """uyap_core/is_listesi: dosya kartındaki 'İş Ata' yerel köprüsü gerçek sunucuya karşı."""

@@ -29,6 +29,8 @@ a = Analysis(
         + ["sira_kapisi_arayuz", "uyap_core.sira_eslestirme", "uyap_core.sira_kapisi"]
         # Tüm Evrakı İndir: jobs içinden tembel içe aktarılır; dönüştürme PyMuPDF ile.
         + ["uyap_core.evrak_toplu", "uyap_core.udf_pdf", "fitz", "pymupdf", "pypdf"]
+        # PTT barkod sorgusu: jobs içinden tembel içe aktarılır.
+        + ["uyap_core.ptt_sorgu"]
     ),
     hookspath=[],
     hooksconfig={},
