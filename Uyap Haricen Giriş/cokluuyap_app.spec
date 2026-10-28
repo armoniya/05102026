@@ -4,8 +4,10 @@
 # Derleme ("Uyap Haricen Giriş" içinde):
 #   .\.venv\Scripts\python.exe -m PyInstaller cokluuyap_app.spec --noconfirm
 # Çıktı: dist/CokluUyap/ — tek başına dağıtılmaz; CokluUyapKur.exe (kurucu) içine gömülür.
+import datetime
 import os
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.win32 import versioninfo as vi
 
 HERE = os.path.abspath(SPECPATH)
 
@@ -28,7 +30,7 @@ a = Analysis(
         # Sıra kapısı arayüzü/eşleştirme: uyap_app içinde yöntem içinden içe aktarılır.
         + ["sira_kapisi_arayuz", "uyap_core.sira_eslestirme", "uyap_core.sira_kapisi"]
         # Tüm Evrakı İndir: jobs içinden tembel içe aktarılır; dönüştürme PyMuPDF ile.
-        + ["uyap_core.evrak_toplu", "uyap_core.udf_pdf", "fitz", "pymupdf", "pypdf"]
+        + ["uyap_core.evrak_toplu", "uyap_core.gerekceli_karar", "uyap_core.udf_pdf", "fitz", "pymupdf", "pypdf"]
         # PTT barkod sorgusu: jobs içinden tembel içe aktarılır.
         + ["uyap_core.ptt_sorgu"]
     ),
@@ -49,6 +51,30 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Sürüm kaynağı: Özellikler → Ayrıntılar'da üretici/ürün/açıklama görünür. Meta verisi
+# boş imzasız exe Defender'ın makine öğrenmesi sınıflandırıcısında risk sinyalidir.
+# Sürüm msi_hazirla.surum() ile aynı biçim (YY.A.G); imza sertifikası alınınca
+# CompanyName sertifikadaki unvanla aynı yapılmalı.
+_t = datetime.date.today()
+_v = (_t.year % 100, _t.month, _t.day, 0)
+_vs = "%d.%d.%d" % _v[:3]
+SURUM = vi.VSVersionInfo(
+    ffi=vi.FixedFileInfo(filevers=_v, prodvers=_v),
+    kids=[
+        vi.StringFileInfo([vi.StringTable("041F04B0", [
+            vi.StringStruct("CompanyName", "Çoklu UYAP"),
+            vi.StringStruct("FileDescription", "Çoklu UYAP Ofis Uygulaması"),
+            vi.StringStruct("FileVersion", _vs),
+            vi.StringStruct("InternalName", "CokluUyap"),
+            vi.StringStruct("LegalCopyright", "© %d Çoklu UYAP" % _t.year),
+            vi.StringStruct("OriginalFilename", "CokluUyap.exe"),
+            vi.StringStruct("ProductName", "Çoklu UYAP"),
+            vi.StringStruct("ProductVersion", _vs),
+        ])]),
+        vi.VarFileInfo([vi.VarStruct("Translation", [0x041F, 1200])]),
+    ],
+)
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -61,6 +87,7 @@ exe = EXE(
     upx=False,
     console=False,  # masaüstü arayüz; log zaten pencere içindeki günlükte
     icon=None,
+    version=SURUM,
 )
 coll = COLLECT(
     exe,

@@ -16,14 +16,17 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
                                                       sablon, etiketler}  → süreç/aşama şablondan
     GET  /__uyap_kisi__/is-listesi/surecler          → hazır süreçler (aşamalarıyla)
     GET  /__uyap_kisi__/is-listesi/etiketler         → {hazir, buro, kisisel}
-    POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla|onayla|reddet, reason, sonuc?, sonraki?}
-                                                     (sonuc verilince sunucu sonraki aşamanın işini açar)
+    POST /__uyap_kisi__/is-listesi/tasks/<id>/durum  {action: gonder|basla|tamamla|onayla|reddet, reason, sonuc?, sonraki?,
+                                                      kesinlesme?: "YYYY-AA-GG"}
+                                                     (sonuc verilince sunucu sonraki aşamanın işini, tebliğde
+                                                      kesinleşme günü verildiyse o güne kesinleşme işini açar)
     POST /__uyap_kisi__/is-listesi/tasks/<id>/ek-sure {new_due, reason}  → "Ertesi güne aktar" (yönetici onaylar)
     POST /__uyap_kisi__/is-listesi/ek-sure/<id>/karar {approve, note}  → aktarma talebini kabul / ret
     GET  /__uyap_kisi__/is-listesi/sablonlar         → {hazir, buro} iş şablonları
     POST /__uyap_kisi__/is-listesi/sablonlar         {title, description, due_days, priority, taraf, kontrol, sonuclar}
     POST /__uyap_kisi__/is-listesi/sablonlar/<id>    {title, description, due_days, priority, taraf}  → düzenle
     DELETE /__uyap_kisi__/is-listesi/sablonlar/<id>
+    POST /__uyap_kisi__/is-listesi/tasks/<id>/hatirlatici {remind_at, note}  → kendine hatırlatıcı
     GET  /__uyap_kisi__/is-listesi/ac[?is=<id> | ?sekme=sablonlar]  → 303 → cokluuyap.com'da şifresiz oturum
                                                      (tek kullanımlık kod)
 
@@ -298,6 +301,10 @@ async def handle(method, path, query, body):
                     body["sonraki"] = False
                 elif isinstance(s, dict):
                     body["sonraki"] = {"baslik": str(s.get("baslik") or "")[:200], "gun": s.get("gun")}
+                # Tebliğ edildiyse kullanıcının girdiği kesinleşme günü: sunucu o güne kesinleşme işi açar.
+                k = d.get("kesinlesme")
+                if isinstance(k, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", k):
+                    body["kesinlesme"] = k
             return _json(*await _call("POST", f"tasks/{m.group(1)}/durum", body=body))
         # "Ertesi güne aktar": son tarihi ileri alma talebi (gerekçe zorunlu); yönetici / onay yetkilisi
         # yan panelden ya da İş Listesi'nde kabul eder veya reddeder (ek-sure/<id>/karar).
@@ -308,6 +315,14 @@ async def handle(method, path, query, body):
                 return _err(400, "Geçersiz istek verisi.")
             return _json(*await _call("POST", f"tasks/{m.group(1)}/ek-sure",
                                       body={"new_due": d["new_due"], "reason": str(d.get("reason") or "")[:2000]}))
+        # Hatırlatıcı: UYAP penceresinden yalnız kendine (başkasına kurma İş Listesi'nde; kuralı sunucu denetler).
+        m = re.fullmatch(r"tasks/(\d{1,12})/hatirlatici", sub)
+        if m and method == "POST":
+            d = _obj(body)
+            if d is None or not isinstance(d.get("remind_at"), int) or isinstance(d.get("remind_at"), bool):
+                return _err(400, "Geçersiz istek verisi.")
+            return _json(*await _call("POST", f"tasks/{m.group(1)}/hatirlatici",
+                                      body={"remind_at": d["remind_at"], "note": str(d.get("note") or "")[:500]}))
         m = re.fullmatch(r"ek-sure/(\d{1,12})/karar", sub)
         if m and method == "POST":
             d = _obj(body)

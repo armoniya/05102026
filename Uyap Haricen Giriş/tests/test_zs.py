@@ -8,6 +8,7 @@ import sys
 import json
 import shutil
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1298,6 +1299,51 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
         await self.j(await ahmet.post(f"/is-listesi/api/tasks/{t5['id']}/durum", headers=H,
                                       json={"action": "gonder", "sonuc": "belki"}), 400)
 
+    async def test_teblig_kesinlesme_gunu_isi_acar(self):
+        """Tebliğ kontrol → Tebliğ edildi + elle girilen kesinleşme günü: Mazbata dönüşü kontrolünün yanında o
+        güne Kesinleşme tarihi kontrol de açılır; zincirden gelen ikinci kesinleşme işi açılmaz."""
+        ahmet = await self.login("kemal", "ahmet")
+        dosya = dict(self.DOSYA, taraf_adi="HAMZA OĞUZ", barkod="4007770084489")
+        me = (await self.j(await ahmet.get("/is-listesi/api/me")))["me"]["id"]
+        s = await self.j(await ahmet.get("/is-listesi/api/sablonlar"))
+        teb = next(x for x in s["hazir"] if x["id"] == "h-teblig-durum")
+        self.assertEqual((teb["kesinlesme"], teb["sonuclar"]["olumlu"]["ad"], teb["sonuclar"]["olumsuz"]["ad"]),
+                         ("olumlu", "Tebliğ edildi", "İade"))
+
+        async def yeni(baslik):
+            return (await self.j(await ahmet.post("/is-listesi/api/tasks", headers=H, json={
+                "title": f"HAMZA OĞUZ – {baslik}", "assignee_id": me, "dosya": dosya})))["task"]
+
+        async def gonder(tid, sonuc, status=200, **kw):
+            return await self.j(await ahmet.post(f"/is-listesi/api/tasks/{tid}/durum", headers=H,
+                                                 json=dict({"action": "gonder", "sonuc": sonuc}, **kw)), status)
+
+        # Geçersiz gün: iş durumu değişmez.
+        t = await yeni("Tebliğ kontrol")
+        await gonder(t["id"], "olumlu", 400, kesinlesme="2026-13-40")
+        r = await gonder(t["id"], "olumlu", kesinlesme="2026-11-05")
+        n, k = r["sonraki"], r["kesinlesme"]
+        self.assertEqual((n["title"], n["asama"]), ("HAMZA OĞUZ – Mazbata dönüşü kontrol", "mazbata"))
+        self.assertEqual((k["title"], k["sablon"], k["asama"], k["taraf_adi"], k["barkod"], k["assignee_id"]),
+                         ("HAMZA OĞUZ – Kesinleşme tarihi kontrol", "h-kes-tarih", "kes-tarih", "HAMZA OĞUZ",
+                          "4007770084489", me))
+        self.assertEqual(k["due_at"], 1793887200)                     # 05.11.2026 17:00 (UTC+3)
+        # Mazbata → İtiraz → "İtiraz yok": kesinleşme işi zaten açık, ikincisi açılmaz.
+        i = (await gonder(n["id"], "olumlu"))["sonraki"]
+        self.assertEqual(i["asama"], "itiraz")
+        v = (await gonder(i["id"], "olumlu"))["sonraki"]
+        self.assertEqual((v["var"], v["id"]), (True, k["id"]))
+        lst = (await self.j(await ahmet.get("/is-listesi/api/tasks?filtre=tumu")))["tasks"]
+        self.assertEqual(sum(x["sablon"] == "h-kes-tarih" for x in lst), 1)
+        # Kesinleşme kontrolü bitince (onayda) yeni turda yeniden açılabilir.
+        await gonder(k["id"], "olumlu")
+        t2 = await yeni("Tebliğ kontrol")
+        self.assertNotIn("var", (await gonder(t2["id"], "olumlu", kesinlesme="2026-12-01"))["kesinlesme"])
+        # İade dalında kesinleşme günü yok sayılır (yanıtta kesinleşme yok); t2'nin Mazbata işi hâlâ açık.
+        t3 = await yeni("Tebliğ kontrol")
+        r = await gonder(t3["id"], "olumsuz", kesinlesme="2026-11-05")
+        self.assertEqual((r["sonraki"].get("var"), "kesinlesme" in r), (True, False))
+
     async def test_eski_kullanici_ve_owner_yeni_arayuze_giremez(self):
         c = await self.client()
         r = await c.post("/is-listesi/login", data={"office_code": "", "username": "ali", "password": PW},
@@ -1524,6 +1570,19 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(st, 400)
             st, _, out = await k.handle("POST", yol, "", json.dumps({"new_due": 1800090000, "reason": "Sonuç düşmedi"}).encode())
             self.assertEqual((st, json.loads(out)["extension"]["status"]), (200, "bekliyor"))
+            # Hatırlatıcı: UYAP penceresinden kendine; listede sıradaki hatırlatma görünür.
+            hy = f"/__uyap_kisi__/is-listesi/tasks/{aktar['id']}/hatirlatici"
+            st, _, _ = await k.handle("POST", hy, "", json.dumps({"remind_at": "yarın"}).encode())
+            self.assertEqual(st, 400)
+            st, _, _ = await k.handle("POST", hy, "", json.dumps({"remind_at": 1000}).encode())
+            self.assertEqual(st, 400)                                        # geçmiş zaman
+            ileri = int(time.time()) + 86400
+            st, _, out = await k.handle("POST", hy, "", json.dumps({"remind_at": ileri, "note": "Ara",
+                                                                      "user_id": 999}).encode())
+            r = json.loads(out)["reminder"]
+            self.assertEqual((st, r["remind_at"], r["note"], r["user_id"]), (200, ileri, "Ara", ben))   # user_id iletilmez
+            st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=benim", b"")
+            self.assertEqual({x["id"]: x for x in json.loads(out)["tasks"]}[aktar["id"]]["reminder_at"], ileri)
             st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=onay", b"")
             onay = {x["id"]: x for x in json.loads(out)["tasks"]}
             self.assertTrue(onay[aktar["id"]]["ext_pending"])
@@ -1548,6 +1607,13 @@ class IsListesiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((st, json.loads(out)["task"]["status"]), (200, "onaylandi"))
             st, _, out = await k.handle("GET", "/__uyap_kisi__/is-listesi/tasks", "filtre=onay", b"")
             self.assertEqual(json.loads(out)["tasks"], [])
+            # Tebliğ edildi + kesinleşme günü köprüden iletilir; bozuk biçim iletilmez.
+            for gun, var in (("05.11.2026", False), ("2026-11-05", True)):
+                tb = json.loads((await k.handle("POST", "/__uyap_kisi__/is-listesi/tasks", "", json.dumps(
+                    {"title": "Tebliğ kontrol", "assignee_id": ben, "dosya": self.DOSYA}).encode()))[2])["task"]
+                st, _, out = await k.handle("POST", f"/__uyap_kisi__/is-listesi/tasks/{tb['id']}/durum", "", json.dumps(
+                    {"action": "gonder", "sonuc": "olumlu", "kesinlesme": gun}).encode())
+                self.assertEqual((st, "kesinlesme" in json.loads(out)), (200, var))
             # Jeton sunucuda geçersiz kalırsa (ör. ana hesapta çıkış) köprü yeniden alır.
             self.acc.bump_sess_epoch("ahmet@kemal")
             st, _, _ = await k.handle("GET", "/__uyap_kisi__/is-listesi/me", "", b"")

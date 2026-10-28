@@ -850,10 +850,13 @@ async def api_task_transition(request, user):
     sonraki = d.get("sonraki")
     if sonraki is not False and not isinstance(sonraki, dict):
         sonraki = None
-    out, nxt = await _db(C.store.transition, user, t["id"], d.get("action") or "", d.get("reason") or "",
-                         sonuc, sonraki)
+    kesinlesme = d.get("kesinlesme")
+    kesinlesme = str(kesinlesme)[:10] if isinstance(kesinlesme, str) and kesinlesme.strip() else None
+    out, nxt, kes = await _db(C.store.transition, user, t["id"], d.get("action") or "", d.get("reason") or "",
+                              sonuc, sonraki, kesinlesme)
     # sonraki yalnız kontrol sonucu verildiyse döner: eski istemci (UYAP penceresi) yokluğunda kendisi açar.
-    return _json(dict({"ok": True, "task": out}, **({"sonraki": nxt} if sonuc else {})))
+    return _json(dict({"ok": True, "task": out}, **({"sonraki": nxt} if sonuc else {}),
+                      **({"kesinlesme": kes} if kes else {})))
 
 
 @_api(admin=True)

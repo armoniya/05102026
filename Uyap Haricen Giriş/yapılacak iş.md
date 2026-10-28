@@ -198,13 +198,13 @@ kontrol şablonu, şablonun kontrol sorusu ve sonuç dalları vardır. `otomatik
 | 1 | Tebligat oluşturuldu | Tebligat oluşturuldu kontrol | Oluşturuldu → 2 | `db:tebligat_olustu` |
 | 2 | Tebligat PTT'ye verildi | PTT'ye verildi kontrol | PTT'ye verildi → 3 | `db:ptt_kabul` |
 | 3 | Tebligat yola çıktı | Yola çıktı kontrol | Yola çıktı → 4 | `db:ptt_yolda` |
-| 4 | Tebliğ kontrol | Tebliğ kontrol | Sonuç belli → 5 | `db:teblig` |
+| 4 | Tebliğ kontrol | Tebliğ kontrol | **Tebliğ edildi → 5 + kesinleşme günü girildiyse o güne 10**; İade → 5 | `db:teblig` |
 | 5 | Mazbata dönüşü | Mazbata dönüşü kontrol | **Tebliğ edildi → 9**; **İade → 6**; Henüz dönmedi → 5 | `db:mazbata` |
 | 6 | Mernis adresine tebliğ *(iade)* | Mernis adresine tebliğ | Talep gönderildi → 8; Mernis adresi aynı → 7 | `uyap:talep_mernis` |
 | 7 | 21/2 adresine tebliğ *(iade)* | 21/2 adresine tebliğ | Talep gönderildi → 8 | `uyap:talep_21_2` |
 | 8 | Talep kabul *(iade)* | Talep kabul kontrol | **Kabul edildi → 1 (yeni tebligat turu)**; Reddedildi → 6 | `uyap:talep_kabul` |
 | 9 | İtiraz kontrol | İtiraz kontrol | İtiraz yok → 10; İtiraz var → Müvekkile bildirim | `db:itiraz` |
-| 10 | Kesinleşme tarihi | Kesinleşme tarihi kontrol | Tarih geldi → 11 | `db:kesinlesme_tarihi` |
+| 10 | Kesinleşme tarihi | Kesinleşme tarihi kontrol | İtiraz yok → 11; İtiraz var → Müvekkile bildirim | `db:kesinlesme_tarihi` |
 | 11 | Kesinleştirme talebi gönderme | Kesinleştirme talebi gönder | Gönderildi → 12 | `uyap:kesinlestirme_gonder` |
 | 12 | Kesinleştirme talebi kabul | Kesinleştirme talebi kabul kontrol | Kabul edildi → 13; Reddedildi → 11 | `uyap:kesinlestirme_talebi` |
 | 13 | Kesinleşme | Kesinleşme kontrol | Kesinleşti → Haciz talepleri; Kesinleşmedi → 12 | `uyap:sorgu_kesinlesme` |
@@ -217,6 +217,13 @@ kontrol şablonu, şablonun kontrol sorusu ve sonuç dalları vardır. `otomatik
   açılır (`transition(…, sonuc, sonraki)`). Kullanıcı öneriyi değiştirebilir ya da açmayabilir
   (`sonraki: {baslik, gun} | false`). Yeni tebligat turunda eski barkod / belge bağı taşınmaz.
   `sonuc` gönderilmezse sonraki iş açılmaz — güncellenmemiş UYAP penceresi kendisi açar (çift iş olmaz).
+- **Kesinleşme günü:** Tebliğ kontrolde "Tebliğ edildi" seçilince pencere kesinleşme gününü sorar (isteğe
+  bağlı, elle: ilamlı / ilamsız, e-tebligat ayrımı ve tatil kaydırması dosyadan güvenilir çıkmaz). Girilirse
+  Mazbata dönüşü kontrolün yanında o gün 17:00'ye "Kesinleşme tarihi kontrol" de açılır
+  (`transition(…, kesinlesme="YYYY-AA-GG")`, yanıtta `kesinlesme`). Şablonda `kesinlesme: "olumlu"`.
+- **Çift iş önleme:** sonraki iş / kesinleşme işi açılmadan, aynı dosya + taraf için aynı şablonda açık
+  (açık / devam) iş aranır; varsa yenisi açılmaz, yanıtta `{var: true, id, title}` döner (ör. İtiraz kontrol →
+  İtiraz yok, kesinleşme işi tebliğde zaten açıldıysa). Onaydaki iş yapılmış sayılır.
 - İş, açıldığı şablonu `sablon` alanında tutar ("h-mazbata" | büro şablonu "b-12"); seçilmediyse başlığın
   şablon kısmından (hazır şablonların eski adları da: "Mazbata kontrol", "Tebliğ durumu kontrol" …)
   bulunur. Eski işler sunucu açılışında bir kez başlıktan bağlanır (`backfill_sablon`).

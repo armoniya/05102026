@@ -634,9 +634,13 @@ function composerCard() {
   };
   priv.addEventListener("change", sync); sync();
   const files = S.uploads ? composerFiles() : null;
+  // Hatırlatıcı (isteğe bağlı): iş açılınca işi açana kurulur; başkasına iş detayından kurulur.
+  const rem = remWhen(null);
   const close = () => { S.composer = false; S.composerDue = null; renderList(); };
   const add = act(async () => {
     if (!title.value.trim()) { title.focus(); return; }
+    const remTs = rem.value();
+    if (remTs && !remCheckTs(remTs)) return;
     const body = { title: title.value, assignee_id: sel.value || null, due_at: due.value(), description: desc.value,
       private: priv.checked, priority: Number(prio.value) };
     if (extra && !priv.checked) { body.assignees = extra.ids(); body.approvers = appr.ids(); }
@@ -645,8 +649,13 @@ function composerCard() {
     // İş açıldı; belgeler ayrı istekte yüklenir. Biri başarısız olursa iş kalır, belge işin detayından eklenebilir.
     const picked = files ? files.list() : [], failed = [];
     for (const f of picked) { try { await uploadFile(d.task.id, f); } catch (e) { failed.push(`${f.name}: ${e.message}`); } }
-    if (failed.length) toast(`İş oluşturuldu ama ${failed.length} belge yüklenemedi — ${failed.join(" · ")}`);
-    else toast(picked.length ? `İş oluşturuldu, ${picked.length} belge yüklendi.` : "İş oluşturuldu.", true);
+    if (remTs) {
+      try { await api("POST", `/is-listesi/api/tasks/${d.task.id}/hatirlatici`, { remind_at: remTs, note: "" }); }
+      catch (e) { failed.push(`Hatırlatıcı: ${e.message}`); }
+    }
+    if (failed.length) toast(`İş oluşturuldu ama tamamlanamayanlar var — ${failed.join(" · ")}`);
+    else toast((picked.length ? `İş oluşturuldu, ${picked.length} belge yüklendi.` : "İş oluşturuldu.") +
+      (remTs ? ` Hatırlatıcı: ${fmt(remTs)}` : ""), true);
     await refresh();
   });
   // Başlıkta Enter sonraki alana geçer (yanlışlıkla eksik iş açılmasın); Ctrl+Enter her yerden oluşturur.
@@ -656,7 +665,8 @@ function composerCard() {
   const card = h("div", { class: "card composer" }, h("h3", {}, "Yeni iş"), title,
     h("div", { class: "more" }, h("div", { class: "form-grid" },
       isAdmin() ? h("label", {}, "Atanan kişi", sel) : null,
-      h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio)), extraRow, desc, files ? files.el : null,
+      h("div", { class: "lbl" }, "Son tarih", due.el), h("label", {}, "Öncelik", prio)), extraRow, desc,
+      h("div", { class: "lbl" }, h("span", {}, icon("bell"), " Bana hatırlat (isteğe bağlı)"), rem.el), files ? files.el : null,
       h("label", { class: "check" }, priv, h("span", {}, h("b", {}, "Özel iş"),
         h("span", { class: "muted" }, isAdmin() ? " — yalnız ben göreyim; onaya gönderilmez, bitince “Tamamla” derim. Sonra görünür yapabilir ya da devredebilirim."
           : " — yöneticiler dahil yalnız ben göreyim; onaya gönderilmez, bitince “Tamamla” derim. İstediğimde görünür yapabilirim."))),
@@ -690,10 +700,12 @@ function peoplePicker(placeholder) {
 // ── iş durumu eylemleri (kart + detay ortak) ───────────────────────────────────────
 async function doTransition(t, action, reason, extra) {
   const r = await api("POST", `/is-listesi/api/tasks/${t.id}/durum`, { action, reason: reason || "", ...(extra || {}) });
-  const n = r.sonraki;
+  const n = r.sonraki, k = r.kesinlesme;
+  const oneri = (ad, x) => !x ? "" : x.hata ? ` ${ad} açılamadı: ${x.hata}` : x.var ? ` ${ad} zaten açık: ${x.title}`
+    : ` ${ad} açıldı: ${x.title}${x.due_at ? ` (${fmt(x.due_at)})` : ""}`;
   toast({ basla: "İş başlatıldı.", gonder: "Onaya gönderildi.", tamamla: "İş tamamlandı.", onayla: "Onaylandı.",
-    reddet: "Reddedildi.", yeniden_ac: "Yeniden açıldı." }[action] +
-    (n && n.hata ? ` Sonraki iş açılamadı: ${n.hata}` : n ? ` Sonraki iş açıldı: ${n.title}` : ""), !(n && n.hata));
+    reddet: "Reddedildi.", yeniden_ac: "Yeniden açıldı." }[action] + oneri("Sonraki iş", n) + oneri("Kesinleşme işi", k),
+    !(n && n.hata) && !(k && k.hata));
   S.rejectFor = null; await refresh();
 }
 // Kontrol şablonlu işi bitirme: sonuç seçilir (şablondaki adıyla, ör. "Tebliğ edildi" / "İade"), o dalın
@@ -705,6 +717,12 @@ function kontrolDialog(t, action) {
   const gun = h("input", { type: "number", min: 0, max: 365, placeholder: "gün", style: "width:80px" });
   const ac = h("input", { type: "checkbox" }), hedef = h("div", { class: "small" });
   const note = h("textarea", { maxlength: 1800, rows: 3, placeholder: "Ne görüldü / ne yapıldı? (isteğe bağlı — ör. iade nedeni)" });
+  // Kesinleşme günü: şablonun kesinleşme dalında (Tebliğ kontrol → Tebliğ edildi) sorulur; girilirse sunucu
+  // o güne "Kesinleşme tarihi kontrol" işini de açar. Gün elle girilir.
+  const kes = h("input", { type: "date" });
+  const kesBox = h("div", { class: "next-box", hidden: true },
+    h("label", { class: "lbl" }, "Kesinleşme günü (isteğe bağlı)", kes),
+    h("div", { class: "small muted" }, "Bu güne “Kesinleşme tarihi kontrol” işi açılır; o güne kadar itiraz yoksa kesinleştirme talebi gönderilir."));
   const hedefCiz = () => {
     const n = tplByTitle(ad.value), x = n && n.asama ? asamaOf(n.asama) : null;
     hedef.replaceChildren(...(x ? ["Sonraki aşama: ", asamaTag(n.asama)] : ad.value.trim() ? [h("span", { class: "muted" }, "Süreç dışı iş")] : []));
@@ -721,15 +739,20 @@ function kontrolDialog(t, action) {
         ad.value = dal ? dal.baslik || tpl.title : "";
         gun.value = dal && dal.gun != null ? dal.gun : n && n.due_days != null ? n.due_days : "";
         ac.checked = !!dal; hedefCiz();
+        kesBox.hidden = !(sonraki && tpl.kesinlesme === k);
+        if (kesBox.hidden) kes.value = "";
       } }, (dal && dal.ad) || SONUC[k]);
   });
   const send = act(async () => {
     if (!sonuc) { toast("Kontrol sonucunu seçin."); return; }
     const dal = (tpl.sonuclar || {})[sonuc], ac2 = sonraki && ac.checked && ad.value.trim();
+    const kesGun = !kesBox.hidden && /^\d{4}-\d{2}-\d{2}$/.test(kes.value) ? kes.value : "";
     const reason = [`Kontrol: ${((dal && dal.ad) || SONUC[sonuc]).toLocaleLowerCase("tr-TR")} (${tpl.kontrol})`, note.value.trim(),
-      ac2 ? `Sonraki iş: ${ad.value.trim()}` : ""].filter(Boolean).join(" — ");
+      ac2 ? `Sonraki iş: ${ad.value.trim()}` : "", kesGun ? `Kesinleşme günü: ${kesGun.split("-").reverse().join(".")}` : ""]
+      .filter(Boolean).join(" — ");
     await doTransition(t, action, reason, { sonuc,
-      sonraki: ac2 ? { baslik: ad.value.trim(), gun: gun.value === "" ? null : Number(gun.value) } : false });
+      sonraki: ac2 ? { baslik: ad.value.trim(), gun: gun.value === "" ? null : Number(gun.value) } : false,
+      ...(kesGun ? { kesinlesme: kesGun } : {}) });
     dlg.close();
   });
   dlg.replaceChildren(h("h3", {}, action === "tamamla" ? "İşi tamamla" : "Onaya gönder"),
@@ -739,6 +762,7 @@ function kontrolDialog(t, action) {
     sonraki ? h("div", { class: "next-box" }, h("label", { class: "row small", style: "gap:6px" }, ac, "Sonraki işi aç"),
       h("div", { class: "row", style: "gap:6px" }, ad, gun), hedef,
       h("div", { class: "small muted" }, `Aynı dosya${t.taraf_adi ? `, taraf (${t.taraf_adi})` : ""} ve atananla açılır; süre bugünden gün sayısıdır (17:00).`)) : null,
+    kesBox,
     h("label", { class: "lbl", style: "margin-top:12px" }, "Not", note),
     h("div", { class: "actions", style: "margin-top:16px" },
       h("button", { type: "button", class: "btn", onclick: send }, icon(action === "tamamla" ? "check" : "send"), action === "tamamla" ? "Tamamla" : "Onaya gönder"),

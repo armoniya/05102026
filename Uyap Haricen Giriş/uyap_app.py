@@ -112,7 +112,9 @@ def free_port_if_busy(port, log=print):
         except Exception:
             pass
 
-    if os.name != "nt":
+    # Paketlenmiş exe'de süreç adı "python" içermez, aşağıdaki temizlik zaten hiçbir şeyi
+    # kapatmaz; netstat/tasklist çalıştırmak ise Defender'a "keşif" davranışı gibi görünür.
+    if os.name != "nt" or getattr(sys, "frozen", False):
         log(f"[SİSTEM] {port} portu meşgul; lütfen önceki örneği kapatıp tekrar deneyin.\n")
         return
 
@@ -162,7 +164,6 @@ DEFAULTS = {
     "username": "",
     "remember": True,
     "password_enc": "",
-    "pin_enc": "",
     "cert_id": "",
     "local_port": LOCAL_PORT,
     # Kur-unut: bu program müşteriye "ofis sunucusu" olarak dağıtılır; varsayılan
@@ -302,6 +303,11 @@ def load_config():
     env_url = os.environ.get("UYAP_SERVER_URL", "").strip()
     if env_url:
         cfg["server_url"] = env_url
+    # E-imza PIN'i ARTIK DİSKE YAZILMAZ: her bağlantıda kullanıcı yeniden girer (güven
+    # kararı). Eski sürümlerin sakladığı PIN ilk açılışta dosyadan silinir.
+    if "pin_enc" in cfg:
+        cfg.pop("pin_enc", None)
+        save_config(cfg)
     return cfg
 
 
@@ -337,39 +343,45 @@ def save_config(cfg):
         print(f"[GUI] Ayar kaydedilemedi: {e}")
 
 
-# ── Windows Başlangıç kısayolu (kur-unut) ────────────────────────────────────
+# ── Windows Başlangıç kaydı (kur-unut) ───────────────────────────────────────
 # Otomatik paylaşım açıkken paketlenmiş exe kendini Başlangıç'a yazar: bilgisayar
 # her açıldığında uygulama kendiliğinden çalışır → otomatik giriş → otomatik paylaşım.
-STARTUP_SHORTCUT = os.path.join(
+# Kayıt HKCU\...\Run değeriyle yapılır (Görev Yöneticisi → Başlangıç'ta görünür,
+# kullanıcı oradan kapatabilir). Eskiden gizli PowerShell ile Startup klasörüne .lnk
+# yazılıyordu; imzasız exe'nin gizli PowerShell açması Defender'ın truva atı
+# sezgisini tetiklediği için bırakıldı. Eski .lnk varsa temizlenir.
+STARTUP_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_RUN_NAME = "CokluUyap"
+STARTUP_SHORTCUT_ESKI = os.path.join(
     os.environ.get("APPDATA", ""),
     "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "CokluUyapOfis.lnk")
 
 
 def sync_startup_shortcut(enable, log=print):
-    """Başlangıç kısayolunu kurar/söker. Yalnız paketlenmiş (PyInstaller) exe'de
+    """Başlangıç kaydını kurar/söker. Yalnız paketlenmiş (PyInstaller) exe'de
     çalışır; geliştirme modunda dokunmaz (python.exe'yi Başlangıç'a yazmak yanıltır)."""
     if not IS_WINDOWS or not getattr(sys, "frozen", False):
         return
     try:
-        if not enable:
-            if os.path.exists(STARTUP_SHORTCUT):
-                os.remove(STARTUP_SHORTCUT)
-                log("[SİSTEM] Başlangıç kısayolu kaldırıldı.\n")
-            return
-        target = sys.executable
-        ps = ("$w = New-Object -ComObject WScript.Shell; "
-              "$s = $w.CreateShortcut('%s'); "
-              "$s.TargetPath = '%s'; $s.WorkingDirectory = '%s'; $s.Save()") % (
-            STARTUP_SHORTCUT.replace("'", "''"),
-            target.replace("'", "''"),
-            os.path.dirname(target).replace("'", "''"))
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                       timeout=30, check=True)
-        log("[SİSTEM] Başlangıç kısayolu kuruldu: bilgisayar açılınca paylaşım "
+        if os.path.exists(STARTUP_SHORTCUT_ESKI):
+            os.remove(STARTUP_SHORTCUT_ESKI)
+    except OSError:
+        pass
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, STARTUP_RUN_KEY) as k:
+            if not enable:
+                try:
+                    winreg.DeleteValue(k, STARTUP_RUN_NAME)
+                    log("[SİSTEM] Başlangıç kaydı kaldırıldı.\n")
+                except FileNotFoundError:
+                    pass
+                return
+            winreg.SetValueEx(k, STARTUP_RUN_NAME, 0, winreg.REG_SZ, f'"{sys.executable}"')
+        log("[SİSTEM] Başlangıç kaydı yapıldı: bilgisayar açılınca paylaşım "
             "kendiliğinden başlar.\n")
     except Exception as e:
-        log(f"[SİSTEM] Başlangıç kısayolu ayarlanamadı: {e}\n")
+        log(f"[SİSTEM] Başlangıç kaydı ayarlanamadı: {e}\n")
 
 
 # ── Yerel Django arayüzü (uyap_gecit/web) — uzaktan "Geçidi Aç" için ─────────────────
@@ -766,8 +778,7 @@ class UyapApp:
         # yalnız 'ofis sunucusu' işaretliyken görünür. Ayrı bir Frame'e sarılır ki
         # pack/pack_forget kartın geri kalanının sırasını bozmasın.
         self.login_pin_row = tk.Frame(card, bg=C.CARD)
-        saved_pin = decrypt_secret(self.cfg.get("pin_enc", "")) if self.cfg.get("pin_enc") else ""
-        self.login_pin_var = tk.StringVar(value=saved_pin)
+        self.login_pin_var = tk.StringVar(value="")
         self.login_pin_entry = self._entry(self.login_pin_row, "E-imza PIN kodu",
                                            self.login_pin_var, show="•")
         self._toggle_login_pin_row()
@@ -791,12 +802,11 @@ class UyapApp:
                                          font=self.fonts["small"], wraplength=320, justify='center')
         self.login_status_lbl.pack(pady=(10, 0))
 
-        # Kur-unut otomatik girişi: kayıtlı kimlik + PIN tamsa ve 'ofis sunucusu'
-        # işaretliyse 3 sn sonra kendiliğinden giriş yapılır (giriş, paylaşımı başlatır).
-        # Böylece bilgisayar açılışında (Başlangıç kısayolu) hiç tıklama gerekmez.
+        # Kur-unut otomatik girişi: kayıtlı kimlik tamsa ve 'ofis sunucusu' işaretliyse
+        # 3 sn sonra kendiliğinden giriş yapılır. PIN saklanmadığından paylaşım
+        # kendiliğinden BAŞLAMAZ; kontrol ekranında PIN istenir.
         if (first_show and self.cfg.get("auto_share", True) and self.cfg.get("remember")
-                and "@" in self.login_var.get()
-                and self.pass_var.get() and self.login_pin_var.get().strip()):
+                and "@" in self.login_var.get() and self.pass_var.get()):
             self.login_status_lbl.configure(
                 text="Otomatik giriş 3 saniye içinde başlıyor… (durdurmak için bir alana tıklayın)",
                 fg=C.SAGE_DK)
@@ -1062,11 +1072,6 @@ class UyapApp:
         else:
             self.cfg["password_enc"] = ""
         self.cfg["auto_share"] = bool(self.auto_share_var.get())
-        # Giriş kartında PIN yazıldıysa (ofis sunucusu kipi) DPAPI ile saklanır ki
-        # sonraki açılışlarda otomatik giriş + otomatik paylaşım tek başına yürüsün.
-        pin = self.login_pin_var.get().strip()
-        if pin and self.remember_var.get():
-            self.cfg["pin_enc"] = encrypt_secret(pin)
         save_config(self.cfg)
 
     def _maybe_auto_share(self):
@@ -1075,8 +1080,12 @@ class UyapApp:
         if not self.cfg.get("auto_share") or self.is_sharing:
             return
         if not self.pin_var.get().strip():
-            self.log_queue.put("[SİSTEM] Otomatik paylaşım atlandı: E-imza PIN'i boş. PIN'i girip "
-                               "'Bağlantıyı Paylaş'a basın; sonraki girişlerde kendiliğinden başlar.\n")
+            self.log_queue.put("[SİSTEM] Paylaşım için E-imza PIN'inizi girip 'Bağlantıyı "
+                               "Paylaş'a basın (PIN güvenlik gereği saklanmaz).\n")
+            try:
+                self.pin_entry.focus_set()
+            except Exception:
+                pass
             return
         self.log_queue.put("[SİSTEM] Ofis sunucusu kipi: paylaşım kendiliğinden başlatılıyor…\n")
         sync_startup_shortcut(True, self.log_queue.put)
@@ -1213,10 +1222,7 @@ class UyapApp:
             self.sira_sekmesi.yenile()
 
     def setup_share_section(self, body, actions):
-        saved_pin = ""
-        if self.cfg.get("pin_enc"):
-            saved_pin = decrypt_secret(self.cfg.get("pin_enc"))
-        self.pin_var = tk.StringVar(value=saved_pin)
+        self.pin_var = tk.StringVar(value="")
         self.pin_entry = self._entry(body, "E-imza PIN kodu", self.pin_var, show="•")
 
         self.cert_var = tk.StringVar(value=self.cfg.get("cert_id", ""))
@@ -1749,6 +1755,9 @@ class UyapApp:
         self.share_btn.set_text("Bağlantıyı Paylaş"); self.share_btn.set_kind("primary")
         self.share_open_browser_btn.set_state('disabled')
         self.share_status_lbl.configure(text="● Paylaşım Durduruldu", foreground=C.OFF)
+        # Her bağlantı yeni PIN ister: alanlar bellekten de temizlenir.
+        self.pin_var.set("")
+        self.login_pin_var.set("")
         self.enable_share_inputs()
 
         if unexpected:
@@ -1845,7 +1854,6 @@ class UyapApp:
 
     def save_dashboard_config(self):
         self.cfg["cert_id"] = self.cert_var.get().strip()
-        self.cfg["pin_enc"] = encrypt_secret(self.pin_var.get().strip())
         self.cfg["local_port"] = LOCAL_PORT
         self.cfg["lan_share"] = bool(self.lan_share_var.get())
         save_config(self.cfg)

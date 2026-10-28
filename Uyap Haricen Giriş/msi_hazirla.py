@@ -16,8 +16,16 @@ Sıra:
   • Çalışan CokluUyap.exe kurulumdan önce nazikçe kapatılır (util:CloseApplication).
   • WiX 3.11 ikilileri araclar/wix311 altında; yoksa GitHub'dan bir kez indirilir.
 
-Kod imzalama sertifikası alınırsa signtool adımı bu dosyanın sonuna eklenecek.
+Kod imzalama (Defender/SmartScreen güveni için ŞART): aşağıdaki ortam değişkenlerinden
+biri verilirse önce CokluUyap.exe, sonra MSI signtool ile imzalanır + zaman damgası basılır.
+Hiçbiri yoksa uyarı verilir ve imzasız devam edilir.
+  • UYAP_IMZA_PFX=<dosya.pfx> [+ UYAP_IMZA_PAROLA]   — dosyadaki OV sertifika
+  • UYAP_IMZA_SHA1=<parmak izi>                       — sertifika deposu / EV USB anahtarı
+  • UYAP_IMZA_DLIB=<Azure.CodeSigning.Dlib.dll> + UYAP_IMZA_DMDF=<metadata.json>
+                                                      — Azure Trusted Signing
+  • UYAP_SIGNTOOL=<signtool.exe yolu> (yoksa Windows Kits altında aranır)
 """
+import glob
 import datetime
 import os
 import subprocess
@@ -66,6 +74,51 @@ def calistir(*komut):
         sys.stderr.write((r.stdout or "") + (r.stderr or ""))
         raise SystemExit(f"Komut başarısız ({os.path.basename(komut[0])}, kod {r.returncode})")
     return r.stdout
+
+
+ZAMAN_DAMGASI = "http://timestamp.digicert.com"
+
+
+def signtool_bul():
+    yol = os.environ.get("UYAP_SIGNTOOL", "").strip()
+    if yol:
+        return yol
+    adaylar = sorted(glob.glob(os.path.join(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        "Windows Kits", "10", "bin", "*", "x64", "signtool.exe")))
+    return adaylar[-1] if adaylar else ""
+
+
+def imza_argumanlari():
+    """Ortamdan imza kimliği argümanları; yapılandırılmamışsa None."""
+    pfx = os.environ.get("UYAP_IMZA_PFX", "").strip()
+    sha1 = os.environ.get("UYAP_IMZA_SHA1", "").strip()
+    dlib = os.environ.get("UYAP_IMZA_DLIB", "").strip()
+    if pfx:
+        args = ["/f", pfx]
+        parola = os.environ.get("UYAP_IMZA_PAROLA", "")
+        return args + (["/p", parola] if parola else [])
+    if sha1:
+        return ["/sha1", sha1]
+    if dlib:
+        return ["/dlib", dlib, "/dmdf", os.environ.get("UYAP_IMZA_DMDF", "").strip()]
+    return None
+
+
+def imzala(dosya):
+    """signtool ile SHA-256 imza + RFC 3161 zaman damgası. İmza ayarı yoksa False."""
+    kimlik = imza_argumanlari()
+    if kimlik is None:
+        return False
+    st = signtool_bul()
+    if not st or not os.path.exists(st):
+        raise SystemExit("İmza ayarı var ama signtool.exe bulunamadı (UYAP_SIGNTOOL verin "
+                         "ya da Windows SDK kurun).")
+    calistir(st, "sign", "/fd", "sha256", "/tr", ZAMAN_DAMGASI, "/td", "sha256",
+             "/d", APP_ADI, *kimlik, dosya)
+    calistir(st, "verify", "/pa", dosya)
+    print(f"  imzalandı: {os.path.basename(dosya)}")
+    return True
 
 
 URUN_WXS = """<?xml version="1.0" encoding="utf-8"?>
@@ -140,6 +193,12 @@ def main():
     os.makedirs(BUILD, exist_ok=True)
     v = surum()
 
+    # 0) Uygulama exe'sini MSI'ya girmeden imzala (heat/light dosyayı bu hâliyle alır).
+    imzali = imzala(os.path.join(SRC, EXE_ADI))
+    if not imzali:
+        print("UYARI: kod imzalama ayarı yok — exe ve MSI İMZASIZ üretiliyor; Defender/"
+              "SmartScreen yanlış pozitif verebilir (bkz. dosya başındaki UYAP_IMZA_*).")
+
     # 1) Dosya ağacını hasat et (heat): INSTALLDIR köküne, otomatik-kararlı GUID'lerle.
     dosyalar_wxs = os.path.join(BUILD, "msi_dosyalar.wxs")
     print(f"[1/3] Dosyalar taranıyor ({SRC}) …")
@@ -167,6 +226,9 @@ def main():
              "-out", MSI,
              os.path.join(BUILD, "msi_urun.wixobj"),
              os.path.join(BUILD, "msi_dosyalar.wixobj"))
+
+    if imzali:
+        imzala(MSI)
 
     print(f"MSI hazır: {MSI} ({os.path.getsize(MSI)/1e6:.1f} MB, sürüm {v})")
     print("Dağıtım: MSI'yı downloads/CokluUyapKur.msi olarak kopyalayıp "

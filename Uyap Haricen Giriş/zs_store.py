@@ -16,6 +16,7 @@ import re
 import json
 import time
 import sqlite3
+import datetime
 import threading
 
 import accounts
@@ -50,6 +51,17 @@ def _gun_sonra(gun, saat=17):
     tr = 3 * 3600
     gece = (_now() + tr) // 86400 * 86400 - tr
     return gece + int(gun) * 86400 + saat * 3600
+
+
+def _tarih_17(s, saat=17):
+    """"YYYY-AA-GG" → o gün saat:00 (Türkiye saati, UTC+3); geçersizse ZsError."""
+    try:
+        gun = datetime.date.fromisoformat(str(s or "").strip()[:10])
+    except ValueError:
+        raise ZsError("Kesinleşme günü geçersiz.")
+    if not 2000 <= gun.year <= 2100:
+        raise ZsError("Kesinleşme günü geçersiz.")
+    return (gun - datetime.date(1970, 1, 1)).days * 86400 + (saat - 3) * 3600
 
 
 def _tg_uname(v):
@@ -328,10 +340,15 @@ ETIKET_RENKLERI = ("#2563eb", "#7c3aed", "#dc2626", "#059669", "#d97706", "#e11d
 _KES = "icra-kesinlesme/"
 
 
-def _kontrol(id, title, asama, kontrol, sonuclar, description, action=None, due_days=2, eski=()):
+# kesinlesme: bu sonuç dalında kullanıcıya kesinleşme günü sorulur; girilirse o güne "Kesinleşme tarihi
+# kontrol" işi de açılır (gün elle: ilamlı/ilamsız, e-tebligat ayrımı dosyadan güvenilir çıkmaz).
+KESINLESME_SABLONU = "h-kes-tarih"
+
+
+def _kontrol(id, title, asama, kontrol, sonuclar, description, action=None, due_days=2, eski=(), kesinlesme=None):
     return {"id": id, "title": title, "due_days": due_days, "priority": 1, "taraf": "borclu",
             "description": description, "action": action, "kontrol": kontrol, "asama": _KES + asama,
-            "etiketler": [], "sonuclar": sonuclar, "eski": tuple(eski)}
+            "etiketler": [], "sonuclar": sonuclar, "eski": tuple(eski), "kesinlesme": kesinlesme}
 
 
 HAZIR_SABLONLAR = (
@@ -353,9 +370,11 @@ HAZIR_SABLONLAR = (
              "PTT barkodunda tebligatın dağıtıma çıktığını kontrol et.", "ptt:barkod", 2),
     _kontrol("h-teblig-durum", "Tebliğ kontrol", "teblig",
              "Barkodda tebliğ sonucu (tebliğ ya da iade) belli oldu mu?",
-             _sonuc(("Mazbata dönüşü kontrol", 3, "Sonuç belli"), None, (None, 2, "Henüz sonuç yok")),
-             "Tebligatın PTT barkodundan tebliğ durumunu sorgula.", "ptt:barkod", 3,
-             eski=("Tebliğ durumu kontrol", "Tebligat kontrol", "Barkod takip")),
+             _sonuc(("Mazbata dönüşü kontrol", 3, "Tebliğ edildi"), ("Mazbata dönüşü kontrol", 3, "İade"),
+                    (None, 2, "Henüz sonuç yok")),
+             "Tebligatın PTT barkodundan tebliğ durumunu sorgula. Tebliğ edildiyse kesinleşme gününü gir.",
+             "ptt:barkod", 3, eski=("Tebliğ durumu kontrol", "Tebligat kontrol", "Barkod takip"),
+             kesinlesme="olumlu"),
     _kontrol("h-mazbata", "Mazbata dönüşü kontrol", "mazbata",
              "Mazbata icra dosyasına döndü mü; tebliğ mi, iade mi?",
              _sonuc(("İtiraz kontrol", 7, "Tebliğ edildi"), ("Mernis adresine tebliğ", 1, "İade"),
@@ -382,10 +401,12 @@ HAZIR_SABLONLAR = (
              "Süresinde itiraz edilmedi mi?",
              _sonuc(("Kesinleşme tarihi kontrol", 0, "İtiraz yok"), ("Müvekkile bildirim", 1, "İtiraz var"), 2),
              "İtiraz süresi dolunca borçlunun itiraz edip etmediğini evrak / safahattan kontrol et.", "ekran:evrak", 7),
-    _kontrol("h-kes-tarih", "Kesinleşme tarihi kontrol", "kes-tarih",
-             "Kesinleşme tarihi geldi mi (tebliğ + itiraz süresi doldu mu)?",
-             _sonuc(("Kesinleştirme talebi gönder", 0, "Tarih geldi"), None, (None, 2, "Henüz gelmedi")),
-             "Tebliğ tarihine göre kesinleşme tarihini hesapla; tarih gelmediyse bekle.", None, 1),
+    _kontrol(KESINLESME_SABLONU, "Kesinleşme tarihi kontrol", "kes-tarih",
+             "Kesinleşme günü geldi ve süresinde itiraz edilmedi mi?",
+             _sonuc(("Kesinleştirme talebi gönder", 0, "İtiraz yok"), ("Müvekkile bildirim", 1, "İtiraz var"),
+                    (None, 2, "Henüz gelmedi")),
+             "Kesinleşme gününe kadar itiraz edilip edilmediğini evrak / safahattan kontrol et; itiraz yoksa "
+             "kesinleştirme talebini gönder.", "ekran:evrak", 1),
     _kontrol("h-kes-gonder", "Kesinleştirme talebi gönder", "kes-gonder",
              "Kesinleştirme talebi gönderildi mi?",
              _sonuc(("Kesinleştirme talebi kabul kontrol", 2, "Gönderildi"), None, 1),
@@ -1376,17 +1397,21 @@ class ZsStore:
         return self._run(fn)
 
     # ── onay akışı ───────────────────────────────────────────────────────────────────
-    def transition(self, actor, task_id, action, reason="", sonuc=None, sonraki=None):
+    def transition(self, actor, task_id, action, reason="", sonuc=None, sonraki=None, kesinlesme=None):
         """action: basla | gonder | tamamla | onayla | reddet | yeniden_ac. Yetki kontrolü burada.
         sonuc (gonder / tamamla): kontrol sonucu (olumlu | olumsuz | bekliyor) işe yazılır ve şablonun o
         sonuç dalındaki sonraki iş (süreçte sıradaki aşama) aynı dosya / taraf / atananla açılır.
         sonraki: {baslik, gun} öneriyi değiştirir; False sonraki işi açmaz. sonuc verilmezse sonraki iş
-        açılmaz (eski istemciler sonraki işi kendileri açar). Dönüş: (iş, sonraki iş | None)."""
+        açılmaz (eski istemciler sonraki işi kendileri açar).
+        kesinlesme: "YYYY-AA-GG" — şablonun kesinleşme dalı seçildiyse (Tebliğ kontrol → Tebliğ edildi) o
+        güne "Kesinleşme tarihi kontrol" işi de açılır. Aynı dosya / taraf için aynı şablonda açık iş varsa
+        yenisi açılmaz ({var: True, id, title}). Dönüş: (iş, sonraki iş | None, kesinleşme işi | None)."""
         is_admin = actor["role"] == "admin"
         if sonuc is not None and sonuc not in TEMPLATE_SONUCLAR:
             raise ZsError("Geçersiz kontrol sonucu.")
         if sonuc is not None and action not in ("gonder", "tamamla"):
             raise ZsError("Kontrol sonucu yalnız onaya gönderirken ya da tamamlarken seçilir.")
+        kes_at = _tarih_17(kesinlesme) if kesinlesme else None
 
         def fn(cur):
             t = self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,)))
@@ -1443,26 +1468,72 @@ class ZsStore:
                          "completed": "Tamamlama notu", "reopened": "Yeniden açma gerekçesi"}.get(kind, "Not")
                 self._q(cur, "INSERT INTO zs_notes (task_id, author_id, body, note_at, created_at) "
                              "VALUES (?, ?, ?, NULL, ?)", (task_id, actor["id"], f"{label}: {reason_txt}", now))
-            nxt = None
-            if sonuc and not t["is_private"] and sonraki is not False:
-                nxt = self._sonraki_oneri(cur, t, sonuc, sonraki)
-            return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,))), nxt
-        task, nxt = self._run(fn)
-        if not nxt:
-            return task, None
-        try:    # iş durumu değişti; sonraki iş açılamazsa (ör. atanan kapatıldı) yalnız bildirilir
-            return task, self.create_task(actor, nxt["title"], description=nxt["description"],
-                                          assignee_id=task["assignee_id"], due_at=nxt["due_at"],
-                                          priority=nxt["priority"], dosya=nxt["dosya"])
-        except ZsError as e:
-            return task, {"hata": str(e), "title": nxt["title"]}
+            nxt = kes = None
+            if sonuc and not t["is_private"]:
+                tpl = self._sablon_bul(cur, t["office_id"] or "", t["sablon"], t["title"])[1] or {}
+                if sonraki is not False:
+                    nxt = self._sonraki_oneri(cur, t, tpl, sonuc, sonraki)
+                if kes_at is not None and tpl.get("kesinlesme") == sonuc:
+                    kes = self._kesinlesme_oneri(cur, t, kes_at)
+            return self._one(self._q(cur, "SELECT * FROM zs_tasks WHERE id = ?", (task_id,))), nxt, kes
+        task, nxt, kes = self._run(fn)
+        return task, self._oneri_ac(actor, task, nxt), self._oneri_ac(actor, task, kes)
 
-    def _sonraki_oneri(self, cur, t, sonuc, sonraki):
-        """Biten kontrolün sonraki işi: {title, description, due_at, priority, dosya} ya da None.
-        Başlık şablonun sonuç dalından (boşsa aynı şablon) ya da istemcinin sonraki.baslik'ından;
-        süre dalın gününden, yoksa sonraki şablonun süresinden (bugünden gün sayısı, 17:00)."""
+    def _oneri_ac(self, actor, task, n):
+        """Önerilen işi biten işin atananıyla açar; zaten açıksa ya da öneri yoksa olduğu gibi döner."""
+        if not n or n.get("var"):
+            return n
+        try:    # iş durumu değişti; sonraki iş açılamazsa (ör. atanan kapatıldı) yalnız bildirilir
+            return self.create_task(actor, n["title"], description=n["description"],
+                                    assignee_id=task["assignee_id"], due_at=n["due_at"],
+                                    priority=n["priority"], dosya=n["dosya"], sablon=n.get("sablon"))
+        except ZsError as e:
+            return {"hata": str(e), "title": n["title"]}
+
+    def _acik_ayni_is(self, cur, t, sablon):
+        """Aynı dosya + taraf için bu şablonda henüz yapılmamış (açık / devam) başka ana iş ya da None.
+        Onaydaki iş yapılmış sayılır (bekliyor / reddedildi döngüsü yeni işi açabilsin); dosyasız işte aranmaz."""
+        if not sablon or not t["dosya_id"]:
+            return None
+        if t["birim_id"] and t["dosya_no"]:
+            dosya_q, dosya_p = "birim_id = ? AND dosya_no = ?", (t["birim_id"], t["dosya_no"])
+        else:
+            dosya_q, dosya_p = "dosya_id = ?", (t["dosya_id"],)
+        return self._one(self._q(cur, "SELECT id, title FROM zs_tasks WHERE parent_id IS NULL AND id <> ? "
+                                      "AND COALESCE(office_id, '') = ? AND sablon = ? AND COALESCE(taraf_adi, '') = ? "
+                                      f"AND status IN ('acik', 'devam') AND {dosya_q} ORDER BY id LIMIT 1",
+                                 (t["id"], t["office_id"] or "", sablon, t["taraf_adi"] or "", *dosya_p)))
+
+    @staticmethod
+    def _dosya_kopya(t, yeni_tur=False):
+        """Biten işin dosya bağı (sonraki işe); yeni tebligat turunda eski barkod / belge taşınmaz."""
+        if not t["dosya_id"]:
+            return None
+        dosya = {k: t[k] for k in DOSYA_FIELDS if k != "dosya_uyap"}
+        try:
+            dosya["uyap"] = json.loads(t["dosya_uyap"]) if t["dosya_uyap"] else None
+        except ValueError:
+            dosya["uyap"] = None
+        if yeni_tur:
+            dosya.update(barkod=None, evrak_id=None, evrak_adi=None)
+        return dosya
+
+    def _kesinlesme_oneri(self, cur, t, due_at):
+        """Tebliğ edilen tebligatın kesinleşme günü işi (Kesinleşme tarihi kontrol, o gün 17:00)."""
+        ntpl = _HAZIR_SABLON[KESINLESME_SABLONU]
+        var = self._acik_ayni_is(cur, t, KESINLESME_SABLONU)
+        if var:
+            return {"var": True, "id": var["id"], "title": var["title"]}
+        return {"title": f"{t['taraf_adi']} – {ntpl['title']}" if t["taraf_adi"] else ntpl["title"],
+                "description": ntpl["description"], "due_at": due_at, "priority": ntpl["priority"],
+                "dosya": self._dosya_kopya(t), "sablon": KESINLESME_SABLONU}
+
+    def _sonraki_oneri(self, cur, t, tpl, sonuc, sonraki):
+        """Biten kontrolün sonraki işi: {title, description, due_at, priority, dosya, sablon} ya da None
+        (aynı şablonda açık iş varsa {var: True, id, title}). Başlık şablonun sonuç dalından (boşsa aynı
+        şablon) ya da istemcinin sonraki.baslik'ından; süre dalın gününden, yoksa sonraki şablonun
+        süresinden (bugünden gün sayısı, 17:00)."""
         office = t["office_id"] or ""
-        _, tpl = self._sablon_bul(cur, office, t["sablon"], t["title"])
         if isinstance(sonraki, dict):
             baslik = " ".join(str(sonraki.get("baslik") or "").split())[:200]
             gun = sonraki.get("gun")
@@ -1480,23 +1551,19 @@ class ZsStore:
             return None
         if gun is not None and not 0 <= gun <= 365:
             raise ZsError("Sonraki iş süresi 0–365 gün olmalı.")
-        _, ntpl = self._sablon_bul(cur, office, None, baslik)
+        nkey, ntpl = self._sablon_bul(cur, office, None, baslik)
+        var = self._acik_ayni_is(cur, t, nkey)
+        if var:     # ör. Kesinleşme tarihi kontrol tebliğde zaten açıldı: itiraz kontrolünden yenisi açılmaz
+            return {"var": True, "id": var["id"], "title": var["title"]}
         if gun is None:
             gun = (ntpl or {}).get("due_days")
-        dosya = None
-        if t["dosya_id"]:
-            dosya = {k: t[k] for k in DOSYA_FIELDS if k != "dosya_uyap"}
-            try:
-                dosya["uyap"] = json.loads(t["dosya_uyap"]) if t["dosya_uyap"] else None
-            except ValueError:
-                dosya["uyap"] = None
-            if (ntpl or {}).get("asama") == _KES + "teb-olustu":   # yeni tebligat turu: eski barkod / belge kalmaz
-                dosya.update(barkod=None, evrak_id=None, evrak_adi=None)
         return {"title": f"{t['taraf_adi']} – {baslik}" if t["taraf_adi"] else baslik,
                 "description": (ntpl or {}).get("description") or "",
                 "due_at": None if gun is None else _gun_sonra(gun),
                 "priority": t["priority"] if (ntpl or {}).get("priority") is None else ntpl["priority"],
-                "dosya": dosya}
+                # yeni tebligat turu: eski barkod / belge kalmaz
+                "dosya": self._dosya_kopya(t, (ntpl or {}).get("asama") == _KES + "teb-olustu"),
+                "sablon": nkey or None}
 
     # ── rapor ham verisi (hesap zs_rapor.py'de) ──────────────────────────────────────
     def report_source(self, viewer_id, office=""):

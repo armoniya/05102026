@@ -56,6 +56,9 @@ SIGN_UDF_PATH = AGENT_PREFIX + "/sign_udf"
 # "Tüm Evrakı İndir" (evrak_toplu.py): açık dosyanın tüm evrakı PDF + ZIP. Salt okuma,
 # kendi hız/eşzamanlılık/captcha kurallarıyla; toplu iş kapalıyken (light) de çalışır.
 TUM_EVRAK_PREFIX = AGENT_PREFIX + "/tum_evrak"
+# Gerekçeli Kararlar (gerekceli_karar.py, GEÇİCİ): hukuk dosyalarında gerekçeli kararı bulup
+# UDF + PDF indirir. Tüm Evrakı İndir'in istek kapısını ve sıra kilidini paylaşır.
+GEREKCELI_PREFIX = AGENT_PREFIX + "/gerekceli"
 # PTT gönderi takip (ptt_sorgu.py): seçili barkodun tek sorgusu. Salt okuma, UYAP'a gitmez.
 PTT_SORGU_PATH = AGENT_PREFIX + "/ptt_sorgu"
 # Light (yalnız UYAP paylaşımı, uyap_app.py) toplu işi kapatır: UYAP_TOPLU_IS=0 → iş kuyruğu
@@ -355,7 +358,8 @@ def is_control_path(path):
     p = (path or "").lstrip("/")
     return (p == JOBS_PREFIX or p.startswith(JOBS_PREFIX + "/")
             or p == SIGN_UDF_PATH or p == PTT_SORGU_PATH
-            or p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"))
+            or p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/")
+            or p == GEREKCELI_PREFIX or p.startswith(GEREKCELI_PREFIX + "/"))
 
 
 async def _handle_tum_evrak(method, p, body):
@@ -406,6 +410,79 @@ async def _handle_tum_evrak(method, p, body):
             if not ind.to_dict()["dosya_hazir"]:
                 return _resp(409, {"error": "Dosya henüz hazır değil."})
             veri, ad, tur = await asyncio.to_thread(evrak_toplu.dosya_oku, ind)
+            return 200, {
+                "Content-Type": tur,
+                "Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(ad),
+                "Cache-Control": "no-store",
+            }, veri
+        return _resp(405, {"error": "Yöntem/eylem desteklenmiyor."})
+    except Exception as e:
+        return _resp(500, {"error": f"{type(e).__name__}: {e}"})
+
+
+async def _handle_gerekceli(method, p, body):
+    """POST   /__uyap_agent__/gerekceli               → 201 {tarama}  (hukuk dosyalarını listeler)
+       GET    /__uyap_agent__/gerekceli               → {tarama|null} (süren/son tarama)
+       GET    /__uyap_agent__/gerekceli/<id>          → {tarama}
+       GET    /__uyap_agent__/gerekceli/<id>/liste    → {turler, dosyalar}
+       POST   /__uyap_agent__/gerekceli/<id>/baslat   {"dosyalar": [dosyaId…]} → {tarama}  (yalnız kontrol)
+       GET    /__uyap_agent__/gerekceli/<id>/sonuclar → {dosyalar (kararı olanlar), karar_yok, …}
+       POST   /__uyap_agent__/gerekceli/<id>/indir    {"dosyalar": [dosyaId…]|[]} → {tarama}
+       POST   /__uyap_agent__/gerekceli/<id>/captcha  {"token"|null} → {tarama}
+       POST   /__uyap_agent__/gerekceli/<id>/iptal    → {tarama}
+       GET    /__uyap_agent__/gerekceli/<id>/dosya    → application/zip (kararlar + Excel)
+       GET    /__uyap_agent__/gerekceli/<id>/excel    → .xlsx (taranan dosyaların listesi)"""
+    from . import gerekceli_karar as gk
+    parts = p[len(GEREKCELI_PREFIX):].strip("/").split("/") if p != GEREKCELI_PREFIX else []
+    try:
+        payload = {}
+        if method == "POST" and body:
+            try:
+                payload = json.loads(body)
+            except Exception:
+                return _resp(400, {"error": "Geçersiz JSON gövdesi."})
+            if not isinstance(payload, dict):
+                payload = {}
+        if not parts:
+            if method == "GET":
+                t = gk.aktif()
+                return _resp(200, {"tarama": t.to_dict() if t else None})
+            if method == "POST":
+                try:
+                    t = gk.liste_baslat(payload.get("durumlar"))
+                except ValueError as e:
+                    return _resp(400, {"error": str(e)})
+                return _resp(201, {"tarama": t.to_dict()})
+            return _resp(405, {"error": "Yöntem desteklenmiyor."})
+
+        t = gk.getir(parts[0])
+        if t is None:
+            return _resp(404, {"error": "Tarama bulunamadı (süresi dolmuş olabilir)."})
+        eylem = parts[1] if len(parts) > 1 else None
+        if eylem is None and method == "GET":
+            return _resp(200, {"tarama": t.to_dict()})
+        if eylem == "liste" and method == "GET":
+            return _resp(200, t.liste_dict())
+        if eylem == "sonuclar" and method == "GET":
+            return _resp(200, t.sonuclar_dict())
+        if eylem in ("baslat", "indir") and method == "POST":
+            try:
+                (gk.tarama_baslat if eylem == "baslat" else gk.indir_baslat)(t, payload.get("dosyalar"))
+            except ValueError as e:
+                return _resp(400, {"error": str(e)})
+            return _resp(200, {"tarama": t.to_dict()})
+        if eylem == "iptal" and method == "POST":
+            gk.iptal(t)
+            return _resp(200, {"tarama": t.to_dict()})
+        if eylem == "captcha" and method == "POST":
+            jeton = payload.get("token")
+            t.captcha_cevapla(jeton if isinstance(jeton, str) and len(jeton) < 8192 else None)
+            return _resp(200, {"tarama": t.to_dict()})
+        if eylem in ("dosya", "excel") and method == "GET":
+            excel = eylem == "excel"
+            if not t.to_dict()["excel_hazir" if excel else "dosya_hazir"]:
+                return _resp(409, {"error": "Dosya henüz hazır değil."})
+            veri, ad, tur = await asyncio.to_thread(gk.dosya_oku, t, excel)
             return 200, {
                 "Content-Type": tur,
                 "Content-Disposition": "attachment; filename*=UTF-8''" + urllib.parse.quote(ad),
@@ -494,6 +571,8 @@ async def handle_control(method, path, query, body, kaynak=""):
         return await _handle_sign_udf(method, query, body, kaynak)
     if p == TUM_EVRAK_PREFIX or p.startswith(TUM_EVRAK_PREFIX + "/"):
         return await _handle_tum_evrak(method, p, body)
+    if p == GEREKCELI_PREFIX or p.startswith(GEREKCELI_PREFIX + "/"):
+        return await _handle_gerekceli(method, p, body)
     if p == PTT_SORGU_PATH:
         if method != "GET":
             return _resp(405, {"error": "Yöntem desteklenmiyor (GET bekleniyor)."})
