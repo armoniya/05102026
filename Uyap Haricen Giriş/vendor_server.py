@@ -92,7 +92,8 @@ MASA_DOWNLOAD_URL = ("https://github.com/armoniya/uyapmasa-indir/releases/latest
 # 2026-10-09: derlenmiş (Nuitka) UyapMasa 0.0.1 yayında; False yapılırsa ana düğme
 # yine gömülü light MSI'ı sunar.
 # 2026-10-14 kullanıcı kararı: ana düğme yeniden CokluUyap (26.10.14, KEP eki PDF) versin.
-MASA_YAYINDA = False
+# 2026-10-30 kullanıcı kararı: ana düğme Nuitka ile derlenen UyapMasa (0.0.3) versin.
+MASA_YAYINDA = True
 DOWNLOAD_URL = ((os.environ.get("UYAP_DOWNLOAD_URL", "") or "").strip()
                 or (MASA_DOWNLOAD_URL if MASA_YAYINDA else ""))
 _DL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
