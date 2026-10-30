@@ -809,17 +809,64 @@ function rejectBox(t, after) {
 // ── UYAP dosyası bağı ──────────────────────────────────────────────────────────────
 // İş, CokluUyap'ta UYAP dosya kartından açıldıysa birim + dosya no taşır.
 function dosyaText(t) { return t.dosya_id ? `${t.birim_adi || ""} ${t.dosya_no || ""}`.trim() : ""; }
-// "UYAP'ta aç": bu bilgisayardaki CokluUyap (127.0.0.1:8800) UYAP'ın kendi dosya kartını açar.
-// Kart verisi adresin # kısmında gider (sunucuya iletilmez); bkz. uyap_core/is_listesi.py.
+// "UYAP'ta aç": UYAP'ın kendi dosya kartını açar. Sırayla:
+//  1) Bu tarayıcıda dışarıdan (bu sitenin kabuğunda) açık UYAP varsa kart oraya gider (BroadcastChannel,
+//     uyap_proxy enjekte betiği "alındı" der).
+//  2) Bu bilgisayarda CokluUyap çalışıyorsa (127.0.0.1:8800 ping) yerel UYAP; kart adresin # kısmında
+//     gider (sunucuya iletilmez), bkz. uyap_core/is_listesi.py.
+//  3) İkisi de yoksa dışarıdan giriş: kart localStorage'a bırakılır, site yeni sekmede açılır; UYAP ana
+//     sayfası çizilince kartı alır.
 const UYAP_YEREL = "http://127.0.0.1:8800";
-function uyaptaAcUrl(t) {
+function uyapKarti(t) {
   let kart = null;
   try { kart = t.dosya_uyap ? JSON.parse(t.dosya_uyap) : null; } catch (_) { kart = null; }
   if (!kart || !kart.dosyaId) {
     kart = { dosyaId: t.dosya_id, dosyaNo: t.dosya_no || "", birimId: t.birim_id || "", birimAdi: t.birim_adi || "",
       dosyaTurKodAciklama: t.dosya_tur || "" };
   }
-  return `${UYAP_YEREL}/__uyap_kisi__/dosya-ac#${encodeURIComponent(JSON.stringify(kart))}`;
+  return kart;
+}
+function acikUyapaGonder(ileti) {
+  return new Promise((res) => {
+    let k;
+    try { k = new BroadcastChannel("cokluuyap-dosya-ac"); } catch (_) { res(false); return; }
+    const id = Math.random().toString(36).slice(2);
+    const bitir = (v) => { clearTimeout(zaman); k.close(); res(v); };
+    const zaman = setTimeout(() => bitir(false), 700);
+    k.onmessage = (ev) => { if (ev.data && ev.data.tur === "alindi" && ev.data.id === id) bitir(true); };
+    k.postMessage({ ...ileti, id });
+  });
+}
+async function yerelCokluUyap() {
+  try {
+    const r = await fetch(`${UYAP_YEREL}/__agent__/ping`, { mode: "cors", cache: "no-store",
+      signal: AbortSignal.timeout ? AbortSignal.timeout(1500) : undefined });
+    const j = r.ok ? await r.json() : null;
+    return !!(j && j.app === "cokluuyap-ofis");
+  } catch (_) { return false; }
+}
+async function uyaptaAc(t) {
+  const kart = uyapKarti(t);
+  if (await acikUyapaGonder({ tur: "ac", dosya: kart })) { toast("Dosya kartı açık UYAP sekmesinde açılıyor.", true); return; }
+  if (await yerelCokluUyap()) {
+    window.open(`${UYAP_YEREL}/__uyap_kisi__/dosya-ac#${encodeURIComponent(JSON.stringify(kart))}`, "_blank", "noopener");
+    return;
+  }
+  try { localStorage.setItem("cokluuyapDosyaAc", JSON.stringify({ t: Date.now(), dosya: kart })); } catch (_) {}
+  window.open("/", "_blank", "noopener");
+  toast("UYAP yeni sekmede açılıyor; bağlanıp UYAP'ı açınca dosya kartı kendiliğinden açılır.", true);
+}
+// "PTT sorgula": sorgu CokluUyap'ın Chrome'unda yapılır (ptt.gov.tr). Aynı sıra: açık UYAP sekmesi
+// (ofise tünelden) → yerel CokluUyap → siteyi yeni sekmede aç, UYAP çizilince sorgu başlar.
+async function pttSorgula(barkod) {
+  if (await acikUyapaGonder({ tur: "ptt", barkod })) { toast("PTT sorgusu açık UYAP sekmesinde başladı.", true); return; }
+  if (await yerelCokluUyap()) {
+    window.open(`${UYAP_YEREL}/__uyap_kisi__/ptt#${encodeURIComponent(barkod)}`, "_blank", "noopener");
+    return;
+  }
+  try { localStorage.setItem("cokluuyapPtt", JSON.stringify({ t: Date.now(), barkod })); } catch (_) {}
+  window.open("/", "_blank", "noopener");
+  toast("UYAP yeni sekmede açılıyor; bağlanınca PTT sorgusu kendiliğinden başlar.", true);
 }
 function dosyaTag(t) {
   if (!t.dosya_id) return null;
@@ -969,12 +1016,12 @@ function renderDetail() {
           t.taraf_adi ? h("div", { class: "small" }, `Taraf: ${t.taraf_adi}`) : null,
           t.evrak_id ? h("div", { class: "small" }, `Belge: ${t.evrak_adi || t.evrak_id}`) : null,
           t.barkod ? h("div", { class: "small" }, `PTT barkodu: ${t.barkod}`,
-            h("a", { class: "btn-ghost sm", href: `${UYAP_YEREL}/__uyap_kisi__/ptt#${encodeURIComponent(t.barkod)}`, target: "_blank",
-              rel: "noopener noreferrer", title: "Bu bilgisayardaki CokluUyap ile ptt.gov.tr'den tebliğ durumunu sorgular",
+            h("button", { type: "button", class: "btn-ghost sm", onclick: act(() => pttSorgula(t.barkod)),
+              title: "CokluUyap ile ptt.gov.tr'den tebliğ durumunu sorgular",
               style: "margin-left:8px;display:inline-flex" }, "PTT sorgula")) : null,
-          h("div", {}, h("a", { class: "btn-ghost sm", href: uyaptaAcUrl(t), target: "_blank", rel: "noopener noreferrer",
-            title: "Bu bilgisayardaki CokluUyap'ta (127.0.0.1:8800) UYAP'ın dosya kartını açar", style: "margin-top:6px;display:inline-flex" },
-            icon("clip"), "UYAP'ta aç")))] : null,
+          h("div", {}, h("button", { type: "button", class: "btn-ghost sm", onclick: act(() => uyaptaAc(t)),
+            title: "UYAP'ın dosya kartını açar: açık UYAP sekmesinde, yoksa bu bilgisayardaki CokluUyap'ta ya da dışarıdan yeni sekmede",
+            style: "margin-top:6px;display:inline-flex" }, icon("clip"), "UYAP'ta aç")))] : null,
         asamaOf(t) ? [h("dt", {}, "Süreç"), h("dd", {}, asamaTag(t), h("span", { class: "small muted" }, ` ${asamaOf(t).s.title}`))] : null,
         h("dt", {}, "Etiketler"), h("dd", {}, h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" }, tagChips(t),
           h("button", { type: "button", class: "btn-ghost sm", onclick: () => tagDialog(t) }, icon("edit"), (t.tags || []).length ? "Değiştir" : "Etiket ekle"))),

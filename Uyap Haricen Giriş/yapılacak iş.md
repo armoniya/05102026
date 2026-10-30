@@ -130,6 +130,17 @@ Kurallar:
 4. Aksiyonu sonradan değişebilecek UYAP ekranlarına bağlamak kırılgandır; her aksiyon, ekran
    bulunamazsa "Elle yapın: Evrak Gönderme → Talep → Adres Araştırması" yönergesine düşer.
 
+**İstisna — kesinleştirme talebi (onaylı gönderim):** Dosya kartı bandında açık bir "Kesinleştirme"
+işi (şablon `h-kes-gonder` ya da başlığı "Kesinleştirme…" olup "kontrol" / "kabul" içermeyen iş) ve
+kesinleştirmeye uygun borçlu varsa **Kesinleştirme talebi gönder** düğmesi çıkar. Uygun borçlu: dosyanın
+genel talep listesinde "Takibin Kesinleşmesi" (talep kodu 31, masrafsız) var ve UYAP'ın
+`dosya_icra_kesinlesme.ajx` ucu borçlu için kesinleşme bilgisi döndürmüyor (UYAP'ın "Talep Ekle"de
+yaptığı denetim). Düğme onay penceresi açar: borçlular listelenir, **tek borçlu** seçilir — işin borçlusu
+seçili gelir (başka borçlu seçilirse uyarı). Her borçlu için talep ayrı gönderilir; diğer borçlu için
+düğmeye yeniden basılır. **E-imzala ve Gönder** ile seçili borçlunun talep evrakı hazırlanır,
+e-imzalanır ve "Genel Talebi" olarak gönderilir (121 talebiyle aynı yol: `talepEvrakiGonder`). Gönderim
+sonrası "İşi onaya gönder" sonucu "Gönderildi" seçili açar.
+
 ---
 
 ## 5. Onay
