@@ -376,12 +376,12 @@ def run_keepalive(session, cert_id, args, verify_ssl):
                 session, cert_id = perform_login(args, verify_ssl, cert_id=cert_id)
                 print("[+] Session renewed.")
         except SystemExit:
-            # A login helper aborted (e.g. card not ready yet). Don't kill the daemon; retry.
-            print("[!] Re-login failed (card may not be ready). Retrying in 15s...")
-            time.sleep(15)
+            # Yeniden deneme yok: yanlış PIN kartı kilitleyebilir.
+            print("[!] Re-login failed. Stopping; run again to retry.")
+            return
         except Exception as e:
-            print(f"[!] Keep-alive cycle error: {e}. Retrying in 15s...")
-            time.sleep(15)
+            print(f"[!] Keep-alive cycle error: {e}. Stopping; run again to retry.")
+            return
 
 
 def main():

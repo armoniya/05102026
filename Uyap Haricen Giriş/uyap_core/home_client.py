@@ -748,6 +748,8 @@ async def amain(args):
     reset_lan_state()
     room_user = args.room
     room_password = args.password or ""
+    # İş Listesi köprüsü: BU bilgisayarda giriş yapan kişinin hesabıyla (ofisin kimliği kullanılmaz).
+    is_listesi.baglantidan_configure(args.signaling, getattr(args, "office_code", ""), args.room, args.password)
 
     tunnel = Tunnel()
     # ICE'ı satıcı sunucusundan çek (efemeral TURN dahil); ulaşılamazsa yerel ayara düşer.

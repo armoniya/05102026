@@ -1617,6 +1617,7 @@ class UyapApp:
             self.own_pass_var.set("")
             # Yeni parola bu oturumda da kullanılsın (sonraki API çağrıları için).
             self.password = new_pw
+            is_listesi.configure(self._api_base(), self.office_code, self.username, self.password)
             if self.cfg.get("remember"):
                 self.cfg["password_enc"] = encrypt_secret(new_pw)
                 save_config(self.cfg)

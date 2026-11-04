@@ -41,6 +41,7 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription
 from . import uyap_proxy
 from . import jobs
 from . import lan_tls
+from . import is_listesi
 from . import _runtime
 from . import sira_kapisi
 from ._runtime import interactive_write, uyap_istek_izi, WRITE_METHODS as _WRITE_METHODS
@@ -587,6 +588,9 @@ async def run_signaling(args, ice_servers):
 async def run_office(args):
     """Tek UYAP oturumunu kurup hem LAN (FastAPI :port) hem dış ağ (WebRTC) üzerinden
     paylaşır. Her iki yol da AYNI uyap_proxy.gw oturumunu kullanır (tek e-imza girişi)."""
+    # İş Listesi köprüsü: bu bilgisayarın tarayıcısı programda giriş yapan kişinin hesabıyla çalışır.
+    is_listesi.baglantidan_configure(args.signaling, getattr(args, "office_code", ""),
+                                     getattr(args, "user", None) or args.room, getattr(args, "password", None))
     # Oturumu kurulmadıysa VEYA önceki paylaşımdan kalma httpx client kapandıysa (yeniden)
     # kur. GUI'de "Paylaş → Durdur → tekrar Paylaş" yapınca lifespan kapanışı gw.client'i
     # aclose() ediyordu; eski kod gw'yi None saymadığı için ikinci paylaşım KAPALI client'la

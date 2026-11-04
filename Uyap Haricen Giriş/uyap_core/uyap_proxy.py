@@ -207,13 +207,24 @@ class GatewaySession:
             verify=verify_ssl,
             timeout=httpx.Timeout(30.0, connect=15.0),
             follow_redirects=False,
+            event_hooks={"request": [self._giris_kapisi]},
         )
         self.lock = asyncio.Lock()          # serialize re-login so cookies aren't swapped mid-flight
         self.last_request_ts = time.monotonic()
         self.logged_in = False
+        # Başarısız giriş bu oturumu kapatır: otomatik yeniden deneme YOK (yanlış PIN kartı
+        # kilitleyebilir, UYAP'a da boşuna istek gider). Kullanıcı paylaşımı yeniden
+        # başlatınca configure() yeni oturum kurar, kapı da açılır.
+        self.giris_hatasi = None
 
     def touch(self):
         self.last_request_ts = time.monotonic()
+
+    async def _giris_kapisi(self, request):
+        """Giriş başarısızsa isteği UYAP'a çıkmadan keser. TÜM yollar (proxy, tünel, işler)
+        self.client'tan geçtiği için tek kapı yeter; hata mevcut httpx.HTTPError yakalayıcılarına düşer."""
+        if self.giris_hatasi:
+            raise httpx.RequestError(f"UYAP girişi başarısız: {self.giris_hatasi}", request=request)
 
     async def _probe(self):
         """Cheap liveness check against the authenticated endpoint. BİLEREK
@@ -267,10 +278,17 @@ class GatewaySession:
         """Re-authenticate under a lock. A second waiter re-checks first so we don't
         log in twice in a row when several requests detected the drop simultaneously."""
         async with self.lock:
+            if self.giris_hatasi:
+                raise RuntimeError(self.giris_hatasi)
             if self.logged_in and await self._probe():
                 return
             print("[*] Oturum yok/koptu — e-imza ile yeniden giriş yapılıyor...")
-            await self._login_blocking()
+            try:
+                await self._login_blocking()
+            except Exception as e:
+                self.giris_hatasi = str(e)
+                self.logged_in = False
+                raise
             print("[+] Oturum hazır.")
 
 
@@ -5039,6 +5057,9 @@ async def _keepalive_loop(session: "GatewaySession", idle_interval: int):
                 await session.ensure_alive()
         except BaseException as e:  # SystemExit from a login helper must not kill the loop
             print(f"[!] Keepalive hatası: {e}")
+            if session.giris_hatasi:
+                print("[!] Otomatik giriş denemeleri durduruldu; yeniden denemek için paylaşımı yeniden başlatın.")
+                return
 
 
 @asynccontextmanager
@@ -5048,7 +5069,7 @@ async def lifespan(app: FastAPI):
         await gw.ensure_alive()
         print("[+] İlk giriş tamam, ağ geçidi hazır.")
     except BaseException as e:
-        print(f"[!] İlk giriş başarısız ({e}). Keepalive döngüsü tekrar deneyecek.")
+        print(f"[!] İlk giriş başarısız ({e}). Otomatik yeniden deneme yapılmayacak.")
     task = asyncio.create_task(_keepalive_loop(gw, IDLE_INTERVAL))
     try:
         yield

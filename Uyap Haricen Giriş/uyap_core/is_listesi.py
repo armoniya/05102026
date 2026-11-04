@@ -30,8 +30,14 @@ bilmez. /__uyap_kisi__/* ise tünele HİÇ girmez; tarayıcının bağlı olduğ
     GET  /__uyap_kisi__/is-listesi/ac[?is=<id> | ?sekme=sablonlar]  → 303 → cokluuyap.com'da şifresiz oturum
                                                      (tek kullanımlık kod)
 
-Kimlik uyap_app girişinde configure() ile verilir, çıkışta clear() ile silinir. Jeton bellekte
-tutulur, süresi dolmadan yenilenir; sunucu 401 dönerse bir kez yeniden alınır.
+Bağlantı türüne göre kimlik:
+  1) Ofis bilgisayarının kendi tarayıcısı (uyap_proxy, 127.0.0.1:8800) → programda giriş yapan kişi
+  2) Yerel ağdaki diğer bilgisayar (kendi home_client'ı, 127.0.0.1:8800) → O bilgisayarın programında
+     giriş yapan kişi; ofisin kimliği kullanılmaz
+  3) cokluuyap.com → bu köprü yok; enjekte betik sitenin API'sine kişinin site oturumuyla gider
+
+1 ve 2'de kimlik paylaşım/bağlantı başlarken baglantidan_configure() ile verilir, çıkışta clear() ile
+silinir. Jeton bellekte tutulur, süresi dolmadan yenilenir; sunucu 401 dönerse bir kez yeniden alınır.
 """
 
 import re
@@ -159,6 +165,20 @@ def configure(api_base, office_code, username, password):
 
 def clear():
     configure("", "", "", "")
+
+
+def baglantidan_configure(signaling, office_code, username, password):
+    """Paylaşım / Bağlantıyı Al başlarken kimliği verir (office_agent.run_office, home_client.amain).
+    Ön yüzler (uyap_app, UyapMasa, UyapMasa web) bu iki noktadan geçtiği için hiçbiri köprüyü
+    kimliksiz bırakamaz. signaling: wss://host/ws → https://host."""
+    u = (signaling or "").strip()
+    if u.startswith("wss://"):
+        u = "https://" + u[len("wss://"):]
+    elif u.startswith("ws://"):
+        u = "http://" + u[len("ws://"):]
+    if u.endswith("/ws"):
+        u = u[:-len("/ws")]
+    configure(u, office_code, username, password)
 
 
 def is_path(path) -> bool:
