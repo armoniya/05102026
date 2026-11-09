@@ -86,6 +86,7 @@ class _Ctx:
     accounts = None         # accounts.AccountStore (ana hesaplar); yoksa /is-listesi girişi kapalı
     owner_user = None       # request → owner kullanıcı adı | None (vendor_server owner oturumu)
     tok_secret = b""        # Bearer jeton imza anahtarı (çerez anahtarından ayrı)
+    store_gorevi = None     # açılışta DB açılamadıysa arka plandaki yeniden deneme görevi
 
 
 C = _Ctx()
@@ -1720,6 +1721,54 @@ def _bootstrap_admin():
         print(f"[!] İş Takip (/zs): {C.setup_error}")
 
 
+def _store_ac(store=None):
+    """Veritabanını açar; başarılıysa True. Hata metni yalnız sunucu günlüğüne yazılır."""
+    try:
+        C.store = store or ZsStore()
+        _bootstrap_admin()
+    except Exception as e:
+        C.store = None
+        print(f"[!] İş Takip (/zs) veritabanı açılamadı: {e}", flush=True)
+        return False
+    print(f"[*] İş Takip (/zs): {C.store.backend_name}; belgeler: {C.storage_desc}; "
+          f"şifreleme anahtarı {'VAR' if C.file_key else 'YOK → yükleme kapalı'}.", flush=True)
+    return True
+
+
+def _bildirim_kur():
+    try:
+        C.notifier = zs_bildirim.Notifier(C.store)
+        C.notifier.group_handler = tg_group_message
+        print(f"[*] İş Takip bildirim: {C.notifier.describe()}")
+    except Exception as e:
+        C.notifier = None
+        print(f"[!] İş Takip bildirimleri başlatılamadı: {e}")
+
+
+async def _bildirim_durdur(_app=None):
+    if C.notifier:
+        await C.notifier.stop()
+
+
+async def _store_yeniden_dene(bekleme=(5, 10, 20, 30, 60)):
+    i = 0
+    while C.store is None:
+        await asyncio.sleep(bekleme[min(i, len(bekleme) - 1)])
+        i += 1
+        if await asyncio.to_thread(_store_ac):
+            _bildirim_kur()
+            if C.notifier:
+                try:
+                    await C.notifier.start()
+                except Exception as e:
+                    print(f"[!] İş Takip bildirimleri başlatılamadı: {e}")
+            print(f"[+] İş Takip veritabanı {i}. yeniden denemede açıldı.", flush=True)
+
+
+async def _store_yeniden_dene_baslat(_app):
+    C.store_gorevi = asyncio.create_task(_store_yeniden_dene())
+
+
 def register(app, session_secret, guard, client_ip, store=None, accounts_store=None, owner_user=None):
     """Rotaları ekler. Veritabanı açılamazsa site çökmez; /zs ve /is-listesi 503 döner.
     accounts_store: ana hesap deposu (yoksa /is-listesi girişi kapalı); owner_user: request →
@@ -1728,26 +1777,17 @@ def register(app, session_secret, guard, client_ip, store=None, accounts_store=N
     C.tok_secret = hashlib.sha256((session_secret + "|is-listesi-token").encode()).digest()
     C.guard, C.client_ip = guard, client_ip
     C.accounts, C.owner_user = accounts_store, owner_user
-    try:
-        C.store = store or ZsStore()
-        _bootstrap_admin()
-    except Exception as e:
-        C.store = None
-        print(f"[!] İş Takip (/zs) veritabanı açılamadı: {e}")
     C.file_key = zs_r2.load_key()
     C.storage, C.storage_desc = zs_r2.make_storage()
-    if C.store:
-        print(f"[*] İş Takip (/zs): {C.store.backend_name}; belgeler: {C.storage_desc}; "
-              f"şifreleme anahtarı {'VAR' if C.file_key else 'YOK → yükleme kapalı'}.")
-        try:
-            C.notifier = zs_bildirim.Notifier(C.store)
-            C.notifier.group_handler = tg_group_message
+    if _store_ac(store):
+        _bildirim_kur()
+        if C.notifier:
             app.on_startup.append(C.notifier.start)
-            app.on_cleanup.append(C.notifier.stop)
-            print(f"[*] İş Takip bildirim: {C.notifier.describe()}")
-        except Exception as e:
-            C.notifier = None
-            print(f"[!] İş Takip bildirimleri başlatılamadı: {e}")
+    else:
+        # 2026-11-09: Render yeniden başlarken veritabanı o an yanıt vermeyince İş Listesi bir
+        # sonraki deploy'a kadar 503'te kaldı. Açılamadıysa arka planda yeniden denenir.
+        app.on_startup.append(_store_yeniden_dene_baslat)
+    app.on_cleanup.append(_bildirim_durdur)
 
     r = app.router
     for P in PREFIXES:
