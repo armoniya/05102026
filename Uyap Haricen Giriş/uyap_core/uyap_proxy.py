@@ -1242,6 +1242,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     // il'i aç; aksi halde doğrudan birimi aç (tek seçenekse — ör. İcra — otomatik seç).
     // Re-render'ın oturması için kısa gecikme.
     function afterTurChange() {
+        if (Date.now() - kisayolZamani < 3000) return;   // kısayol birimi kendisi veriyor
         setTimeout(function() {
             if (ilEl()) handleSelect(ilEl);          // il çok seçenekli → kullanıcı seçer
             else handleSelect(birimEl);              // birim: tek seçenekse otomatik
@@ -1251,18 +1252,233 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         setTimeout(function() { handleSelect(birimEl); }, 400);  // il seçilince birim yüklenir
     }
 
+    // ── Dosya Sorgulama: Yargı Birimi seçilince Mahkeme açılır, Mahkeme seçilince tek kutuya geçilir ──
+    // Yalnız Dosya Sorgulama'da (id'ler "yargiBirim" + "mahkeme"; UYAP chunk 3145). Mahkeme listesi
+    // aranabilir: kutuya odaklanılır, "izmir 15" yazınca süzülür.
+    function mahkemeEl() { return q('yargiBirim') ? q('mahkeme') : null; }
+    function mahkemeAc() {
+        if (!mahkemeEl()) return;
+        handleSelect(mahkemeEl);
+        let n = 0;
+        const iv = setInterval(function() {
+            const m = mahkemeEl();
+            if (!m || ++n > 30) { clearInterval(iv); return; }
+            if (isOpen(m)) { clearInterval(iv); if (document.activeElement !== m) m.focus(); }
+        }, 150);
+    }
+    function tekKutuyaOdaklan() {
+        const g = document.querySelector('[data-tekno] input');
+        if (g && !g.value) setTimeout(function() { g.focus(); }, 150);
+    }
+    function alanDegeri(e) { return e ? (e.value || '') : null; }
+
+    // ── Kısayol çubuğu: İcra Dairesi / Asliye Hukuk / … / Ağır Ceza ──
+    // Dosya Sorgulama formunun üstünde. Tıklanınca seçim fare taklidiyle değil, doğrudan formun kendi
+    // durum işlevleriyle yapılır (formData.setters.setSelectedYargiTur / setSelectedYargiBirimi; UYAP
+    // chunk 3145, 2026-11-10). Birim değerleri (tablo kodu) yargiBirimleriSorgula_brd.ajx'ten bir kez
+    // alınıp saklanır; ekran açılınca önceden çekildiğinden tık anında beklenmez. Mahkeme
+    // açılmaz, yalnız odaklanır (yazınca süzülerek açılır); seçilince imleç "2026/1234" kutusuna geçer.
+    // Dikkat: tür değişince UYAP'ın tür kutusu clearData(false) çağırıp birimi siler; bu yüzden birim,
+    // tür kutusu yeni değeri gösterdikten sonra verilir.
+    const KISAYOLLAR = [
+        ['İcra', [['İcra Dairesi', '2', 'icra daire']]],
+        ['Hukuk', [['Asliye Hukuk', '1', 'asliye hukuk'], ['Asliye Ticaret', '1', 'asliye ticaret'],
+                   ['Sulh Hukuk', '1', 'sulh hukuk'], ['Aile', '1', 'aile'], ['Tüketici', '1', 'tüketici'],
+                   ['İş', '1', 'iş mahkeme'], ['İcra Hukuk', '1', 'icra hukuk']]],
+        ['Ceza', [['Ağır Ceza', '0', 'ağır ceza'], ['Asliye Ceza', '0', 'asliye ceza']]],
+    ];
+    const TUR_ADI = { '0': 'Ceza', '1': 'Hukuk', '2': 'İcra' };
+    const BIRIM_ANAHTAR = 'cokluuyapYargiBirimleri';
+    const birimListeleri = {};
+    let kisayolZamani = 0;
+    function kucuk(x) { return String(x || '').replace(/I/g, 'ı').replace(/İ/g, 'i').toLowerCase().replace(/\s+/g, ' ').trim(); }
+    function birimListesiSakli(tur) {
+        if (birimListeleri[tur]) return birimListeleri[tur];
+        try {
+            const o = JSON.parse(localStorage.getItem(BIRIM_ANAHTAR) || '{}') || {};
+            const k = o[tur];
+            if (k && Array.isArray(k.l) && k.l.length && Date.now() - k.t < 30 * 86400000) return (birimListeleri[tur] = k.l);
+        } catch (e) {}
+        return null;
+    }
+    const birimIstekleri = {};
+    function birimListesiGetir(tur) {
+        const s = birimListesiSakli(tur);
+        if (s) return Promise.resolve(s);
+        if (birimIstekleri[tur]) return birimIstekleri[tur];
+        return (birimIstekleri[tur] = window.fetch('/yargiBirimleriSorgula_brd.ajx', { method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
+            body: JSON.stringify({ yargiTuru: tur }) }).then(function(r) { return r.json(); }).then(function(j) {
+            const l = (Array.isArray(j) ? j : []).filter(function(b) { return b && b.tablo; })
+                .map(function(b) { return { kod: String(b.kod || ''), tablo: String(b.tablo) }; });
+            if (l.length) {
+                birimListeleri[tur] = l;
+                try {
+                    const o = JSON.parse(localStorage.getItem(BIRIM_ANAHTAR) || '{}') || {};
+                    o[tur] = { t: Date.now(), l: l };
+                    localStorage.setItem(BIRIM_ANAHTAR, JSON.stringify(o));
+                } catch (e) {}
+            }
+            return l;
+        }).catch(function() { return []; }).then(function(l) { delete birimIstekleri[tur]; return l; }));
+    }
+    function birimBul(liste, desen) {
+        const l = liste || [];
+        const bas = l.filter(function(b) { return kucuk(b.kod).indexOf(desen) === 0; });
+        const ic = bas.length ? bas : l.filter(function(b) { return kucuk(b.kod).indexOf(desen) >= 0; });
+        if (!ic.length) return l.length === 1 && desen === 'icra daire' ? l[0] : null;
+        return ic.slice().sort(function(a, b) { return a.kod.length - b.kod.length; })[0];   // en yalın ad
+    }
+    // DevExtreme'in kendi oluşturduğu <input>'ta React bağı yok: React'in çizdiği ilk ataya çıkılır.
+    function reactLifi(e) {
+        for (; e && e.nodeType === 1; e = e.parentElement) {
+            const a = Object.keys(e).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+            if (a) return e[a];
+        }
+        return null;
+    }
+    function dxBileseni(e) {   // girdinin DevExtreme bileşeni (devextreme-react sınıfının instance'ı)
+        for (let f = reactLifi(e), i = 0; f && i < 15; i++, f = f.return) {
+            const sn = f.stateNode;
+            if (!sn || sn.nodeType || !('instance' in sn)) continue;
+            try {
+                const w = typeof sn.instance === 'function' ? sn.instance() : sn.instance;
+                if (w && typeof w.option === 'function') return w;
+            } catch (x) {}
+        }
+        return null;
+    }
+    function sorguFormu() {
+        for (let f = reactLifi(document.querySelector('label[for="yargiTur"]') || q('yargiTur')), i = 0; f && i < 60; i++, f = f.return) {
+            const fd = f.memoizedProps && f.memoizedProps.formData;
+            if (fd && fd.setters && typeof fd.setters.setSelectedYargiTur === 'function'
+                && typeof fd.setters.setSelectedYargiBirimi === 'function') return fd;
+        }
+        return null;
+    }
+    function turGorundu(tur) {   // tür kutusu yeni değeri gösterene (ve UYAP'ın temizliği işlenene) dek
+        return new Promise(function(coz) {
+            let n = 0;
+            (function bak() {
+                const t = q('yargiTur');
+                if (!t || t.value.trim() === TUR_ADI[tur] || ++n > 60) return setTimeout(coz, 0);
+                requestAnimationFrame(bak);
+            })();
+        });
+    }
+    async function kisayolUygula(tur, desen) {
+        const form = sorguFormu();
+        if (!form) { kisayolTiklaYedek(tur, desen); return; }
+        kisayolZamani = Date.now();
+        const liste = birimListesiGetir(tur);              // saklıysa hemen döner
+        const turDegisti = q('yargiTur').value.trim() !== TUR_ADI[tur];
+        if (turDegisti) form.setters.setSelectedYargiTur(tur);
+        const b = birimBul(await liste, desen);
+        if (turDegisti) await turGorundu(tur);
+        kisayolZamani = Date.now();
+        if (!b) { handleSelect(function() { return q('yargiBirim'); }, false); return; }   // ad eşleşmedi: listeyi aç
+        // Birim listesi UYAP'tan gelene dek kutu boş görünmesin: saklı liste kutuya hemen verilir
+        // (UYAP'ın listesi gelince kendi listesiyle değiştirir; değerler aynı).
+        const bw = dxBileseni(q('yargiBirim'));
+        if (bw) {
+            try {
+                const ds = bw.option('dataSource');
+                const var_ = Array.isArray(ds) && ds.some(function(x) { return x && String(x.tablo) === b.tablo; });
+                if (!var_) bw.option('dataSource', await liste);
+            } catch (e) {}
+        }
+        const f2 = sorguFormu() || form;
+        if (!(f2.state && f2.state.selectedYargiBirimi === b.tablo)) f2.setters.setSelectedYargiBirimi(b.tablo);
+        // Mahkeme kendiliğinden açılmaz; kutuya odaklanılır: yazınca liste süzülerek açılır.
+        requestAnimationFrame(function() {
+            const m = mahkemeEl();
+            if (m && !isDisabled(m)) m.focus();
+        });
+    }
+    // Form bulunamazsa (başka sürüm/ekran): fare taklidiyle tür, ardından birim adıyla seçilir.
+    function listedenSec(getEl, eslesir, bitti) {
+        let n = 0;
+        const iv = setInterval(function() {
+            const e = getEl();
+            if (!e || ++n > 60) { clearInterval(iv); return; }
+            if (isDisabled(e)) return;
+            const w = isOpen(e) ? visiblePopup() : null;
+            if (!w) { openSelect(e); return; }
+            const it = Array.prototype.find.call(w.querySelectorAll('.dx-list-item'), function(x) { return eslesir(kucuk(x.textContent)); });
+            if (it) { clearInterval(iv); selectItem(it); if (bitti) setTimeout(bitti, 500); }
+        }, 120);
+    }
+    function kisayolTiklaYedek(tur, desen) {
+        kisayolZamani = Date.now();
+        const birim = function() {
+            kisayolZamani = Date.now();
+            listedenSec(birimEl, function(m) { return m.indexOf(desen) >= 0; });
+        };
+        const t = q('yargiTur');
+        if (t && t.value.trim() === TUR_ADI[tur]) birim();
+        else listedenSec(function() { return q('yargiTur'); }, function(m) { return m === kucuk(TUR_ADI[tur]); }, birim);
+    }
+    function kisayolCubuguKur() {
+        const label = document.querySelector('label[for="yargiTur"]');
+        const satir = label && label.closest('.row');
+        if (!satir || !satir.parentElement) return;
+        const onceki = satir.previousElementSibling;
+        if (onceki && onceki.hasAttribute('data-kisayollar')) return;
+        const cubuk = document.createElement('div');
+        cubuk.setAttribute('data-kisayollar', '1');
+        cubuk.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin:0 0 12px;';
+        KISAYOLLAR.forEach(function(g) {
+            const grup = document.createElement('div');
+            grup.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:4px;';
+            const ad = document.createElement('span');
+            ad.textContent = g[0] + ':';
+            ad.style.cssText = 'font-size:12px;font-weight:600;color:#6c757d;margin-right:2px;';
+            grup.appendChild(ad);
+            g[1].forEach(function(k) {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = k[0];
+                b.title = TUR_ADI[k[1]] + ' → ' + k[0] + ' (Mahkeme kutusuna geçilir; yazarak arayın)';
+                b.style.cssText = 'padding:2px 10px;border-radius:12px;border:1px solid #0d6efd;background:#fff;color:#0d6efd;font-size:12px;line-height:18px;cursor:pointer;';
+                b.addEventListener('mouseenter', function() { b.style.background = '#0d6efd'; b.style.color = '#fff'; });
+                b.addEventListener('mouseleave', function() { b.style.background = '#fff'; b.style.color = '#0d6efd'; });
+                b.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+                b.addEventListener('click', function(ev) { ev.preventDefault(); ev.stopPropagation(); kisayolUygula(k[1], k[2]); });
+                grup.appendChild(b);
+            });
+            cubuk.appendChild(grup);
+        });
+        satir.parentElement.insertBefore(cubuk, satir);
+        ['0', '1', '2'].forEach(function(t) { birimListesiGetir(t); });   // tık anında beklenmesin
+    }
+
     let lastTur = null;
     let lastIl = null;
+    let lastBirim = null, lastMahkeme = null;
     let opened = false;
     setInterval(function() {
         const t = firstPresent(TUR_IDS);
-        if (!t) { lastTur = null; lastIl = null; opened = false; return; }  // ekran yok
+        if (!t) { lastTur = null; lastIl = null; lastBirim = null; lastMahkeme = null; opened = false; return; }  // ekran yok
+        kisayolCubuguKur();
         if (!opened) {                               // Yargı Türü kutusu ilk göründü
             opened = true;
             lastTur = t.value || '';
             const il = ilEl(); lastIl = il ? (il.value || '') : null;
+            lastBirim = alanDegeri(q('yargiBirim'));
+            lastMahkeme = alanDegeri(mahkemeEl());
             if (!t.value) openWithRetry(function() { return firstPresent(TUR_IDS); });
             return;
+        }
+        const cb = alanDegeri(q('yargiBirim'));      // birim seçildi → Mahkeme listesini aç
+        if (cb !== lastBirim) {
+            lastBirim = cb;
+            // Kısayolla seçildiyse açma (kullanıcı istemiyor); elle seçildiyse aç.
+            if (cb && mahkemeEl() && Date.now() - kisayolZamani > 10000) setTimeout(mahkemeAc, 400);
+        }
+        const cm = alanDegeri(mahkemeEl());           // mahkeme seçildi → "2026/1234" kutusuna geç
+        if (cm !== lastMahkeme) {
+            lastMahkeme = cm;
+            if (cm) tekKutuyaOdaklan();
         }
         const ct = t.value || '';
         if (ct !== lastTur) {                         // tür değişti (kullanıcı seçti)
@@ -1278,6 +1494,182 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (ci) afterIlChange();
         }
     }, 400);
+
+    // ── Dosya Yıl/No tek kutu: "2026/1234" ──
+    // UYAP'ın "Dosya Yıl/ No" bileşeni (label[for=dosyaYilNo] + yıl SelectBox'ı + sıra NumberBox'ı) yılı
+    // ve sırayı ayrı ister. Üstüne tek kutu eklenir: yazılan/yapıştırılan metindeki ilk "YYYY/NNN"
+    // (ör. sağ tıkla kopyalanan "İzmir 15. İcra Dairesi 2026/1234") yıla ve sıraya yazılır; Enter'da
+    // Sorgula'ya basılır. Değerler bileşenin kendi setParentDosyaNoBilgileri(anahtar, değer) işleviyle
+    // verilir (UYAP chunk 3145/3632, 2026-11-10). O işlev ebeveynin o anki durumunu kopyalayıp üzerine
+    // yazdığından (ke({...we, [k]: v})) yıl ve sıra arka arkaya verilemez: yıl yazılır, yeniden çizim
+    // beklenir, sıra güncel çizimin işleviyle yazılır.
+    function yilNoBilesenleri(label) {
+        const a = Object.keys(label).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+        for (let f = a ? label[a] : null, i = 0; f && i < 12; i++, f = f.return) {
+            const p = f.memoizedProps;
+            if (p && typeof p.setParentDosyaNoBilgileri === 'function' && p.dosyaNoKey && p.dosyaYilNo)
+                return f.alternate ? [f, f.alternate] : [f];
+        }
+        return [];
+    }
+    function yilNoBekle(label, kosul, sinir) {
+        return new Promise(function(coz) {
+            let n = 0;
+            const iv = setInterval(function() {
+                const f = yilNoBilesenleri(label).find(function(x) { return x.memoizedProps && kosul(x.memoizedProps); });
+                if (f || ++n > (sinir || 30)) { clearInterval(iv); coz(f || null); }
+            }, 40);
+        });
+    }
+    async function yilNoYaz(label, yil, sira) {
+        const ilk = yilNoBilesenleri(label)[0];
+        if (!ilk) return false;
+        const k = ilk.memoizedProps.dosyaNoKey;
+        const deger = function(p, a) { return p.dosyaYilNo && p.dosyaYilNo[a] != null ? Number(p.dosyaYilNo[a]) : null; };
+        ilk.memoizedProps.setParentDosyaNoBilgileri(k.yil, yil);
+        const f = await yilNoBekle(label, function(p) { return deger(p, k.yil) === yil; });
+        if (!f) return false;
+        f.memoizedProps.setParentDosyaNoBilgileri(k.sira, sira);
+        return !!(await yilNoBekle(label, function(p) { return deger(p, k.yil) === yil && deger(p, k.sira) === sira; }));
+    }
+    function sorgulaDugmesi(kutu) {
+        for (let e = kutu.parentElement, i = 0; e && i < 12; i++, e = e.parentElement) {
+            const b = Array.prototype.find.call(e.querySelectorAll('.dx-button'), function(x) {
+                return x.textContent.trim() === 'Sorgula' && !x.classList.contains('dx-state-disabled');
+            });
+            if (b) return b;
+        }
+        return null;
+    }
+    // ── Sorgu tek dosya bulursa "Pencere Görünümü"ne (göz, #dosya-goruntule) basılır ──
+    // Sorgula düğmesi "Sorgulanıyor..." olur, sonra geri döner; ardından sonuç tablosunun (DataGrid)
+    // toplam kaydı 1 ise satırdaki göz düğmesine basılır. Eski sonuç tablosuna bakılmasın diye
+    // "Sorgulanıyor..." görülmezse hiçbir şeye basılmaz.
+    function sorguSuruyor() {
+        return Array.prototype.some.call(document.querySelectorAll('.dx-button'), function(x) {
+            return /^Sorgulan/.test(x.textContent.trim());
+        });
+    }
+    function gorunur(e) { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && e.offsetParent !== null; }
+    function sonucKaydi() {   // {sayi, dugme} | null
+        const dugmeler = Array.prototype.filter.call(document.querySelectorAll('#dosya-goruntule'), gorunur);
+        if (!dugmeler.length) return { sayi: 0, dugme: null };
+        const izgara = dugmeler[0].closest('.dx-datagrid');
+        const w = izgara && dxBileseni(izgara);
+        let sayi = null;
+        try { if (w && typeof w.totalCount === 'function') sayi = w.totalCount(); } catch (e) {}
+        if (typeof sayi !== 'number' || sayi < 0) {   // yedek: sabit sütun kopyası olmayan satırlar
+            sayi = izgara ? izgara.querySelectorAll('.dx-datagrid-rowsview .dx-datagrid-content:not(.dx-datagrid-content-fixed) .dx-data-row').length : dugmeler.length;
+        }
+        return { sayi: sayi, dugme: dugmeler[0] };
+    }
+    function tekSonucuAc() {
+        const bas = Date.now();
+        let basladi = false;
+        const iv = setInterval(function() {
+            const gecen = Date.now() - bas;
+            if (gecen > 30000) { clearInterval(iv); return; }
+            if (sorguSuruyor()) { basladi = true; return; }
+            if (!basladi) {                               // sorgu başlamadıysa (uyarı çıktı vb.) eski tabloya bakma
+                if (gecen > 2000) clearInterval(iv);
+                return;
+            }
+            clearInterval(iv);
+            setTimeout(function() {
+                const s = sonucKaydi();
+                if (s.sayi === 1 && s.dugme) clickLike(s.dugme);
+            }, 300);
+        }, 100);
+    }
+    function tekKutuKur() {
+        document.querySelectorAll('[data-tekno]').forEach(function(k) {   // bileşeni kaldırılmış kutu
+            const s = k.nextElementSibling;
+            if (!s || s.getAttribute('for') !== 'dosyaYilNo') k.remove();
+        });
+        document.querySelectorAll('label[for="dosyaYilNo"]').forEach(function(label) {
+            const onceki = label.previousElementSibling;
+            if ((onceki && onceki.hasAttribute('data-tekno')) || !label.parentElement || !yilNoBilesenleri(label).length) return;
+            const kutu = document.createElement('div');
+            kutu.setAttribute('data-tekno', '1');
+            kutu.style.cssText = 'margin-bottom:10px;';
+            const girdi = document.createElement('input');
+            girdi.type = 'text';
+            girdi.autocomplete = 'off';
+            girdi.placeholder = 'Dosya No: 2026/1234 — yapıştırın, Enter ile sorgulayın';
+            girdi.setAttribute('aria-label', 'Dosya yıl/no (2026/1234)');
+            girdi.style.cssText = 'width:100%;box-sizing:border-box;height:36px;padding:6px 10px;border:1px solid #ced4da;border-radius:6px;font-size:14px;outline:none;background:#fff;color:#212529;';
+            const durum = document.createElement('div');
+            durum.style.cssText = 'font-size:11px;margin-top:2px;color:#dc3545;';
+            kutu.appendChild(girdi);
+            kutu.appendChild(durum);
+            let zaman = null, sira = 0;
+            async function uygula(sorgula) {
+                const benim = ++sira;
+                const m = /(\d{4})\s*\/\s*(\d{1,8})(?!\d)/.exec(girdi.value);
+                const yil = m ? Number(m[1]) : 0;
+                if (!m || yil < 1900 || yil > new Date().getFullYear() + 1) {
+                    durum.textContent = girdi.value.trim() && sorgula ? 'Biçim: 2026/1234' : '';
+                    return;
+                }
+                const tamam = await yilNoYaz(label, yil, Number(m[2]));
+                if (benim !== sira) return;                    // bu arada yeni yazım geldi
+                durum.textContent = tamam ? '' : 'Yıl / No kutularına yazılamadı; elle girin.';
+                if (!tamam || !sorgula) return;
+                const b = sorgulaDugmesi(kutu);
+                if (b) setTimeout(function() { clickLike(b); tekSonucuAc(); }, 80);
+                else durum.textContent = 'Sorgula düğmesi bulunamadı; yargı türü ve birimini seçip Sorgula\'ya basın.';
+            }
+            girdi.addEventListener('input', function(ev) {
+                // Klavyeyle yıl (4 hane) yazılınca "/" kendiliğinden eklenir; silerken ve yapıştırırken eklenmez.
+                if (ev.inputType === 'insertText' && /^\d{4}$/.test(girdi.value)
+                    && girdi.selectionStart === girdi.value.length) {
+                    girdi.value += '/';
+                    girdi.setSelectionRange(girdi.value.length, girdi.value.length);
+                }
+                clearTimeout(zaman);
+                zaman = setTimeout(function() { uygula(false); }, 250);
+            });
+            girdi.addEventListener('keydown', function(ev) {
+                if (ev.key !== 'Enter') return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                clearTimeout(zaman);
+                uygula(true);
+            });
+            // Sağ tık: tarayıcı menüsü yerine iki madde — seçmeye gerek yok, kutunun tamamı kopyalanır;
+            // yapıştır kutudakini silip panodakini koyar, yıl/no'yu doldurur ve Sorgula'ya basar.
+            girdi.addEventListener('contextmenu', function(ev) {
+                if (!window.__uyapSagMenuAc) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                const bildir = window.__uyapBildirim || function() {};
+                window.__uyapSagMenuAc(ev.clientX, ev.clientY, [[
+                    ['Dosya numarasını kopyala', function() {
+                        const m = girdi.value.trim();
+                        if (!m) { bildir('Kutu boş'); return; }
+                        window.__uyapPanoya(m);
+                    }],
+                    ['Yapıştır', async function() {
+                        let m = '';
+                        try { m = await navigator.clipboard.readText(); } catch (e) {
+                            girdi.focus();
+                            bildir('Pano okunamadı — Ctrl+V ile yapıştırın');
+                            return;
+                        }
+                        girdi.value = String(m || '').replace(/\s+/g, ' ').trim();
+                        girdi.focus();
+                        girdi.setSelectionRange(girdi.value.length, girdi.value.length);
+                        clearTimeout(zaman);
+                        uygula(true);                      // yıl/no yazılır ve Sorgula'ya basılır
+                    }],
+                ]]);
+            });
+            girdi.addEventListener('focus', function() { girdi.style.borderColor = '#86b7fe'; });
+            girdi.addEventListener('blur', function() { girdi.style.borderColor = '#ced4da'; });
+            label.parentElement.insertBefore(kutu, label);
+        });
+    }
+    setInterval(function() { if (document.body) tekKutuKur(); }, 700);
 })();
 
 // ── TÜM EVRAKI İNDİR ─────────────────────────────────────────────────────────────────
@@ -3997,7 +4389,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     // ── Sağ tık menüsü ──
     // UYAP'ta tarayıcının uzun menüsü yerine sade CokluUyap menüsü — dosya türüne göre (DOSYA_TURLERI).
     // Menüsü tanımlı olmayan yerde, yazı alanlarında (yapıştır, yazım denetimi), kendi pencerelerimizde
-    // seçili metin varken ve Shift / Ctrl + sağ tıkta tarayıcının menüsü açılır.
+    // ve Shift / Ctrl + sağ tıkta tarayıcının menüsü açılır. Kartta metin seçiliyse menünün başında
+    // "Seçili metni kopyala" olur.
     // Kapatmak için: localStorage cokluuyapSagMenu = 'kapali'.
     let sagMenu = null, sagMenuSecili = -1;
     function sagMenuKapat() {
@@ -4011,7 +4404,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         document.body.appendChild(b);
         setTimeout(function() { b.remove(); }, 1200);
     }
-    async function panoya(metin) {
+    let kendiKopyam = false;   // panoya()'nın execCommand yedeği: UYAP'ın copy engeline takılmasın
+    async function panoya(metin, sessiz) {
         try {
             await navigator.clipboard.writeText(metin);
         } catch (e) {
@@ -4019,10 +4413,106 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             ta.value = metin;
             document.body.appendChild(ta);
             ta.select();
-            try { document.execCommand('copy'); } finally { ta.remove(); }
+            kendiKopyam = true;
+            try { document.execCommand('copy'); } finally { kendiKopyam = false; ta.remove(); }
         }
-        kisaBildirim('Kopyalandı');
+        if (!sessiz) kisaBildirim('Kopyalandı');
     }
+    // ── Belge görüntüleyicide seçili metin ──
+    // UYAP'ın kartındaki belge görüntüleyicisi metin seçtiriyor ama kopyalatmıyor: Ctrl+C sonuçsuz,
+    // sağ tıkta seçim de kayboluyordu. Dinleyiciler betik <head>'in başında kurulduğundan UYAP'ınkilerden
+    // önce çalışır: kartta seçim varken Ctrl+C / copy olayı UYAP'a ulaşmadan biz kopyalarız; sağ tık
+    // anındaki seçim mousedown'da saklanır (UYAP temizlese de menüde "Seçili metni kopyala" çıkar).
+    let sagTikSecimi = '';
+    function seciliMetin() {
+        try { return String(window.getSelection ? window.getSelection() : '').trim(); } catch (e) { return ''; }
+    }
+    function secimKartta() {
+        try {
+            const s = window.getSelection && window.getSelection();
+            const n = s && s.rangeCount ? s.anchorNode : null;
+            const e = n && (n.nodeType === 1 ? n : n.parentElement);
+            return !!(e && e.closest && e.closest('.dosya-sorgula-popup'));
+        } catch (e) { return false; }
+    }
+    function yaziAlaninda(e) {
+        return !!(e && e.closest && e.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]'));
+    }
+    // UDF belgeleri UYAP'ın canvas'a çizen kendi editöründe gösteriliyor: seçim tarayıcının değil
+    // editörün durumunda (zustand deposu; eylemi getSelectedText(), UYAP main.js 2026-11-10). Depoya
+    // tıklanan yerin React ağacından ulaşılır: ata bileşenlerin props'u, kancaları ve context'i taranır.
+    function secimOkuyucu(o) {
+        if (!o || typeof o !== 'object') return null;
+        try {
+            if (typeof o.getSelectedText === 'function') return o.getSelectedText;
+            if (typeof o.getState === 'function' && o.getState.length === 0) {
+                const s = o.getState();
+                if (s && typeof s.getSelectedText === 'function') return s.getSelectedText;
+            }
+        } catch (e) {}
+        return null;
+    }
+    function belgeSecimi(h) {
+        try {
+            let e = h && h.nodeType === 1 ? h : (h && h.parentElement);
+            if (!e || !e.closest || !e.closest('.dosya-sorgula-popup')) return '';
+            let a = null;
+            for (; e && e.nodeType === 1; e = e.parentElement) {
+                a = Object.keys(e).find(function(k) { return k.indexOf('__reactFiber') === 0; });
+                if (a) break;
+            }
+            for (let f = a ? e[a] : null, i = 0; f && i < 120; i++, f = f.return) {
+                const adaylar = [];
+                const p = f.memoizedProps;
+                if (p && typeof p === 'object') for (const k in p) adaylar.push(p[k]);
+                if (f.tag === 0 || f.tag === 11 || f.tag === 15) {   // işlev bileşeni: kancalar
+                    for (let k = f.memoizedState, n = 0; k && n < 150; k = k.next, n++) {
+                        const v = k.memoizedState;
+                        adaylar.push(v);
+                        if (v && typeof v === 'object' && 'current' in v) adaylar.push(v.current);
+                    }
+                }
+                for (let c = f.dependencies && f.dependencies.firstContext, n = 0; c && n < 30; c = c.next, n++) adaylar.push(c.memoizedValue);
+                for (let j = 0; j < adaylar.length; j++) {
+                    const fn = secimOkuyucu(adaylar[j]);
+                    if (!fn) continue;
+                    const m = fn();
+                    if (typeof m === 'string') return m.trim();
+                }
+            }
+        } catch (e) {}
+        return '';
+    }
+    let sonBelgeHedefi = null;   // Ctrl+C için: kartta en son tıklanan yer
+    window.addEventListener('mousedown', function(ev) {
+        sonBelgeHedefi = ev.target && ev.target.closest && ev.target.closest('.dosya-sorgula-popup') ? ev.target : null;
+        if (ev.button === 2) sagTikSecimi = seciliMetin() || belgeSecimi(ev.target);
+    }, true);
+    window.addEventListener('keydown', function(ev) {
+        if (!(ev.ctrlKey || ev.metaKey) || ev.altKey || ev.shiftKey) return;
+        if (!(ev.code === 'KeyC' || String(ev.key).toLowerCase() === 'c' || ev.key === 'Insert')) return;
+        const ae = document.activeElement;     // gerçek bir alanda metin seçiliyse dokunma (editörün gizli
+        if (yaziAlaninda(ae) && (ae.selectionStart !== ae.selectionEnd || !sonBelgeHedefi)) return;   // girdisi seçimsiz)
+        if (secimKartta()) {
+            const m = seciliMetin();
+            if (!m) return;
+            ev.stopImmediatePropagation();     // UYAP'ın tuş engeli çalışmasın; tarayıcının kopyalaması sürer
+            panoya(m, true);                   // yedek: tarayıcı kopyalaması yine de engellenirse
+            return;
+        }
+        if (seciliMetin()) return;             // kart dışında seçim: tarayıcıya bırak
+        const m = sonBelgeHedefi && sonBelgeHedefi.isConnected ? belgeSecimi(sonBelgeHedefi) : '';
+        if (m) panoya(m);                      // canvas editörü: seçimi depodan alıp biz kopyalarız
+    }, true);
+    window.addEventListener('copy', function(ev) {
+        if (kendiKopyam) { ev.stopImmediatePropagation(); return; }
+        if (!secimKartta()) return;
+        const m = seciliMetin();
+        if (!m || !ev.clipboardData) return;
+        ev.stopImmediatePropagation();
+        ev.clipboardData.setData('text/plain', m);
+        ev.preventDefault();
+    }, true);
     // ── Dosya türleri: her türün kendi sağ tık menüsü ──
     // Tür, kartın dosya türü açıklamasından (dosyaTurKodAciklama), yoksa birim adından bulunur; sıra
     // önemlidir (ilk eşleşen). menu(c) türün menüsünü verir: [[ [metin, fn], … ], …] (gruplar arasına
@@ -4480,7 +4970,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const gruplar = tur && tur.menu ? tur.menu({ d: d, kart: kart }) : null;
         return gruplar && gruplar.length ? gruplar : null;
     }
-    function sagMenuGoster(x, y, gruplar) {
+    function sagMenuGoster(x, y, gruplar, altYaziYok) {
         if (!sagMenu) {
             sagMenu = el('div', 'position:fixed;left:0;top:0;z-index:2147483646;min-width:200px;max-width:340px;padding:4px 0;border-radius:9px;background:rgba(18,18,24,0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);color:#e5e7eb;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
             sagMenu.id = 'uyap-sagmenu';
@@ -4503,7 +4993,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 sagMenu.appendChild(s);
             });
         });
-        sagMenu.appendChild(el('div', 'padding:5px 14px 2px;color:#6b7280;font-size:10.5px;', 'Tarayıcı menüsü: Shift + sağ tık'));
+        if (!altYaziYok) sagMenu.appendChild(el('div', 'padding:5px 14px 2px;color:#6b7280;font-size:10.5px;', 'Tarayıcı menüsü: Shift + sağ tık'));
         sagMenu.style.display = 'block';
         const r = sagMenu.getBoundingClientRect();
         sagMenu.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + 'px';
@@ -4527,6 +5017,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         ev.preventDefault();
         ev.stopPropagation();
     }
+    // Başka bölümler (ör. Dosya Sorgulama'daki "2026/1234" kutusu) aynı menüyü ve panoyu kullanır.
+    window.__uyapSagMenuAc = function(x, y, gruplar) { kur(); sagMenuGoster(x, y, gruplar, true); };
+    window.__uyapPanoya = panoya;
+    window.__uyapBildirim = kisaBildirim;
     function sagMenuKur() {
         if (!anaCerceve() || window.__uyapSagMenu || !document.body) return;
         window.__uyapSagMenu = true;
@@ -4534,16 +5028,20 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             sagMenuKapat();
             const h = ev.target && ev.target.closest ? ev.target : null;
             if (ev.shiftKey || ev.ctrlKey || !h || sagMenuKapali()) return;
-            const secili = String(window.getSelection ? window.getSelection() : '').trim();
-            if (secili) {
-                // Kapalı Tebligat'taki PTT barkodu seçiliyse kendi menümüz; başka seçimde tarayıcının
-                // menüsü (Kopyala, Google'da ara, Çevir …) kalsın.
+            const secili = seciliMetin() || sagTikSecimi || belgeSecimi(h);
+            sagTikSecimi = '';
+            if (secili && !h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')
+                && !(ort && ort.contains(h))) {
+                // Kartta seçim varken: en üstte "Seçili metni kopyala", altında PTT barkodu menüsü ya da
+                // dosya türünün menüsü. Kart dışındaki seçimde tarayıcının menüsü (Kopyala, Çevir …) kalsın.
                 let g = null;
                 try { g = barkodMenusu(h, secili); } catch (e) {}
+                if (!g) { try { g = sagMenuMaddeleri(h); } catch (e) {} }
                 if (!g) return;
                 ev.preventDefault();
                 kur();
-                sagMenuGoster(ev.clientX, ev.clientY, g);
+                t121Konum = { x: ev.clientX, y: ev.clientY };
+                sagMenuGoster(ev.clientX, ev.clientY, [[['Seçili metni kopyala', function() { panoya(secili); }]]].concat(g));
                 return;
             }
             if (h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')) return;
