@@ -1,0 +1,343 @@
+/* ═══════════════════════════════════════════════════════════════════════════════════════
+   ÇOKLU UYAP — MOBİL GÖRÜNÜM (2026-11-11)
+   ═══════════════════════════════════════════════════════════════════════════════════════
+   uyap_proxy._tema_css bu dosyayı tema.css'in ardına ekler (sayfanın en başındaki <style>): kurallar ilk
+   çizimden itibaren yerindedir. Kip sınıflarını mobil.js <html>'e yazar:
+
+     html.cu-dar     genişlik < 992 px  (UYAP'ın kendi mobil üst çubuğuna geçtiği eşik; tablet dik + telefon)
+     html.cu-mobil   genişlik < 768 px, ya da yatık telefon (yükseklik ≤ 520 px)  →  her zaman cu-dar ile birlikte
+
+   Masaüstü görünümü bu dosyadan ETKİLENMEZ: bütün kurallar bu iki sınıftan birinin altındadır (tek istisna
+   aşağıdaki ortak ölçü). Öbür enjekte dosyalarının (gorevcubugu.js, kartlar.js, ana betik) stilleri sayfaya
+   sonradan eklenir; onları geçebilmek için kurallar html.cu-… önekiyle daha özgül, satır içi stilleri ya da
+   !important'lı kuralları ezenler ayrıca !important'lıdır.
+
+   Telefonda düzen (canlı ölçüm 390×664, 2026-11-11):
+     üst çubuk 60 px  ·  içerik  ·  görev çubuğu 52 px:  [☰ menü] [açık dosyalar → yana kayar] [✓ işler]
+   Sol menü ve çekmece içeriği itmez; üstüne açılır. Dosya penceresinde Evrak sekmesi tek bölmedir:
+   belge listesi ⇄ belge (mobil.js). */
+
+/* Ortak ölçü: görev çubuğunun yüksekliği (gorevcubugu.js ve kartlar.js bunu kullanır). */
+:root { --cu-cubuk-yuk: 44px; }
+html.cu-mobil { --cu-cubuk-yuk: calc(52px + env(safe-area-inset-bottom, 0px)); }
+
+/* ══ 1) ÜST ÇUBUK (dar ekran) ══
+   UYAP'ın mobil çubuğu 68 px çiziliyor, içerik 60 px'ten başlıyordu (8 px bindirme). Çubuk 60 px'e iner;
+   düğmeler parmakla basılacak boyda. Soldaki düğme (☰) bizim sol menümüzü açar (gorevcubugu.js); simgesi
+   UYAP'ın kendi durumuna değil menümüzün durumuna göre çizilir. */
+html.cu-dar nav.navbar.u-navbar { padding-top: 4px !important; padding-bottom: 4px !important; min-height: 60px; }
+html.cu-dar .u-navbar .nav-btn-group { display: flex; align-items: center; gap: 2px; }
+html.cu-dar .u-navbar .nav-btn-group .navbar-toggler {
+    display: inline-flex !important; align-items: center; justify-content: center; min-width: 44px; height: 44px;
+    padding: 0 !important; border-radius: 10px; }
+html.cu-dar .u-navbar .nav-btn-group .navbar-toggler:active { background: var(--cu-ust-hover, rgba(255, 255, 255, 0.18)); }
+html.cu-dar .u-navbar .nav-btn-group .navbar-toggler > i { font-size: 20px; }
+html.cu-dar body.cu-gorev .u-navbar .navbar-toggler > i:is(.fa-bars, .fa-times)::before { content: "\f0c9"; }
+html.cu-dar body.cu-gorev.cu-solacik .u-navbar .navbar-toggler > i:is(.fa-bars, .fa-times)::before { content: "\f00d"; }
+/* Açılan kullanıcı şeridi: tarih etiketi ortada, düğmeler altında */
+html.cu-dar .u-navbar .navbar-collapse .navbar-nav > li:first-child { flex: 0 0 100%; justify-content: center; margin: 0 !important; }
+html.cu-mobil .u-navbar .navbar-collapse .navbar-nav > li.nav-item,
+html.cu-mobil .u-navbar .navbar-collapse .navbar-nav > li.nav-item > .nav-link,
+html.cu-mobil .u-navbar .navbar-collapse .navbar-nav > li.nav-item > div > .nav-link { height: 44px !important; min-width: 44px; }
+
+/* ══ 2) SOL MENÜ (dar ekran): içeriği itmez, üstüne açılır ══
+   Üst çubuğun altından görev çubuğuna kadar bir yaprak; arkası karartılır (#cu-sol-perde, dokununca kapanır).
+   Bağlantıya dokununca menü kendiliğinden kapanır (gorevcubugu.js). */
+html.cu-dar body.cu-gorev #av-sidebar-wrapper {
+    top: var(--cu-nav-yuk, 60px) !important; height: calc(100% - var(--cu-nav-yuk, 60px) - var(--cu-cubuk-yuk, 44px)) !important;
+    padding-top: 6px; width: min(86vw, 340px) !important; min-width: 0 !important; max-width: none !important;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.28); }
+/* Telefonda tam sayfa (kullanıcı isteği 2026-11-11: yarım yaprak simetri dışı duruyordu): sağdaki İş Listesi
+   gibi ekranın üstünden görev çubuğuna kadar, tam genişlik. Kapatma görev çubuğundaki ☰ ile (o görünür kalır). */
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper {
+    top: 0 !important; height: calc(100% - var(--cu-cubuk-yuk, 52px)) !important; width: 100vw !important;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px)); box-shadow: none; }
+html.cu-mobil body.cu-gorev.cu-solacik #cu-sol-perde { display: none !important; }
+html.cu-dar body.cu-gorev.cu-solacik #page-content-wrapper { margin-left: 0 !important; }
+html.cu-dar body.cu-gorev.cu-solacik #cu-sol-perde { display: block; }
+/* Parmakla rahat: satırlar 44 px, yazı 15 px. Alt menü bağlantıları yalnız AÇIK grupta (ul.collapse.show)
+   büyütülür: UYAP kapalı grubun bağlantılarını yüksekliği sıfırlayarak gizliyor. */
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper :is(li.SidebarLink > a, .favorite-menu-list > .d-flex, button.sideLink) { min-height: 44px; }
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper ul.collapse.show > :is(a.menu-item-fav, li) { min-height: 44px; }
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper ul.collapse.show :is(a.menu-item, a.menu-item-fav) {
+    display: flex !important; align-items: center; min-height: 44px; height: auto !important; }
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper .SidebarLabel,
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper .menu-link { font-size: 15px !important; }
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper .fav-menu-icon { min-width: 34px; height: 34px; }
+html.cu-mobil body.cu-gorev #av-sidebar-wrapper > div > ul.menu-list { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding-bottom: 12px !important; }
+
+/* ══ 3) GÖREV ÇUBUĞU (telefon) ══
+   "ÇOKLU UYAP" düğmesi 248 px yerine yalnız ☰ (46 px); açık dosyalar iki satırlı küçük kutular (üstte dosya no,
+   altta birim) ve parmakla yana kayar; sağ uçta çekmece düğmesi (bkz. 4). */
+html.cu-dar #uyap-gorev-cubugu .cu-gc-marka { width: 248px; }      /* menü dar ekranda 340 px'e kadar genişler; düğme uzamasın */
+html.cu-mobil #uyap-gorev-cubugu { padding-bottom: env(safe-area-inset-bottom, 0px); box-sizing: border-box; }
+html.cu-mobil body:has(> #uyap-issekme) #uyap-gorev-cubugu { padding-right: 58px; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-marka { width: 46px; margin: 6px 0 6px 6px; padding: 0; justify-content: center; gap: 0; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-marka > span { display: none !important; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-marka > i { width: 100%; height: 100%; background: none; font-size: 21px; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-marka > i.logo img { width: 32px; height: 32px; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-liste {
+    gap: 6px; padding: 0 8px; scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-liste::-webkit-scrollbar { display: none; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc {
+    height: 40px; max-width: 164px; padding: 0 11px; gap: 6px; border-radius: 9px;
+    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki .cu-gc-ikon,
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki .cu-gc-tam { display: none; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki .cu-gc-ad {
+    display: flex; flex-direction: column; align-items: flex-start; justify-content: center; min-width: 0; line-height: 1.15; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki :is(.cu-gc-ust, .cu-gc-alt) { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki .cu-gc-ust { font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc.iki .cu-gc-alt { margin-top: 2px; font-size: 10.5px; font-weight: 500; opacity: .82; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-ipucu .uzun { display: none; }
+html.cu-mobil #uyap-gorev-cubugu .cu-gc-ipucu .kisa { display: inline; }
+
+/* ══ 4) ÇEKMECE ve DÜĞMESİ (telefon) ══
+   Sağ kenardaki dikey tutamaç dar ekranda içeriğin üstüne biniyordu (sekme okları, belge araç çubuğu). Telefonda
+   görev çubuğunun sağ ucuna, onunla aynı boyda bir düğme olarak yerleşir (öğe aynı: #uyap-issekme; rozet ve yeşil
+   nokta köşelerinde). Çekmece tam genişlikte, görev çubuğunun üstünde açılır; düğme aç / kapat. */
+html.cu-mobil #uyap-issekme {
+    top: auto !important; right: 6px !important; bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    width: 46px; height: 40px; padding: 0 !important; justify-content: center; gap: 0; writing-mode: horizontal-tb;
+    opacity: 1; transition: none; border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 9px;
+    background: linear-gradient(var(--cu-marka-ust), var(--cu-marka-alt)); color: var(--cu-cubuk-yazi);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 2px 6px rgba(0, 0, 0, 0.3); }
+html.cu-mobil #uyap-issekme > span:not(.ip-rozet):not(.ip-nokta) { display: none; }
+html.cu-mobil #uyap-issekme::before {
+    content: ""; width: 22px; height: 22px; background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 11l3 3L22 4'/%3E%3Cpath d='M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11'/%3E%3C/svg%3E") center / contain no-repeat; }
+html.cu-mobil #uyap-issekme .ip-rozet {
+    position: absolute; top: -6px; right: -5px; min-width: 18px; padding: 0 5px; font-size: 10.5px; line-height: 18px;
+    box-shadow: 0 0 0 2px var(--cu-cubuk-alt); }
+html.cu-mobil #uyap-issekme .ip-nokta { position: absolute; right: 5px; bottom: 5px; box-shadow: 0 0 0 2px var(--cu-marka-alt); }
+html.cu-mobil #uyap-ispanel.acik ~ #uyap-issekme {
+    background: linear-gradient(var(--cu-marka-basili), var(--cu-marka-alt)); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.4); }
+html.cu-mobil #uyap-ispanel {
+    width: 100vw; bottom: var(--cu-cubuk-yuk, 52px); border-left: 0; box-shadow: none; font-size: 14px;
+    background: rgb(var(--cu-panel-rgb)); }
+html.cu-mobil #uyap-ispanel [title="Kapat (Esc)"] { font-size: 30px !important; padding: 0 8px !important; }
+html.cu-mobil #uyap-ispanel .ip-link { font-size: 14px; padding: 6px 2px; }
+html.cu-mobil #uyap-ispanel .ip-sekme { padding: 11px 14px; font-size: 15px; }
+html.cu-mobil #uyap-ispanel .ip-cip { padding: 7px 14px; font-size: 13.5px; }
+html.cu-mobil #uyap-ispanel .ip-is { padding: 11px 12px; margin-top: 8px; }
+html.cu-mobil #uyap-ispanel .ip-is > div { flex-wrap: wrap; }
+html.cu-mobil #uyap-ispanel :is(.ip-dosya, .ip-onay, .ip-aktar, .ip-red) { margin-top: 7px; padding: 7px 12px; font-size: 13px; }
+html.cu-mobil #uyap-ispanel .ip-arac { padding: 14px; }
+html.cu-mobil #uyap-ispanel .ip-arac-ad { font-size: 15px; }
+html.cu-mobil #uyap-ispanel .ip-arac-not { font-size: 12.5px; }
+
+/* ══ 5) DOSYA PENCERESİ (telefon) ══
+   UYAP'ın kartı her zaman tam ekran (kartlar.js); "önceki boyut" düğmesi gizli. Başlık tek satır düzeninde:
+   solda iki satıra kadar dosya adı, sağda simge düğmeler (İşler · Evrak İndir · küçült · kapat), hepsi 38 px. */
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title { padding: 6px 6px 6px 10px !important; min-height: 0 !important; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title > .d-flex { flex-wrap: nowrap !important; gap: 6px; padding-right: 0 !important; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title h4 {
+    flex: 1 1 auto; min-width: 0; font-size: 14px !important; line-height: 1.25 !important;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title .ms-auto { flex: none; display: flex; align-items: center; gap: 5px; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title .ms-auto > .dx-button {
+    position: relative; margin: 0 !important; min-width: 38px; height: 38px; overflow: visible; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title .ms-auto > .dx-button .dx-button-content { padding: 0 8px; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title .ms-auto > .dx-button .dx-icon { font-size: 17px; margin: 0; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-cu-tam] { display: none !important; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-isata] .dx-button-content > span:not(.dx-icon):not([data-rozet]),
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-tumevrak] [data-metin] { display: none; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-isata] [data-rozet],
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-tumevrak][data-cu-say]:not([data-cu-say=""])::after {
+    position: absolute; top: -6px; right: -5px; margin: 0 !important; min-width: 18px; padding: 0 5px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; line-height: 18px; text-align: center; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-title [data-tumevrak][data-cu-say]:not([data-cu-say=""])::after {
+    content: attr(data-cu-say); background: #059669; color: #fff; }
+/* Sekmeler: sabit 140 px yerine yazısı kadar; 42 px boyunda. İçerik kenarlara yakın. */
+html.cu-mobil .dosya-sorgula-popup .dx-tabs .dx-tab {
+    flex: 0 0 auto !important; width: auto !important; min-width: 0 !important; max-width: none !important; padding: 0 14px !important; height: 42px; }
+html.cu-mobil .dosya-sorgula-popup .dx-tabs .dx-tab .dx-tab-text-span { overflow: visible; }
+html.cu-mobil .dosya-sorgula-popup .dx-tabs .dx-tabs-nav-button { min-width: 30px; height: 42px; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-content { padding: 0 !important; }
+html.cu-mobil .dosya-sorgula-popup .dx-popup-content > div > .d-flex.flex-column { padding: 0 2px; }
+html.cu-mobil .dosya-sorgula-popup .uyap-is-uyari { flex-wrap: wrap; margin: 6px 6px 2px; padding: 8px 10px; }
+html.cu-mobil .dosya-sorgula-popup .uyap-is-uyari-kucuk { padding: 5px 11px; font-size: 12px; }
+html.cu-mobil .dosya-sorgula-popup .uyap-is-uyari-dugme { padding: 9px 14px; }
+
+/* ══ 6) EVRAK SEKMESİ: TEK BÖLME (telefon) ══
+   UYAP listeyi (%25) ve belgeyi (%75) yan yana bölüyor; 390 px'te liste 94 px, belge 275 px kalıyordu. Telefonda
+   aynı anda biri görünür: data-cu-me="liste" → belge listesi tam genişlik; "belge" → görüntüleyici tam genişlik,
+   sekme şeridinin yerinde "‹ Belgeler" çubuğu (mobil.js). İkisi de UYAP'ın kendi bileşeni; yalnız yerleşim. */
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .dx-splitter > .dx-resize-handle { display: none !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .dx-splitter > .dx-splitter-item {
+    flex: 1 1 100% !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me="liste"] .dx-splitter > .cu-me-gor,
+html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .dx-splitter > .cu-me-liste { display: none !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .dx-tabpanel-tabs,
+html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .uyap-is-uyari { display: none !important; }
+.cu-me-cubuk { display: none; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .cu-me-cubuk {
+    flex: none; display: flex; align-items: center; gap: 6px; height: 42px; padding: 0 6px;
+    background: var(--cu-t-serit, #f5f6f8); border-bottom: 1px solid var(--cu-t-kenar, #dcdfe4);
+    font: 14px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: var(--cu-t-yazi, #212529); }
+html[data-theme="dark"].cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .cu-me-cubuk {
+    background: rgba(255, 255, 255, 0.06); border-bottom-color: rgba(255, 255, 255, 0.12); color: #e5e7eb; }
+.cu-me-cubuk button {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 34px; min-width: 38px;
+    padding: 0 10px; border: 1px solid var(--cu-vurgu-kenar, #9fb0e3); border-radius: 8px; background: var(--cu-vurgu-zemin, #e8ecf8);
+    color: var(--cu-vurgu-yazi, #1f2f70); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.cu-me-cubuk button:active { background: var(--cu-vurgu-kenar, #9fb0e3); }
+.cu-me-cubuk button:disabled { opacity: .4; }
+.cu-me-cubuk button svg { width: 16px; height: 16px; display: block; }
+.cu-me-cubuk .cu-me-ad { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+html[data-theme="dark"] .cu-me-cubuk button { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.2); color: #e5e7eb; }
+/* Belge listesi tam genişlikte: satırlar 46 px, yazı 14 px, işaret kutusu parmağa göre */
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-list-area { border-right: 0 !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-treeview .dx-treeview-item { min-height: 46px; align-items: center; font-size: 14px; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-treeview .dx-treeview-item-content { font-size: 14px; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-treeview input[data-tumevrak-sec] { flex: none; width: 20px; height: 20px; margin: 0 10px 0 4px !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-treeview .dx-treeview-toggle-item-visibility { min-width: 34px; min-height: 34px; }
+/* Liste başındaki önceki / sonraki belge düğmeleri: telefonda belge çubuğunda (‹ ›) dururlar; listede yer
+   kaplamasınlar (gizliyken de çalışırlar: mobil.js onlara tıklar). */
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-list-area .d-flex:has(> .evrak-list--button) { display: none !important; }
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .evrak-list-area > .d-flex > div:not([class]) > .d-flex:first-child { padding-top: 8px !important; }
+/* UYAP'ın e-imza kurdelesi (body'ye eklenen sabit konumlu rozet) belge görünmüyorken (liste, başka sekme)
+   ekranda asılı kalıyordu (canlı, 2026-11-11): kart açıkken yalnız belge görünümünde gösterilir. */
+html.cu-mobil body:has(.dosya-sorgula-popup):not(:has(.dosya-sorgula-popup[data-cu-me="belge"])) > .signature-ribbon { display: none !important; }
+/* Fare yok: "+ İş" seçili belgenin satırında görünür (masaüstünde üstüne gelince çıkıyordu). */
+html.cu-mobil .dosya-sorgula-popup .dx-treeview-node.dx-state-selected > .dx-treeview-item > .uyap-belge-is.bos { display: inline-block; }
+html.cu-mobil .dosya-sorgula-popup .dx-treeview-node.dx-state-selected > .dx-treeview-item:has(> .uyap-belge-is.bos) .evrak-list--item > .w-100 { padding-right: 56px; }
+html.cu-mobil .dosya-sorgula-popup .uyap-belge-is { padding: 4px 11px; font-size: 12px; }
+/* Görüntüleyici: araç çubuğu düğmeleri biraz büyük; yatık telefonda dosya başlığı gizlenir (belgeye yer açılır). */
+html.cu-mobil .dosya-sorgula-popup[data-cu-me] .ude-document-viewer-toolbar .udv-btn { min-width: 34px; min-height: 34px; }
+@media (max-height: 520px) and (orientation: landscape) {
+    html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .dx-popup-title { display: none !important; }
+    /* DevExtreme içeriğe "pencere − başlık" yüksekliğini satır içi yazar; başlık gizlenince içerik pencereyi doldursun. */
+    html.cu-mobil .dosya-sorgula-popup[data-cu-me="belge"] .dx-popup-content { height: 100% !important; }
+}
+
+/* ══ 6b) DOSYA PENCERESİ SEKMELERİ: SOL ALTTA YUVARLAK DÜĞME (telefon) ══
+   UYAP'ın yatay sekme şeridi gizlenir; kartın sol altında temanın marka renginde yuvarlak düğme (mobil.js §2b).
+   Dokununca sekmeler yukarı doğru yuvarlak düğmeler olarak açılır, adları solda etiket; seçili sekme vurgulu.
+   Arkası hafif kararır, dokununca kapanır. Yalnız ana sekme paneli (.cu-sk-tp); alt paneller dokunulmaz. */
+html.cu-mobil .dosya-sorgula-popup .cu-sk-tp > .dx-tabpanel-tabs { display: none !important; }
+.cu-sk { display: none; }
+html.cu-mobil .dosya-sorgula-popup .cu-sk {
+    display: block; position: absolute; inset: 0; z-index: 30; pointer-events: none;
+    font: 14px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+.cu-sk-perde {
+    position: absolute; inset: 0; background: rgba(0, 0, 0, 0.38); opacity: 0; transition: opacity .16s; pointer-events: none; }
+.cu-sk.acik .cu-sk-perde { opacity: 1; pointer-events: auto; }
+.cu-sk-ana {
+    position: absolute; left: 14px; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); width: 54px; height: 54px;
+    display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%;
+    background: linear-gradient(var(--cu-marka-ust, #3247a8), var(--cu-marka-alt, #24377f)); color: var(--cu-cubuk-yazi, #fff);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.22); cursor: pointer; pointer-events: auto;
+    -webkit-tap-highlight-color: transparent; }
+.cu-sk-ana:active { background: var(--cu-marka-basili, #1f2f70); }
+.cu-sk-ana svg { width: 24px; height: 24px; display: block; transition: transform .18s, opacity .18s; }
+.cu-sk-ana svg + svg { position: absolute; opacity: 0; transform: rotate(-90deg); }
+.cu-sk.acik .cu-sk-ana svg:first-child { opacity: 0; transform: rotate(90deg); }
+.cu-sk.acik .cu-sk-ana svg + svg { opacity: 1; transform: none; }
+.cu-sk-liste {
+    position: absolute; left: 14px; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); max-height: calc(100% - 100px);
+    display: flex; flex-direction: column; align-items: flex-start; gap: 10px; overflow-y: auto; padding: 4px 4px 4px 3px;
+    pointer-events: none; }
+.cu-sk-madde {
+    display: flex; flex-direction: row-reverse; align-items: center; gap: 10px; padding: 0; border: 0; background: none;
+    cursor: pointer; opacity: 0; transform: translateY(14px) scale(.85); transform-origin: left bottom;
+    transition: opacity .16s, transform .16s; transition-delay: calc(var(--cu-sk-i, 0) * 22ms); -webkit-tap-highlight-color: transparent; }
+.cu-sk.acik .cu-sk-liste, .cu-sk.acik .cu-sk-madde { pointer-events: auto; }
+.cu-sk.acik .cu-sk-madde { opacity: 1; transform: none; }
+.cu-sk-yuv {
+    flex: none; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; border-radius: 50%;
+    background: rgb(var(--cu-panel-rgb, 17, 22, 40)); color: var(--cu-panel-yazi, #eef2ff);
+    border: 2px solid var(--cu-marka-ust-acik, #4157c4); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+.cu-sk-yuv svg { width: 22px; height: 22px; display: block; }
+.cu-sk-yuv b { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
+.cu-sk-ad {
+    padding: 7px 12px; border-radius: 999px; background: rgba(var(--cu-panel-rgb, 17, 22, 40), 0.94); color: var(--cu-panel-yazi, #eef2ff);
+    font-weight: 600; white-space: nowrap; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25); }
+.cu-sk-madde.secili .cu-sk-yuv {
+    background: linear-gradient(var(--cu-marka-ust, #3247a8), var(--cu-marka-alt, #24377f)); border-color: var(--cu-cubuk-vurgu, #3a55b5);
+    color: var(--cu-cubuk-yazi, #fff);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18), 0 4px 12px rgba(0, 0, 0, 0.3); }
+.cu-sk-madde.secili .cu-sk-ad { background: var(--cu-marka-alt, #24377f); color: var(--cu-cubuk-yazi, #fff); }
+/* Güneş (sarı): koyu kahverengi panel üstünde koyu yazı okunmuyordu (kullanıcı bildirimi 2026-11-14).
+   Sarı temada sekme düğmeleri açık yüzey + koyu yazı; seçili olan marka sarısında. */
+html[data-cu-tema="gunes"] .cu-sk-yuv,
+html[data-cu-tema="gunes"] .cu-sk-ad {
+    background: var(--cu-t-yuzey, #fffdf3) !important; color: var(--cu-t-yazi, #3d3418) !important;
+    border-color: var(--cu-vurgu-kenar, #f5d77a) !important; }
+html[data-cu-tema="gunes"] .cu-sk-madde.secili .cu-sk-yuv,
+html[data-cu-tema="gunes"] .cu-sk-madde.secili .cu-sk-ad {
+    background: var(--cu-marka-alt, #f7c948) !important; color: var(--cu-cubuk-yazi, #3b2f0b) !important; }
+.cu-sk-madde:active .cu-sk-yuv { transform: scale(.94); }
+/* Belge listesinin son satırları düğmenin altında kalmasın */
+html.cu-mobil .dosya-sorgula-popup:not([data-cu-me="belge"]) .cu-sk-tp .dx-multiview-item-content:not(.cu-sk-tp .dx-tabpanel .dx-multiview-item-content) {
+    padding-bottom: 76px; box-sizing: border-box; }
+
+/* ══ 7) ANA SAYFA KONSOLU ══
+   Dar ekranda UYAP banner zeminini (.dash-back) gizler; içerik alanının 16 px üst boşluğu üst çubukla konsol
+   arasında açık renkli bir şerit bırakıyordu. */
+html.cu-dar body.cu-ana #contentArea { padding-top: 0 !important; }
+html.cu-mobil body.cu-ana .search-area { padding: 12px 12px 10px !important; }
+html.cu-mobil body.cu-ana .cu-ana-sat { gap: 8px; margin-top: 10px; }
+html.cu-mobil body.cu-ana .cu-ana-grup { gap: 6px; }
+html.cu-mobil body.cu-ana .cu-ana-cip { padding: 6px 13px; border-radius: 16px; font-size: 13px; }
+html.cu-mobil body.cu-ana :is(.cu-ana-sec, .cu-ana-girdi) { height: 44px; padding: 6px 10px; border-radius: 9px; font-size: 16px; }
+/* Üç satır: [yargı türü | yargı birimi]  [mahkeme | açık-kapalı]  [dosya no | Sorgula] */
+html.cu-mobil body.cu-ana .cu-ana-sec.tur { flex: 1 1 124px; }
+html.cu-mobil body.cu-ana .cu-ana-sec.birim { flex: 1.6 1 170px; }
+html.cu-mobil body.cu-ana .cu-ana-mah { flex: 1 1 180px; min-width: 0; }
+html.cu-mobil body.cu-ana .cu-ana-sec.durum { flex: 0 0 104px; width: 104px; }
+html.cu-mobil body.cu-ana .cu-ana-no { flex: 1 1 0 !important; width: auto !important; min-width: 0; }
+html.cu-mobil body.cu-ana .cu-ana-dugme { height: 44px; padding: 0 20px; border-radius: 9px; font-size: 15px; }
+html.cu-mobil body.cu-ana .cu-ana-liste { top: 46px; max-height: 46vh; }
+html.cu-mobil body.cu-ana .cu-ana-liste div { padding: 11px 12px; font-size: 14.5px; }
+html.cu-mobil body.cu-ana .container.mt-5 { margin-top: 10px !important; padding-left: 4px; padding-right: 4px; }
+html.cu-mobil .uyap-bildirim-is { padding: 4px 11px; font-size: 12px; }
+
+/* ══ 8) UYAP SAYFALARI (telefon): iç içe kenar boşlukları ══
+   UYAP'ın sayfa iskeleti (#contentArea → .white-content → .col → .container → kart) telefonda her katmanda
+   12-20 px yiyor; 390 px'lik ekranda form kartına 269 px kalıyordu (canlı ölçüm, Dosya Sorgulama). */
+html.cu-mobil #contentArea { padding-left: 6px !important; padding-right: 6px !important; }
+html.cu-mobil #contentArea .white-content { padding-left: 4px !important; padding-right: 4px !important; }
+html.cu-mobil #contentArea .white-content > [class*="col-"] { padding-left: 6px !important; padding-right: 6px !important; }
+html.cu-mobil #contentArea .white-content .container { max-width: none !important; padding-left: 0 !important; padding-right: 0 !important; }
+html.cu-mobil #contentArea .white-content .container > [class*="col-"] { padding-left: 2px !important; padding-right: 2px !important; }
+html.cu-mobil #contentArea .layout-page-header .page-header-subtitle { font-size: 19px; }
+
+/* ══ 9) PENCERELER, MENÜLER, BİLDİRİMLER (telefon) ══ */
+/* İş Ata: alttan açılan yaprak, tam genişlik */
+html.cu-mobil #uyap-isata-ort { padding: 0 !important; align-items: flex-end !important; }
+html.cu-mobil #uyap-isata {
+    width: 100vw !important; max-height: calc(100% - 28px) !important; box-sizing: border-box; border-radius: 16px 16px 0 0 !important;
+    border-width: 1px 0 0 !important; padding: 16px 16px calc(18px + env(safe-area-inset-bottom, 0px)) !important; font-size: 14px !important; }
+html.cu-mobil #uyap-isata > div:first-child > span { font-size: 30px !important; line-height: 1; padding: 0 8px !important; }
+html.cu-mobil #uyap-isata :is(input, textarea, select) { padding: 10px !important; font-size: 16px !important; border-radius: 9px !important; }
+html.cu-mobil #uyap-isata .ia-cip { margin: 6px 6px 0 0; padding: 7px 13px; font-size: 13px; }
+html.cu-mobil #uyap-isata button:not(.ia-cip):not(.ia-link) { padding: 11px 16px !important; font-size: 14px !important; }
+html.cu-mobil #uyap-isata :is(.ia-not, .ia-link) { font-size: 12.5px; }
+/* Sağ tık (telefonda uzun basış) menüsü */
+html.cu-mobil #uyap-sagmenu { min-width: 230px !important; max-width: calc(100vw - 16px) !important; font-size: 15px !important; }
+html.cu-mobil #uyap-sagmenu .uyap-sagmenu-madde { padding: 13px 16px; }
+html.cu-mobil #uyap-sagmenu .uyap-sagmenu-not { display: none; }
+/* Tema / mavi ışık menüleri (tema menüsü kısa ekranda kendi içinde kayar: tema.js menuAc) */
+html.cu-mobil #cu-tema-menu .tema { padding: 10px 8px; }
+html.cu-mobil #cu-mavi-menu button { min-width: 44px; height: 40px; }
+/* Evrak indirme ve Gerekçeli Kararlar panelleri: ekrana sığar, görev çubuğunun üstünde biter */
+html.cu-mobil :is(#uyap-tumevrak-panel, #uyap-gerekceli-panel) {
+    top: 66px !important; left: 8px !important; right: 8px !important; width: auto !important; max-width: none !important;
+    max-height: calc(100% - 66px - var(--cu-cubuk-yuk, 52px) - 8px) !important; box-sizing: border-box; font-size: 13.5px !important; }
+html.cu-mobil :is(#uyap-tumevrak-panel, #uyap-gerekceli-panel) button { min-height: 38px; }
+html.cu-mobil :is(#uyap-tumevrak-panel, #uyap-gerekceli-panel) input:is([type="radio"], [type="checkbox"]) { width: 18px; height: 18px; }
+html.cu-mobil :is(#uyap-tumevrak-panel, #uyap-gerekceli-panel) label { padding: 5px 0; }
+/* E-imza kutusu ve kısa bildirimler görev çubuğunun üstünde */
+html.cu-mobil #uyap-eimza-root { right: 10px !important; bottom: calc(var(--cu-cubuk-yuk, 52px) + 10px) !important; }
+html.cu-mobil #uyap-toast-container { left: 10px !important; right: 10px !important; bottom: calc(var(--cu-cubuk-yuk, 52px) + 10px) !important; }
+html.cu-mobil .uyap-kisa-bildirim { bottom: calc(var(--cu-cubuk-yuk, 52px) + 14px) !important; max-width: calc(100vw - 24px); font-size: 14px !important; padding: 9px 16px !important; }
+html.cu-mobil #uyap-acma-uyarisi { left: 10px !important; right: 10px !important; max-width: none !important; bottom: calc(var(--cu-cubuk-yuk, 52px) + 10px) !important; font-size: 13.5px !important; }
+
+/* ══ 10) YAZI ALANLARI (telefon) ══
+   iOS, yazı boyutu 16 px'ten küçük bir alana dokununca sayfayı kendiliğinden yakınlaştırır (ve öyle bırakır).
+   Dokunmatik dar ekranda bütün yazı alanları 16 px. */
+@media (pointer: coarse) {
+    html.cu-mobil :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea, .dx-texteditor-input) { font-size: 16px !important; }
+}

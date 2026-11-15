@@ -1,0 +1,5 @@
+# Derleme çıktıları ve yerel araç kalıntıları
+/target/
+*.exe
+/.rust-review-results/
+/.rr-kapsam/
