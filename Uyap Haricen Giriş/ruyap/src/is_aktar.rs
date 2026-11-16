@@ -588,7 +588,36 @@ fn arsivle(d: &Value) -> Result<PathBuf, String> {
     Ok(yol)
 }
 
+/// `--bulutu-kapat`: taşıma bittikten sonra büronun bulut İş Listesi'ni salt okunur yapar (bildirimler de durur).
+/// Veri silinmez.
+fn bulutu_kapat() -> Result<(), String> {
+    let b = buluta_baglan()?;
+    let r = b
+        .istemci
+        .post(format!("{}/is-listesi/api/tasindi", b.base))
+        .bearer_auth(&b.jeton)
+        .json(&json!({}))
+        .send()
+        .map_err(|e| format!("buluta ulaşılamadı: {e}"))?;
+    let durum = r.status();
+    let d: Value = r.json().unwrap_or(Value::Null);
+    if !durum.is_success() || d["ok"] != json!(true) {
+        return Err(d["error"].as_str().map(String::from).unwrap_or_else(|| format!("HTTP {durum}")));
+    }
+    println!("Bulut İş Listesi kapatıldı (büro: {}): salt okunur, bildirim gitmez. Veri silinmedi.", d["office_id"].as_str().unwrap_or(""));
+    Ok(())
+}
+
 pub fn komut(argv: &[String]) -> i32 {
+    if argv.iter().any(|a| a == "--bulutu-kapat") {
+        return match bulutu_kapat() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("BULUT KAPATILAMADI: {e}");
+                2
+            }
+        };
+    }
     let deneme = argv.iter().any(|a| a == "--deneme");
     let dosya = argv.iter().position(|a| a == "--dosya").and_then(|i| argv.get(i + 1)).cloned();
     match calistir(deneme, dosya) {
