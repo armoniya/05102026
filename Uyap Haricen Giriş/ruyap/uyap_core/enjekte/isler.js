@@ -132,6 +132,10 @@
             '#cu-isler .chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap;margin:2px 4px 0 0;',
             'background:color-mix(in srgb,var(--r,#8a877e) 16%,var(--i-yuzey));color:color-mix(in srgb,var(--r,#8a877e) 80%,var(--i-yazi))}',
             '#cu-isler .gec{color:#b84444;font-weight:600}',
+            '#cu-isler .e-suz{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:-4px 0 12px}',
+            '#cu-isler .e-cip{border:1px solid var(--i-kenar);background:var(--i-yuzey);border-radius:999px;padding:3px 11px;font-size:12.5px;cursor:pointer;white-space:nowrap;color:inherit}',
+            '#cu-isler .e-cip.sec{background:color-mix(in srgb,var(--r,#8a877e) 22%,var(--i-yuzey));border-color:color-mix(in srgb,var(--r,#8a877e) 60%,var(--i-kenar));font-weight:600}',
+            '#cu-isler .e-suz select{padding:3px 8px;font-size:12.5px;border-radius:999px}',
             '#cu-isler .i-bilgi{background:var(--i-yuzey);border:1px dashed var(--i-kenar);border-radius:12px;padding:22px;color:var(--i-soluk);text-align:center}',
             '#cu-isler .i-hata{background:color-mix(in srgb,#b84444 12%,var(--i-yuzey));color:color-mix(in srgb,#b84444 80%,var(--i-yazi));border-radius:10px;padding:9px 13px;margin-bottom:12px}',
             '#cu-isler .i-panel{width:480px;max-width:100%;background:var(--i-yuzey);border-left:1px solid var(--i-kenar);display:flex;flex-direction:column;box-shadow:-10px 0 24px rgba(0,0,0,.06)}',
@@ -179,7 +183,7 @@
     // ── Durum ──
     const d = {
         sekme: 'bugun', ben: null, bugun: isoGun(new Date()), kisiler: [], sablonlar: [], sabitler: null, ozet: null,
-        filtre: { ara: '', durum: 'acik', sorumlu: '', tur: '' }, takvimAy: null, herkes: false,
+        filtre: { ara: '', durum: 'acik', sorumlu: '', tur: '', etiket: '' }, takvimAy: null, herkes: false, etiketler: [],
         secili: null, panel: null, oneri: null, hata: '', kimlikYok: false,
         dosyaSuzgec: null,   // {dosya_no, birim_adi}: dosya kartından "İşleri göster"
         donus: null          // dosya kartı anahtarı: iş açılınca / vazgeçilince o karta dönülür
@@ -339,6 +343,7 @@
         try {
             const b = await istek('ben');
             d.ben = b.ben; d.bugun = b.bugun; d.kisiler = b.kisiler; d.sablonlar = b.sablonlar; d.sabitler = b.sabitler; d.ozet = b.ozet;
+            d.etiketler = b.etiketler || [];
             d.filtre.sorumlu = '';
             ciz();
             yukle();
@@ -360,11 +365,56 @@
                 const durum = f.durum === 'acik' ? 'acik,devam,onayda' : f.durum === 'kapali' ? 'tamamlandi,iptal' : '';
                 const q = new URLSearchParams({ gorunum: 'tum', ara: f.ara, durum: durum, sorumlu: f.sorumlu, tur: f.tur, sinir: '300' });
                 if (d.dosyaSuzgec) { q.set('dosya_no', d.dosyaSuzgec.dosya_no); if (d.dosyaSuzgec.birim_adi) q.set('birim_adi', d.dosyaSuzgec.birim_adi); }
+                if (f.etiket) q.set('etiket', f.etiket);
                 listeCiz(await istek('liste?' + q.toString()), 'tum');
             } else if (d.sekme === 'takvim') takvimCiz();
             else if (d.sekme === 'rutin') rutinCiz(await istek('tekrarlar'));
             else sablonCiz(await istek('sablonlar'));
         } catch (x) { hataGoster(x); }
+    }
+
+    // ── Etiketler: 'is-' anahtarlılar (UYAP İşi, Adliye İşi, Müvekkil Görüşme, Borçlu Araması) öne çıkar ──
+    function onEtiketler() { return d.etiketler.filter(function(t) { return /^is-/.test(t.anahtar || ''); }); }
+    function digerEtiketler() { return d.etiketler.filter(function(t) { return !/^is-/.test(t.anahtar || ''); }); }
+    function etiketBul(id) { return d.etiketler.find(function(t) { return t.id === id; }); }
+    function etiketCipleri(ids) {
+        return (ids || []).map(etiketBul).filter(Boolean).map(function(t) { return e('span', { sinif: 'chip', stil: '--r:' + (t.renk || '#6f7d95'), metin: t.ad }); });
+    }
+    // Süzgeç satırı: Hepsi + öne çıkan etiketler + "Diğer etiket" seçimi.
+    function etiketSuzgeci() {
+        const f = d.filtre;
+        const sec = function(id) { f.etiket = String(f.etiket) === String(id) ? '' : String(id); yukle(); };
+        const cipler = [e('button', { sinif: 'e-cip' + (f.etiket ? '' : ' sec'), metin: 'Hepsi', onclick: function() { f.etiket = ''; yukle(); } })];
+        onEtiketler().forEach(function(t) {
+            cipler.push(e('button', { sinif: 'e-cip' + (String(f.etiket) === String(t.id) ? ' sec' : ''), stil: '--r:' + (t.renk || '#6f7d95'), metin: t.ad, onclick: function() { sec(t.id); } }));
+        });
+        const diger = digerEtiketler();
+        if (diger.length) {
+            const digerSecili = diger.some(function(t) { return String(t.id) === String(f.etiket); });
+            const s0 = e('select', { onchange: function() { f.etiket = s0.value; yukle(); } },
+                [secenek('', 'Diğer etiket…', digerSecili ? f.etiket : '')].concat(diger.map(function(t) { return secenek(t.id, t.ad, digerSecili ? f.etiket : ''); })));
+            cipler.push(s0);
+        }
+        return e('div', { sinif: 'e-suz' }, cipler);
+    }
+    // Formda etiket seçimi (çoklu): öne çıkanlar çip, diğerleri "+ diğer" ile açılır. .deger() → [id]
+    function etiketSecici(secili) {
+        const set = new Set((secili || []).map(Number));
+        const kutu = e('div', { sinif: 'e-suz', stil: 'margin:0' });
+        let digerAcik = (secili || []).some(function(id) { const t = etiketBul(id); return t && !/^is-/.test(t.anahtar || ''); });
+        function ciz() {
+            bos(kutu);
+            const goster = onEtiketler().concat(digerAcik ? digerEtiketler() : []);
+            goster.forEach(function(t) {
+                kutu.appendChild(e('button', { type: 'button', sinif: 'e-cip' + (set.has(t.id) ? ' sec' : ''), stil: '--r:' + (t.renk || '#6f7d95'), metin: t.ad,
+                    onclick: function() { if (set.has(t.id)) set.delete(t.id); else set.add(t.id); ciz(); } }));
+            });
+            if (!digerAcik && digerEtiketler().length) kutu.appendChild(e('button', { type: 'button', sinif: 'e-cip', metin: '+ diğer', onclick: function() { digerAcik = true; ciz(); } }));
+        }
+        ciz();
+        kutu.deger = function() { return Array.from(set); };
+        kutu.ayarla = function(ids) { set.clear(); (ids || []).forEach(function(x) { set.add(Number(x)); }); ciz(); };
+        return kutu;
     }
 
     function isSatiri(g) {
@@ -375,6 +425,7 @@
         if (g.erteleme_bekliyor) chipler.push(e('span', { sinif: 'chip', stil: '--r:#c06a2f', metin: 'Erteleme bekliyor' }));
         if (g.onay_gerekir && g.durum !== 'onayda' && g.durum !== 'tamamlandi') chipler.push(e('span', { sinif: 'chip', metin: 'Onaylı iş' }));
         if (g.gizli) chipler.push(e('span', { sinif: 'chip', metin: 'Gizli' }));
+        etiketCipleri(g.etiketler).forEach(function(c) { chipler.push(c); });
         const dosya = [g.birim_adi, g.dosya_no].filter(Boolean).join(' ');
         return e('div', { sinif: 'is' + (d.secili === g.id ? ' sec' : ''), onclick: function() { isAc(g.id); } }, [
             e('div', { sinif: 'oncelik p' + g.oncelik, title: ['Düşük', 'Normal', 'Yüksek'][g.oncelik] + ' öncelik' }),
@@ -390,6 +441,7 @@
     }
 
     function listeCiz(liste, tur) {
+        if (d.filtre.etiket) { const et = Number(d.filtre.etiket); liste = liste.filter(function(g) { return (g.etiketler || []).indexOf(et) >= 0; }); }
         bos(govde);
         const ana = e('div', { sinif: 'i-ana' });
         govde.appendChild(ana);
@@ -411,10 +463,14 @@
             const turSec = e('select', { onchange: function() { f.tur = turSec.value; yukle(); } },
                 [secenek('', 'Her tür', f.tur)].concat(((d.sabitler && d.sabitler.turler) || []).map(function(t) { return secenek(t.kod, t.ad, f.tur); })));
             ana.appendChild(e('div', { sinif: 'i-arac' }, [ara, durum, kisi, turSec]));
-            if (f.ara && document.activeElement !== ara) setTimeout(function() { ara.focus(); ara.setSelectionRange(ara.value.length, ara.value.length); }, 0);
+        }
+        if ((tur === 'tum' || tur === 'bugun' || tur === 'onay') && d.etiketler.length) ana.appendChild(etiketSuzgeci());
+        if (tur === 'tum') {
+            const f = d.filtre, ara = ana.querySelector('input[type=search]');
+            if (f.ara && ara && document.activeElement !== ara) setTimeout(function() { ara.focus(); ara.setSelectionRange(ara.value.length, ara.value.length); }, 0);
         }
         if (!liste.length) {
-            ana.appendChild(e('div', { sinif: 'i-bilgi', metin: tur === 'bugun' ? 'Bugün için işiniz yok. 🎉' : tur === 'onay' ? 'Onay bekleyen iş yok.' : 'Bu ölçütlere uyan iş yok.' }));
+            ana.appendChild(e('div', { sinif: 'i-bilgi', metin: d.filtre.etiket ? 'Bu etikette iş yok.' : tur === 'bugun' ? 'Bugün için işiniz yok. 🎉' : tur === 'onay' ? 'Onay bekleyen iş yok.' : 'Bu ölçütlere uyan iş yok.' }));
         } else if (tur === 'bugun') {
             const gecen = liste.filter(function(g) { return g.gecikti; }), bugun = liste.filter(function(g) { return !g.gecikti; });
             if (gecen.length) { ana.appendChild(e('div', { sinif: 'bolum', metin: 'Gecikmiş (' + gecen.length + ')' })); gecen.forEach(function(g) { ana.appendChild(isSatiri(g)); }); }
@@ -639,12 +695,38 @@
         const onay = e('input', { type: 'checkbox' }); onay.checked = !!on.onay_gerekir;
         const oncelik = e('select', {}, [secenek(0, 'Düşük', 1), secenek(1, 'Normal', 1), secenek(2, 'Yüksek', 1)]);
         const gizli = e('input', { type: 'checkbox' });
+        const etiket = etiketSecici(on.etiketler || []);
         const ipucu = e('div', { sinif: 'alt tam' });
+        // Şablonu olmayan bir iş yazılınca: formdaki başlık/açıklama/tür/onay/öncelik/süre/etiketler büroya şablon olur.
+        const sablonYap = e('button', { type: 'button', sinif: 'i-d kucuk', stil: 'display:none;justify-self:start', metin: '☆ Bu işi şablon olarak kaydet',
+            title: 'Büronun şablonlarına eklenir; düzenlemek için Şablonlar sekmesi', onclick: async function() {
+                const ad = baslik.value.trim();
+                if (!ad) { bildir('Şablon için başlık yazın.'); return; }
+                const gun = tarih.value ? Math.max(0, Math.round((gunAl(tarih.value) - gunAl(d.bugun)) / 86400000)) : 1;
+                try {
+                    const v = await istek('sablon', { baslik: ad, aciklama: aciklama.value, tur: tur.value, onay_gerekir: onay.checked,
+                        oncelik: Number(oncelik.value), sure_turu: 'takvim_gunu', sure_deger: gun, etiketler: etiket.deger() });
+                    d.sablonlar = await istek('sablonlar');
+                    sablon.appendChild(secenek(v.id, ad, v.id));
+                    sablon.value = String(v.id);
+                    baslik.dataset.sablondan = '1';
+                    sablonYapGoster();
+                    bildir('Şablon kaydedildi: ' + ad);
+                } catch (x) { bildir(x.message); }
+            } });
+        function sablonYapGoster() {
+            const ad = baslik.value.trim().toLocaleLowerCase('tr');
+            const var_ = d.sablonlar.some(function(x) { return x.baslik.toLocaleLowerCase('tr') === ad; });
+            sablonYap.style.display = ad && !var_ ? '' : 'none';
+        }
+        baslik.addEventListener('input', sablonYapGoster);
         function sablonaUy() {
             const s = d.sablonlar.find(function(x) { return String(x.id) === sablon.value; });
             if (!s) { ipucu.textContent = 'Son tarih boşsa bugün sayılmaz; tarih seçin.'; return; }
             if (!baslik.value || baslik.dataset.sablondan) { baslik.value = s.baslik; baslik.dataset.sablondan = '1'; }
             onay.checked = s.onay_gerekir;
+            if ((s.etiketler || []).length && !etiket.deger().length) etiket.ayarla(s.etiketler);
+            sablonYapGoster();
             ipucu.textContent = 'Son tarihi boş bırakırsanız şablona göre hesaplanır' + (s.sure_metni ? ' (' + s.sure_metni + ')' : '') + '.';
         }
         sablon.addEventListener('change', sablonaUy);
@@ -654,6 +736,8 @@
         panelAc('Yeni iş', [e('div', { sinif: 'form' }, [
             dosyaBilgi,
             e('label', { sinif: 'b', metin: 'Şablon' }), sablon, e('label', { sinif: 'b', metin: 'Başlık' }), baslik,
+            e('span'), sablonYap,
+            e('label', { sinif: 'b', metin: 'Etiket' }), etiket,
             e('label', { sinif: 'b', metin: 'Açıklama' }), aciklama, e('label', { sinif: 'b', metin: 'Tür' }), tur,
             e('label', { sinif: 'b', metin: 'Son tarih' }), e('div', { stil: 'display:flex;gap:8px' }, [tarih, saat]), ipucu,
             e('label', { sinif: 'b', metin: 'Yer' }), yer,
@@ -666,7 +750,7 @@
                     const v = await istek('ac', Object.assign({}, on.dosya || {}, {
                         baslik: baslik.value, aciklama: aciklama.value, tur: tur.value, son_tarih: tarih.value, son_saat: saat.value, yer: yer.value,
                         sorumlu_id: Number(sorumlu.value), onay_gerekir: onay.checked, oncelik: Number(oncelik.value), gizli: gizli.checked,
-                        sablon_id: sablon.value ? Number(sablon.value) : null, ust_gorev_id: on.ust_gorev_id || null }));
+                        sablon_id: sablon.value ? Number(sablon.value) : null, ust_gorev_id: on.ust_gorev_id || null, etiketler: etiket.deger() }));
                     bildir(onay.checked ? 'İş açıldı; tamamlanınca onaya gidecek.' : 'İş açıldı.');
                     yukle(); ozetTazele();
                     if (kartaDon()) return;
@@ -842,12 +926,14 @@
             const sorumlu = e('select', { disabled: !y.yonetebilir }, d.kisiler.map(function(k) { return secenek(k.id, k.ad, g.sorumlu_id); }));
             const oncelik = e('select', {}, [secenek(0, 'Düşük', g.oncelik), secenek(1, 'Normal', g.oncelik), secenek(2, 'Yüksek', g.oncelik)]);
             const onay = e('input', { type: 'checkbox', disabled: !y.yonetebilir }); onay.checked = g.onay_gerekir;
-            dz.appendChild(e('div', { sinif: 'form' }, [e('label', { sinif: 'b', metin: 'Başlık' }), baslik, e('label', { sinif: 'b', metin: 'Açıklama' }), aciklama,
+            const etiket = etiketSecici(g.etiketler || []);
+            dz.appendChild(e('div', { sinif: 'form' }, [e('label', { sinif: 'b', metin: 'Başlık' }), baslik, e('label', { sinif: 'b', metin: 'Etiket' }), etiket,
+                e('label', { sinif: 'b', metin: 'Açıklama' }), aciklama,
                 e('label', { sinif: 'b', metin: 'Son tarih' }), e('div', { stil: 'display:flex;gap:8px' }, [tarih, saat]),
                 e('label', { sinif: 'b', metin: 'Sorumlu' }), sorumlu, e('label', { sinif: 'b', metin: 'Öncelik' }), oncelik,
                 e('span'), e('label', { sinif: 'i-onay' }, [onay, 'Onay gerekir']),
                 e('div', { sinif: 'tam eylem' }, [e('button', { sinif: 'i-d ana kucuk', metin: 'Kaydet', onclick: async function() {
-                    const gv = { id: g.id, baslik: baslik.value, aciklama: aciklama.value, son_saat: saat.value, oncelik: Number(oncelik.value) };
+                    const gv = { id: g.id, baslik: baslik.value, aciklama: aciklama.value, son_saat: saat.value, oncelik: Number(oncelik.value), etiketler: etiket.deger() };
                     if (y.yonetebilir) {
                         if (tarih.value !== g.son_tarih) gv.son_tarih = tarih.value;
                         if (Number(sorumlu.value) !== g.sorumlu_id) gv.sorumlu_id = Number(sorumlu.value);
@@ -868,6 +954,7 @@
         if (g.onay_gerekir) chipler.push(e('span', { sinif: 'chip', metin: 'Onaylı iş' }));
         if (g.gizli) chipler.push(e('span', { sinif: 'chip', metin: 'Gizli' }));
         if (g.tur !== 'is') chipler.push(e('span', { sinif: 'chip', metin: adlar(d.sabitler && d.sabitler.turler, g.tur) }));
+        etiketCipleri(g.etiketler).forEach(function(c) { chipler.push(c); });
         const dugmeler = [];
         if (g.uyap_karti) dugmeler.push(e('button', { sinif: 'i-d kucuk', metin: 'UYAP\'ta aç', title: 'Dosyayı UYAP\'ta bulup kartını açar', onclick: function() { uyaptaAc(g.uyap_karti); } }));
         if (g.ust_gorev_id) dugmeler.push(e('button', { sinif: 'i-d kucuk', metin: 'Ana iş', onclick: function() { isAc(g.ust_gorev_id); } }));

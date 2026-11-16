@@ -37,6 +37,7 @@ pub static SEMALAR: &[(i32, &str, &str)] = &[
     (1, "baslangic", include_str!("sema/0001_baslangic.sql")),
     (2, "icra", include_str!("sema/0002_icra.sql")),
     (3, "is_listesi", include_str!("sema/0003_is_listesi.sql")),
+    (4, "is_etiketleri", include_str!("sema/0004_is_etiketleri.sql")),
 ];
 
 pub type Gunluk = Arc<dyn Fn(&str) + Send + Sync>;
