@@ -54,6 +54,12 @@ pub mod icra_tebligat;
 pub mod icra_kayit;
 pub mod icra_tarama;
 pub mod icra_durum;
+pub mod icra_api;
+pub mod is_veri;
+pub mod icra_aktar;
+pub mod is_aktar;
+pub mod is_api;
+pub mod kimlik;
 
 // @p2p-net modülleri
 pub mod lan_tls;

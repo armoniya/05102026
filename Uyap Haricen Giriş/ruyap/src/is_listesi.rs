@@ -333,6 +333,53 @@ async fn _call(
     Ok((502, Value::Object(Map::new())))
 }
 
+/// Yerel ağ girişi (İş Listesi L2): büro üyesinin kendi Çoklu UYAP kullanıcı adı + parolası bulutta doğrulanır
+/// (ofis kodu bu programınki); parola saklanmaz. Dönüş: hesap adı (`ahmet@buro`).
+pub async fn hesap_dogrula(kullanici: &str, parola: &str) -> Result<String, String> {
+    let cfg = CFG.lock().clone();
+    if cfg.base.is_empty() || cfg.office_code.is_empty() {
+        return Err("bulut adresi ayarlı değil".into());
+    }
+    let r = HTTP_CLIENT
+        .post(format!("{}/is-listesi/api/token", cfg.base))
+        .json(&json!({"office_code": cfg.office_code, "username": kullanici, "password": parola}))
+        .send()
+        .await
+        .map_err(|e| http_error_type_name(&e))?;
+    let durum = r.status().as_u16();
+    let d = _safe_json(r).await;
+    let hesap = d["me"]["account_username"].as_str().unwrap_or("").trim().to_string();
+    if durum != 200 || hesap.is_empty() {
+        return Err(d["error"].as_str().unwrap_or("Kullanıcı adı veya parola hatalı.").to_string());
+    }
+    Ok(hesap)
+}
+
+/// Büro üyeleri (İş Listesi L2): kendi hesabım (`me`) ve yöneticiysem bürodaki bütün İş Listesi
+/// kullanıcıları (`account_username`, `display_name`, `role`, `active`). Yalnız ad ve rol; iş verisi yok.
+pub async fn uye_listesi() -> Result<(Option<Value>, Vec<Value>), String> {
+    if CFG.lock().base.is_empty() {
+        return Err("bulut adresi ayarlı değil".into());
+    }
+    let hata = |e: CallError| match e {
+        CallError::Fail(f) => f.msg,
+        CallError::Http(h) => h,
+    };
+    let (durum, d) = _call(Method::GET, "me", "", None).await.map_err(hata)?;
+    if durum != 200 {
+        return Err(d["error"].as_str().unwrap_or("İş Listesi hesabı okunamadı").to_string());
+    }
+    let ben = d.get("me").cloned().filter(|v| v.is_object());
+    let mut uyeler = Vec::new();
+    if ben.as_ref().and_then(|b| b["role"].as_str()) == Some("admin") {
+        let (durum, d) = _call(Method::GET, "users", "", None).await.map_err(hata)?;
+        if durum == 200 {
+            uyeler = d["users"].as_array().cloned().unwrap_or_default();
+        }
+    }
+    Ok((ben, uyeler))
+}
+
 fn parse_qs(query: &str) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {

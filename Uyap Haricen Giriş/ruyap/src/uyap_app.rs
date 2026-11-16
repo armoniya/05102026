@@ -817,6 +817,11 @@ pub struct UyapApp {
     login_height_pending: f32,
     /// Kontrol ekranı büyütülmüşse önceki (konum, iç boyut); None = normal boyut.
     dash_onceki: Option<(egui::Pos2, egui::Vec2)>,
+    /// false: girişten sonra sade panel (durum + Bağlantıyı paylaş / UYAP'ı aç). true: eski ayrıntılı Kontrol Ekranı.
+    ayrintili: bool,
+    kompakt_yukseklik: f32,
+    /// Tepsi menüsünde "Tema" alt listesi açık mı
+    tepsi_tema_acik: bool,
 
     // Kimlik
     username: String,
@@ -879,6 +884,9 @@ impl UyapApp {
             login_height_last: 0.0,
             login_height_pending: 0.0,
             dash_onceki: None,
+            ayrintili: false,
+            kompakt_yukseklik: 0.0,
+            tepsi_tema_acik: false,
 
             username: String::new(),
             password: String::new(),
@@ -1051,8 +1059,8 @@ impl UyapApp {
         // Kontrol ekranı da giriş kartı gibi çerçevesiz, yuvarlak köşeli (kullanıcı isteği 2026-11-14):
         // başlık çubuğu, küçült/büyüt/kapat ve kenarlardan boyutlandırma bizde (ui_dashboard).
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(760.0, 560.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(900.0, 640.0)));
+        self.ayrintili = false;
+        self.kompakt_boyuta_don(ctx);
 
         self.log("[SİSTEM] Bulut hesabı üzerinden giriş yapıldı.\n");
         self.sira_sekmesi.yenile();
@@ -1294,6 +1302,11 @@ impl UyapApp {
 
 
     fn on_open_browser_click(&self) {
+        uyap_tarayicida_ac(Some(self.log_tx.clone()));
+    }
+
+    #[allow(dead_code)]
+    fn on_open_browser_click_eski(&self) {
         let log_tx = self.log_tx.clone();
         std::thread::spawn(move || {
             let url = crate::yerel_giris::tarayici_giris_url(LOCAL_PORT, "/giris", 3.0);
@@ -1845,6 +1858,10 @@ impl UyapApp {
                             // Kontrol ekranında × pencereyi tepsiye gizler; program çalışmaya devam eder
                             // (çıkış: tepsi menüsü → Çıkış).
                             0 => {
+                                // Bir dahaki açılışta sade panel gelsin
+                                self.ayrintili = false;
+                                self.dash_onceki = None;
+                                self.kompakt_boyuta_don(ctx);
                                 #[cfg(windows)]
                                 crate::tepsi::gizle();
                                 #[cfg(not(windows))]
@@ -2031,6 +2048,8 @@ impl UyapApp {
         #[cfg(windows)]
         {
             let Some(konum) = self.tepsi_panel else { return };
+            let h_once = self.tepsi_panel_h();
+            let pin_goster = self.tepsi_pin_goster();
             let mut kapat = false;
             let mut eylem: Option<u8> = None;
             let mut secilen_tema: Option<&'static str> = None;
@@ -2045,7 +2064,7 @@ impl UyapApp {
                     .with_taskbar(false)
                     .with_resizable(false)
                     .with_position(konum)
-                    .with_inner_size([TEPSI_PANEL_W, tepsi_panel_yuksekligi()]),
+                    .with_inner_size([TEPSI_PANEL_W, h_once]),
                 |ctx, _| {
                     crate::uyap_app::cercevesiz_stil_duzelt(BASLIK);
                     egui::CentralPanel::default()
@@ -2067,11 +2086,28 @@ impl UyapApp {
                                 ui.label(egui::RichText::new("Çoklu UYAP").font(Fonts::card_d()).color(C::INK()));
                             });
                             cui.add_space(6.0);
+                            // Sunucuda paylaşım kapalıysa (PIN saklanmaz) PIN burada girilir.
+                            if pin_goster {
+                                cui.label(egui::RichText::new("Paylaşım kapalı · E-imza PIN'i").font(Fonts::small()).color(C::INK_SOFT()));
+                                cui.add_space(2.0);
+                                let te = cui.add(
+                                    egui::TextEdit::singleline(&mut self.pin_var)
+                                        .password(true)
+                                        .hint_text("PIN")
+                                        .desired_width(f32::INFINITY),
+                                );
+                                let enter = te.lost_focus() && cui.input(|i| i.key_pressed(egui::Key::Enter));
+                                cui.add_space(2.0);
+                                if panel_ogesi(&mut cui, "Bağlantıyı paylaş") || enter { eylem = Some(7); }
+                                ayrac(&mut cui);
+                            }
+                            if panel_ogesi(&mut cui, "UYAP'ı aç") { eylem = Some(5); }
                             if panel_ogesi(&mut cui, "Pencereyi aç") { eylem = Some(1); }
-                            cui.add_space(4.0);
-                            cui.label(egui::RichText::new("Tema").font(Fonts::small()).color(C::INK_SOFT()));
-                            if let Some(ad) = tema_listesi(&mut cui) { secilen_tema = Some(ad); }
-                            cui.add_space(4.0);
+                            let tema_metni = if self.tepsi_tema_acik { "Tema  ▾" } else { "Tema  ▸" };
+                            if panel_ogesi(&mut cui, tema_metni) { self.tepsi_tema_acik = !self.tepsi_tema_acik; }
+                            if self.tepsi_tema_acik {
+                                if let Some(ad) = tema_listesi(&mut cui) { secilen_tema = Some(ad); }
+                            }
                             ayrac(&mut cui);
                             if panel_ogesi(&mut cui, "Günlüğü dosyaya kaydet") { eylem = Some(2); }
                             if panel_ogesi(&mut cui, "Günlüğü destek ekibine gönder") { eylem = Some(3); }
@@ -2094,6 +2130,15 @@ impl UyapApp {
             if let Some(ad) = secilen_tema {
                 tema_degistir(ctx, ad);
             }
+            // Yükseklik değiştiyse (tema listesi açıldı/kapandı) alt kenar sabit kalsın: yukarı kaydır.
+            let h_sonra = self.tepsi_panel_h();
+            if (h_sonra - h_once).abs() > 0.5 {
+                let yeni = egui::pos2(konum.x, konum.y - (h_sonra - h_once));
+                self.tepsi_panel = Some(yeni);
+                let vid = egui::ViewportId::from_hash_of("tepsi_panel");
+                ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::OuterPosition(yeni));
+                ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::InnerSize(egui::vec2(TEPSI_PANEL_W, h_sonra)));
+            }
             match eylem {
                 Some(1) => {
                     crate::tepsi::goster();
@@ -2108,6 +2153,16 @@ impl UyapApp {
                     kapat = true;
                 }
                 Some(4) => crate::tepsi::cikis(),
+                Some(5) => {
+                    self.uyap_ac();
+                    kapat = true;
+                }
+                Some(7) => {
+                    self.start_sharing();
+                    if self.is_sharing {
+                        kapat = true;
+                    }
+                }
                 _ => {}
             }
             if kapat {
@@ -2257,6 +2312,286 @@ impl UyapApp {
     }
 
     /// Tek satırlık bağlantı durumu: bağlanıyor (dönen yay) / kuruldu / hata kodu.
+    /// Tepsi menüsünde PIN + "Bağlantıyı paylaş" gösterilsin mi (girişli sunucu, paylaşım kapalı).
+    fn tepsi_pin_goster(&self) -> bool {
+        self.screen == ScreenMode::Dashboard && self.sunucu_mu() && !self.is_sharing
+    }
+
+    fn tepsi_panel_h(&self) -> f32 {
+        // PIN bölümü: etiket + kutu + düğme + ayraç
+        tepsi_panel_yuksekligi(self.tepsi_tema_acik) + if self.tepsi_pin_goster() { 18.0 + 32.0 + 34.0 + 13.0 } else { 0.0 }
+    }
+
+    /// Ofis sunucusu mu? (girişte "Bu bilgisayar ofis sunucusu olsun" / otomatik paylaşım)
+    fn sunucu_mu(&self) -> bool {
+        self.cfg.auto_share || self.is_sharing
+    }
+
+    fn kompakt_boyuta_don(&mut self, ctx: &egui::Context) {
+        self.kompakt_yukseklik = 0.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(1.0, 1.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(LOGIN_CARD_W, 360.0)));
+    }
+
+    /// UYAP'ı aç: ofis sunucusunda yerel vekil (paylaşım açık olmalı); istemcide web sitesi (ofise tünel).
+    fn uyap_ac(&mut self) {
+        if self.screen == ScreenMode::Login {
+            #[cfg(windows)]
+            crate::tepsi::goster();
+            return;
+        }
+        if self.sunucu_mu() {
+            uyap_tarayicida_ac(Some(self.log_tx.clone()));
+        } else {
+            let adres = format!("{}/", self.api_base());
+            let _ = if cfg!(windows) {
+                Command::new("cmd").args(["/C", "start", "", &adres]).creation_flags_win().spawn()
+            } else {
+                Command::new("xdg-open").arg(&adres).spawn()
+            };
+        }
+    }
+
+    /// Bağlantı durumunu doğrudan UYAP oturumundan okur. Günlük satırı ayrıştırmak Windows'ta çalışmıyordu:
+    /// arka plan println! çıktısı arayüze ulaşmıyor, "Bağlantı kuruluyor" hiç bitmiyordu (kullanıcı, 16.11).
+    fn durum_yokla(&mut self) {
+        if !self.is_sharing {
+            return;
+        }
+        let Some(gw) = crate::uyap_proxy::get_gw() else { return };
+        let kilit = gw.giris_hatasi.lock().clone();
+        let gecici = crate::uyap_proxy::SON_GECICI_HATA.lock().clone();
+        let yeni = if let Some(h) = kilit {
+            let (kod, _) = crate::hata_kodlari::cozumle(&h);
+            BaglantiDurumu::Hata { kod, aciklama: h }
+        } else if gw.logged_in.load(std::sync::atomic::Ordering::SeqCst) {
+            BaglantiDurumu::Kuruldu
+        } else if let Some(h) = gecici {
+            BaglantiDurumu::Hata { kod: "BEKLE", aciklama: format!("{h} — 20 sn içinde yeniden denenecek.") }
+        } else {
+            BaglantiDurumu::Baglaniyor
+        };
+        if yeni != self.durum {
+            self.durum = yeni;
+        }
+    }
+
+    /// Girişten sonraki sade panel (kullanıcı isteği 16.11): durum + rolüne göre düğmeler.
+    /// Sunucu: PIN + "Bağlantıyı paylaş", paylaşımda "UYAP'ı aç" + "Paylaşımı durdur". İstemci: "UYAP'ı aç".
+    fn ui_kompakt(&mut self, ctx: &egui::Context) {
+        let mut cikis = false;
+        let mut ayrintili = false;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+            .show(ctx, |ui| {
+                let dis = ui.max_rect();
+                let kart = egui::Rect::from_min_max(
+                    egui::pos2(dis.min.x + 6.0, dis.min.y + 6.0),
+                    egui::pos2(dis.max.x - 10.0, dis.max.y - 10.0),
+                );
+                round_rect(ui.painter(), kart.translate(egui::vec2(2.0, 2.0)), 16.0, C::SHADOW(), None);
+                round_rect(ui.painter(), kart, 16.0, C::CARD(), Some(C::CARD_EDGE()));
+                let surukle = ui.interact(dis, ui.id().with("kompakt_surukle"), egui::Sense::drag());
+                if surukle.drag_started_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                let mut c = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(dis.shrink(LOGIN_CARD_MARGIN))
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                // Başlık: logo + ad + hesap/rol, sağda × (tepsiye gizler)
+                c.horizontal(|ui| {
+                    let (lr, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+                    let logo = armonia_logo(ui.ctx());
+                    ui.painter().image(
+                        logo.id(),
+                        lr,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    ui.add_space(11.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Çoklu UYAP").font(Fonts::card_t()).color(C::INK()));
+                        let rol = if self.sunucu_mu() { "Ofis sunucusu" } else { "İstemci" };
+                        ui.label(
+                            egui::RichText::new(format!("{}@{} · {rol}", self.username, self.office_code))
+                                .font(Fonts::small())
+                                .color(C::INK_SOFT()),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                        if resp.hovered() {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                            round_rect(ui.painter(), r, 7.0, C::LINE(), None);
+                        }
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "×",
+                            egui::FontId::proportional(20.0),
+                            if resp.hovered() { C::INK() } else { C::INK_SOFT() },
+                        );
+                        if resp.clicked() {
+                            #[cfg(windows)]
+                            crate::tepsi::gizle();
+                            #[cfg(not(windows))]
+                            self.on_close();
+                        }
+                    });
+                });
+                c.add_space(16.0);
+                self.buyuk_durum(&mut c);
+                c.add_space(14.0);
+
+                if self.sunucu_mu() {
+                    if self.is_sharing {
+                        if RoundButton::new("UYAP'ı aç")
+                            .kind(ButtonKind::Primary)
+                            .font(Fonts::nav_b())
+                            .height(42.0)
+                            .fill_width(true)
+                            .show(&mut c)
+                            .clicked()
+                        {
+                            self.uyap_ac();
+                        }
+                        c.add_space(8.0);
+                        if RoundButton::new("Paylaşımı durdur")
+                            .kind(ButtonKind::Ghost)
+                            .font(Fonts::nav_b())
+                            .height(36.0)
+                            .fill_width(true)
+                            .show(&mut c)
+                            .clicked()
+                        {
+                            self.stop_sharing(false);
+                        }
+                    } else {
+                        Self::labeled_entry(&mut c, "E-imza PIN kodu", &mut self.pin_var, true, true);
+                        if RoundButton::new("Bağlantıyı paylaş")
+                            .kind(ButtonKind::Primary)
+                            .font(Fonts::nav_b())
+                            .height(42.0)
+                            .fill_width(true)
+                            .show(&mut c)
+                            .clicked()
+                        {
+                            self.start_sharing();
+                        }
+                    }
+                } else if RoundButton::new("UYAP'ı aç")
+                    .kind(ButtonKind::Primary)
+                    .font(Fonts::nav_b())
+                    .height(42.0)
+                    .fill_width(true)
+                    .show(&mut c)
+                    .clicked()
+                {
+                    self.uyap_ac();
+                }
+
+                c.add_space(14.0);
+                c.horizontal(|ui| {
+                    let bag = |ui: &mut egui::Ui, metin: &str| -> bool {
+                        let r = ui.add(
+                            egui::Label::new(egui::RichText::new(metin).font(Fonts::small()).underline().color(C::INK_SOFT()))
+                                .sense(egui::Sense::click()),
+                        );
+                        if r.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        r.clicked()
+                    };
+                    if bag(ui, "Ayrıntılı görünüm") {
+                        ayrintili = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if bag(ui, "Oturumu kapat") {
+                            cikis = true;
+                        }
+                    });
+                });
+
+                let h = (c.min_rect().height() + 2.0 * LOGIN_CARD_MARGIN + 4.0).ceil();
+                if (h - self.kompakt_yukseklik).abs() > 2.0 && h > 150.0 {
+                    self.kompakt_yukseklik = h;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(LOGIN_CARD_W, h)));
+                }
+            });
+        if ayrintili {
+            self.ayrintili = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(760.0, 560.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(900.0, 640.0)));
+        }
+        if cikis {
+            self.on_logout_click(ctx);
+        }
+    }
+
+    /// Sade paneldeki büyük, renkli durum kutusu: kullanıcı bağlantının kurulup kurulmadığını hemen anlasın.
+    /// Dönen işaret yalnız gerçekten giriş denenirken; kurulunca yeşil ✓, hata/beklemede açıklamasıyla.
+    fn buyuk_durum(&self, ui: &mut egui::Ui) {
+        // Durum renkleri temadan bağımsız: turuncu/pembe temada "kuruldu" uyarı gibi görünüyordu.
+        const YESIL: egui::Color32 = egui::Color32::from_rgb(0x2E, 0x8B, 0x57);
+        const SARI: egui::Color32 = egui::Color32::from_rgb(0xD4, 0xA0, 0x17);
+        const KIRMIZI: egui::Color32 = egui::Color32::from_rgb(0xC6, 0x3B, 0x2F);
+        let (renk, baslik, ayrinti, doner): (egui::Color32, String, String, bool) = if !self.sunucu_mu() {
+            (YESIL, "Giriş yapıldı".into(), "UYAP'ı açınca ofis bağlantısı kurulur.".into(), false)
+        } else {
+            match &self.durum {
+                BaglantiDurumu::Kapali => (
+                    C::INK_FAINT(),
+                    "Paylaşım kapalı".into(),
+                    "E-imza PIN'ini girip \"Bağlantıyı paylaş\"a basın.".into(),
+                    false,
+                ),
+                BaglantiDurumu::Baglaniyor => {
+                    (SARI, "Bağlantı kuruluyor…".into(), "E-imza ile UYAP oturumu açılıyor.".into(), true)
+                }
+                BaglantiDurumu::Kuruldu => (
+                    YESIL,
+                    "Bağlantı kuruldu".into(),
+                    "UYAP oturumu hazır; büro bu bilgisayar üzerinden bağlanabilir.".into(),
+                    false,
+                ),
+                BaglantiDurumu::Hata { kod: "BEKLE", aciklama } => {
+                    (SARI, "UYAP oturumu bekleniyor".into(), aciklama.clone(), false)
+                }
+                BaglantiDurumu::Hata { kod, aciklama } => {
+                    (KIRMIZI, format!("Bağlantı kurulamadı ({kod})"), aciklama.clone(), false)
+                }
+            }
+        };
+        let genislik = ui.available_width();
+        let ayr = ui.painter().layout(ayrinti, Fonts::small(), C::INK_SOFT(), genislik - 48.0);
+        let yuk = 30.0 + ayr.size().y + 14.0;
+        let (r, _) = ui.allocate_exact_size(egui::vec2(genislik, yuk), egui::Sense::hover());
+        let zemin = crate::uyap_theme::karistir(renk, C::CARD(), 0.85);
+        let kenar = crate::uyap_theme::karistir(renk, C::CARD(), 0.5);
+        round_rect(ui.painter(), r, 10.0, zemin, Some(kenar));
+        let m = egui::pos2(r.min.x + 20.0, r.min.y + 21.0);
+        if doner {
+            let t = ui.input(|i| i.time) as f32;
+            ui.painter().circle_stroke(m, 7.0, egui::Stroke::new(2.0, kenar));
+            let bas = t * std::f32::consts::TAU / 0.9;
+            let noktalar: Vec<egui::Pos2> = (0..=16)
+                .map(|k| {
+                    let a = bas + std::f32::consts::PI * 1.2 * k as f32 / 16.0;
+                    m + egui::vec2(a.cos(), a.sin()) * 7.0
+                })
+                .collect();
+            ui.painter().add(egui::Shape::line(noktalar, egui::Stroke::new(2.0, renk)));
+            ui.ctx().request_repaint();
+        } else {
+            ui.painter().circle_filled(m, 6.0, renk);
+        }
+        ui.painter().text(egui::pos2(r.min.x + 36.0, m.y), egui::Align2::LEFT_CENTER, baslik, Fonts::card_d(), C::INK());
+        ui.painter().galley(egui::pos2(r.min.x + 36.0, r.min.y + 34.0), ayr, C::INK_SOFT());
+    }
+
+
     fn durum_satiri(&self, ui: &mut egui::Ui) {
         match &self.durum {
             BaglantiDurumu::Kapali => {
@@ -2468,7 +2803,10 @@ impl eframe::App for UyapApp {
         #[cfg(windows)]
         if let Some((x, y)) = crate::tepsi::panel_istegi() {
             let ppp = ctx.pixels_per_point().max(0.5);
-            let (w, h) = (TEPSI_PANEL_W, tepsi_panel_yuksekligi());
+            self.tepsi_tema_acik = false;
+            // Gerçek yükseklikle konumlanır (en uzun hâle göre hesaplamak menüyü çok yukarıda açıyordu);
+            // tema listesi açılınca alt kenar sabit kalıp yukarı büyür (tepsi_paneli).
+            let (w, h) = (TEPSI_PANEL_W, self.tepsi_panel_h());
             let mut sol_ust = egui::pos2(x / ppp - w + 12.0, y / ppp - h - 10.0);
             if let Some(alan) = calisma_alani(ctx) {
                 sol_ust.x = sol_ust.x.clamp(alan.min.x + 4.0, (alan.max.x - w - 4.0).max(alan.min.x));
@@ -2503,10 +2841,14 @@ impl eframe::App for UyapApp {
 
         self.poll_logs();
         self.poll_background(ctx);
+        if self.kare % 5 == 0 {
+            self.durum_yokla();
+        }
 
         match self.screen {
             ScreenMode::Login => self.ui_login(ctx),
-            ScreenMode::Dashboard => self.ui_dashboard(ctx),
+            ScreenMode::Dashboard if self.ayrintili => self.ui_dashboard(ctx),
+            ScreenMode::Dashboard => self.ui_kompakt(ctx),
         }
 
         self.show_child_windows(ctx);
@@ -2516,9 +2858,10 @@ impl eframe::App for UyapApp {
 
 const TEPSI_PANEL_W: f32 = 250.0;
 
-fn tepsi_panel_yuksekligi() -> f32 {
-    // başlık + aç + "Tema" + temalar (8 × 30) + ayraçlar + 3 öğe + iç paylar
-    40.0 + 34.0 + 22.0 + crate::uyap_theme::TEMALAR.len() as f32 * 30.0 + 18.0 + 34.0 * 3.0 + 26.0
+fn tepsi_panel_yuksekligi(tema_acik: bool) -> f32 {
+    // başlık + UYAP'ı aç / Pencereyi aç / Tema + (açıksa temalar) + ayraçlar + günlük (2) + çıkış + iç paylar
+    let temalar = if tema_acik { crate::uyap_theme::TEMALAR.len() as f32 * 30.0 } else { 0.0 };
+    40.0 + 34.0 * 3.0 + temalar + 18.0 + 34.0 * 3.0 + 26.0
 }
 
 /// Tema seçimini uygular, web ile ortak dosyaya yazar.
@@ -2562,6 +2905,35 @@ fn tema_listesi(ui: &mut egui::Ui) -> Option<&'static str> {
         }
     }
     secilen
+}
+
+/// UYAP'ı tarayıcıda açar (yerel vekil 127.0.0.1:8800, tek kullanımlık giriş bağlantısıyla). Vekil çalışmıyorsa
+/// (paylaşım ya da bağlantı kapalı) kullanıcıya söyler. Tepsi menüsü ve Kontrol Ekranı ortak kullanır.
+pub(crate) fn uyap_tarayicida_ac(log_tx: Option<Sender<String>>) {
+    std::thread::spawn(move || {
+        let adres: SocketAddr = ([127, 0, 0, 1], LOCAL_PORT).into();
+        if std::net::TcpStream::connect_timeout(&adres, Duration::from_millis(700)).is_err() {
+            msg_error(
+                "Çoklu UYAP",
+                "UYAP açılamadı: yerel UYAP bağlantısı çalışmıyor.
+
+Önce giriş yapıp paylaşımı (ofis sunucusu)                  ya da bağlantıyı başlatın.",
+            );
+            return;
+        }
+        let url = crate::yerel_giris::tarayici_giris_url(LOCAL_PORT, "/giris", 3.0);
+        let res = if cfg!(windows) {
+            Command::new("cmd").args(["/C", "start", "", &url]).creation_flags_win().spawn()
+        } else {
+            Command::new("xdg-open").arg(&url).spawn()
+        };
+        if let Err(e) = res {
+            if let Some(tx) = log_tx {
+                let _ = tx.send(format!("[HATA] Tarayıcı açılamadı: {e}
+"));
+            }
+        }
+    });
 }
 
 fn panel_ogesi(ui: &mut egui::Ui, metin: &str) -> bool {
@@ -2762,6 +3134,17 @@ pub fn main() {
     if args.len() > 1 && args[1] == "--sira-kapisi" {
         sira_kapisi_komutu(&args[2..]);
         std::process::exit(0);
+    }
+    // Eski UyapMasa veritabanından icra verisini büro veritabanına aktar (--deneme: yaz, say, geri al).
+    if args.len() > 1 && args[1] == "--uyapmasa-aktar" {
+        std::process::exit(crate::icra_aktar::komut(&args[2..]));
+    }
+    // Buluttaki İş Listesi'ni büro veritabanına taşı (--deneme: yaz, say, geri al; --dosya: arşivden).
+    if args.len() > 1 && args[1] == "--is-listesi-aktar" {
+        std::process::exit(crate::is_aktar::komut(&args[2..]));
+    }
+    if args.len() > 1 && args[1] == "--icra-durum-guncelle" {
+        std::process::exit(crate::icra_aktar::durum_komut(&args[2..]));
     }
     // Kurulum paketi: tam PostgreSQL kurulumundan yalnız gömülü sunucu dosyalarını al.
     if args.len() > 3 && args[1] == "--pgsql-hazirla" {

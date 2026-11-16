@@ -1,0 +1,354 @@
+{
+ "ok": true,
+ "office_id": "ofis1",
+ "exported_at": 1794820987,
+ "users": [
+  {
+   "id": 1,
+   "username": "utku.ofis1",
+   "display_name": "Utku",
+   "role": "admin",
+   "active": 1,
+   "account_username": "utku@ofis1",
+   "office_id": "ofis1",
+   "created_at": 1794820987
+  },
+  {
+   "id": 2,
+   "username": "ali.ofis1",
+   "display_name": "Ali",
+   "role": "user",
+   "active": 1,
+   "account_username": "ali@ofis1",
+   "office_id": "ofis1",
+   "created_at": 1794820987
+  }
+ ],
+ "tasks": [
+  {
+   "id": 1,
+   "parent_id": null,
+   "title": "Tebligat kontrol",
+   "description": "Mazbata döndü mü?",
+   "assignee_id": 2,
+   "created_by": 1,
+   "due_at": 1795080187,
+   "status": "acik",
+   "sort_order": 1,
+   "created_at": 1794820987,
+   "updated_at": 1794820987,
+   "is_private": 0,
+   "priority": 2,
+   "submitted_at": null,
+   "office_id": "ofis1",
+   "dosya_id": "X1",
+   "birim_id": "1001",
+   "birim_adi": "İstanbul 5. İcra Dairesi",
+   "dosya_no": "2026/123",
+   "dosya_tur": "İcra",
+   "dosya_uyap": "{\"dosyaId\": \"X1\", \"dosyaNo\": \"2026/123\", \"birimId\": \"1001\", \"birimAdi\": \"İstanbul 5. İcra Dairesi\"}",
+   "evrak_id": null,
+   "evrak_adi": null,
+   "taraf_adi": "Ahmet Yılmaz",
+   "barkod": null,
+   "sablon": "h-teblig-durum",
+   "surec": "icra-kesinlesme",
+   "asama": "teblig",
+   "sonuc": null
+  },
+  {
+   "id": 3,
+   "parent_id": null,
+   "title": "Özel iş",
+   "description": "",
+   "assignee_id": 2,
+   "created_by": 2,
+   "due_at": 1795080187,
+   "status": "acik",
+   "sort_order": 2,
+   "created_at": 1794820987,
+   "updated_at": 1794820987,
+   "is_private": 1,
+   "priority": 1,
+   "submitted_at": null,
+   "office_id": "ofis1",
+   "dosya_id": null,
+   "birim_id": null,
+   "birim_adi": null,
+   "dosya_no": null,
+   "dosya_tur": null,
+   "dosya_uyap": null,
+   "evrak_id": null,
+   "evrak_adi": null,
+   "taraf_adi": null,
+   "barkod": null,
+   "sablon": "",
+   "surec": null,
+   "asama": null,
+   "sonuc": null
+  },
+  {
+   "id": 4,
+   "parent_id": null,
+   "title": "Bitmiş iş",
+   "description": "",
+   "assignee_id": 1,
+   "created_by": 1,
+   "due_at": 1795080187,
+   "status": "onaylandi",
+   "sort_order": 3,
+   "created_at": 1794820987,
+   "updated_at": 1794820987,
+   "is_private": 0,
+   "priority": 1,
+   "submitted_at": 1794820987,
+   "office_id": "ofis1",
+   "dosya_id": null,
+   "birim_id": null,
+   "birim_adi": null,
+   "dosya_no": null,
+   "dosya_tur": null,
+   "dosya_uyap": null,
+   "evrak_id": null,
+   "evrak_adi": null,
+   "taraf_adi": null,
+   "barkod": null,
+   "sablon": "",
+   "surec": null,
+   "asama": null,
+   "sonuc": null
+  },
+  {
+   "id": 2,
+   "parent_id": 1,
+   "title": "PTT sorgula",
+   "description": "",
+   "assignee_id": 2,
+   "created_by": 1,
+   "due_at": 1795080187,
+   "status": "acik",
+   "sort_order": 1,
+   "created_at": 1794820987,
+   "updated_at": 1794820987,
+   "is_private": 0,
+   "priority": 1,
+   "submitted_at": null,
+   "office_id": "ofis1",
+   "dosya_id": null,
+   "birim_id": null,
+   "birim_adi": null,
+   "dosya_no": null,
+   "dosya_tur": null,
+   "dosya_uyap": null,
+   "evrak_id": null,
+   "evrak_adi": null,
+   "taraf_adi": null,
+   "barkod": null,
+   "sablon": null,
+   "surec": null,
+   "asama": null,
+   "sonuc": null
+  }
+ ],
+ "notes": [
+  {
+   "id": 1,
+   "task_id": 1,
+   "author_id": 1,
+   "body": "İlk not",
+   "note_at": null,
+   "created_at": 1794820987
+  }
+ ],
+ "files": [],
+ "events": [
+  {
+   "id": 1,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "created",
+   "detail": "{\"title\": \"Tebligat kontrol\", \"sub\": false}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 2,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "assigned",
+   "detail": "{\"title\": \"Tebligat kontrol\", \"assignee_id\": 2}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 3,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "created",
+   "detail": "{\"title\": \"PTT sorgula\", \"sub\": true}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 4,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "assigned",
+   "detail": "{\"title\": \"PTT sorgula\", \"assignee_id\": 2}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 5,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "note",
+   "detail": "{}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 6,
+   "task_id": 1,
+   "actor_id": 1,
+   "kind": "member_added",
+   "detail": "{\"user_id\": 1, \"role\": \"approver\", \"note\": \"onay\"}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 7,
+   "task_id": 1,
+   "actor_id": 2,
+   "kind": "ext_requested",
+   "detail": "{\"ext_id\": 1, \"old_due\": 1795080187, \"new_due\": 1795166587, \"reason\": \"Mazbata gecikti\"}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 8,
+   "task_id": 3,
+   "actor_id": 2,
+   "kind": "created",
+   "detail": "{\"title\": \"Özel iş\", \"sub\": false}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 9,
+   "task_id": 3,
+   "actor_id": 2,
+   "kind": "assigned",
+   "detail": "{\"title\": \"Özel iş\", \"assignee_id\": 2}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 10,
+   "task_id": 4,
+   "actor_id": 1,
+   "kind": "created",
+   "detail": "{\"title\": \"Bitmiş iş\", \"sub\": false}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 11,
+   "task_id": 4,
+   "actor_id": 1,
+   "kind": "assigned",
+   "detail": "{\"title\": \"Bitmiş iş\", \"assignee_id\": 1}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 12,
+   "task_id": 4,
+   "actor_id": 1,
+   "kind": "submitted",
+   "detail": "{\"old\": \"acik\", \"new\": \"onayda\", \"reason\": \"\"}",
+   "created_at": 1794820987
+  },
+  {
+   "id": 13,
+   "task_id": 4,
+   "actor_id": 1,
+   "kind": "approved",
+   "detail": "{\"old\": \"onayda\", \"new\": \"onaylandi\", \"reason\": \"\"}",
+   "created_at": 1794820987
+  }
+ ],
+ "members": [
+  {
+   "id": 1,
+   "task_id": 1,
+   "user_id": 1,
+   "role": "approver",
+   "added_by": 1,
+   "created_at": 1794820987
+  }
+ ],
+ "extensions": [
+  {
+   "id": 1,
+   "task_id": 1,
+   "requester_id": 2,
+   "old_due": 1795080187,
+   "new_due": 1795166587,
+   "reason": "Mazbata gecikti",
+   "status": "bekliyor",
+   "decided_by": null,
+   "decision_note": "",
+   "decided_at": null,
+   "created_at": 1794820987
+  }
+ ],
+ "transfers": [],
+ "task_tags": [
+  {
+   "task_id": 1,
+   "tag": "e-icra",
+   "added_by": 1,
+   "created_at": 1794820987
+  },
+  {
+   "task_id": 1,
+   "tag": "e-ik-teblig",
+   "added_by": 1,
+   "created_at": 1794820987
+  }
+ ],
+ "reminders": [
+  {
+   "id": 1,
+   "task_id": 1,
+   "sub_id": null,
+   "user_id": 2,
+   "created_by": 1,
+   "remind_at": 1795076587,
+   "note": "Hatırla",
+   "title": "",
+   "sent_at": null,
+   "created_at": 1794820987
+  }
+ ],
+ "templates": [
+  {
+   "id": 1,
+   "office_id": "ofis1",
+   "title": "Büro şablonu",
+   "description": "a",
+   "due_days": 5,
+   "priority": 1,
+   "taraf": null,
+   "action": null,
+   "created_by": 1,
+   "created_at": 1794820987,
+   "kontrol": null,
+   "sonuclar": "{\"olumlu\": null, \"olumsuz\": null, \"bekliyor\": null}",
+   "asama": null,
+   "etiketler": "[]"
+  }
+ ],
+ "tags": [
+  {
+   "id": 1,
+   "office_id": "ofis1",
+   "owner_id": null,
+   "name": "Acil",
+   "color": "#dc2626",
+   "created_by": 1,
+   "created_at": 1794820987,
+   "parent": null
+  }
+ ]
+}

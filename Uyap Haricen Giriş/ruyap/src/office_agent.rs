@@ -323,6 +323,7 @@ pub async fn handle_uyap_request(
     meta: &Value,
     body: &[u8],
     kaynak: &str,
+    hesap: Option<String>,
 ) -> (u16, HashMap<String, String>, Vec<u8>) {
     let path = meta
         .get("path")
@@ -353,6 +354,18 @@ pub async fn handle_uyap_request(
                 req_headers.insert(k.clone(), s.to_string());
             }
         }
+    }
+
+    // Büro veritabanı uçları (İcra Takip Süreçleri sayfası): ofis bilgisayarındaki veritabanından cevaplanır,
+    // UYAP'a iletilmez. Bütün büro kullanıcılarına açık; başka siteden gelen yazma isteği reddedilir.
+    // İş Listesi (büro veritabanı): isteğin sahibi tünel biletinden (kimlik.rs). icra_api'den ÖNCE: aynı ön ek.
+    if crate::is_api::is_path(&path) {
+        let capraz = header_ci(&req_headers, "sec-fetch-site").is_some_and(|v| v.eq_ignore_ascii_case("cross-site"));
+        return crate::is_api::handle(&method, &path, &query, body, capraz, hesap.as_deref()).await;
+    }
+    if crate::icra_api::is_path(&path) {
+        let capraz = header_ci(&req_headers, "sec-fetch-site").is_some_and(|v| v.eq_ignore_ascii_case("cross-site"));
+        return crate::icra_api::handle(&method, &path, &query, body, capraz).await;
     }
 
     if uyap_proxy::is_gecit_path(&path) {
@@ -481,10 +494,11 @@ pub fn _wire_datachannel(channel: Arc<RTCDataChannel>, cid: String) {
             } else if decoded.kind == "req" {
                 let ch_reply = ch.clone();
                 let cid_short: String = cid.chars().take(8).collect();
+                let hesap = crate::kimlik::tunel_hesabi(&cid);
                 tokio::spawn(async move {
                     let meta = decoded.meta.unwrap_or_else(|| json!({}));
                     let (status, headers, body) =
-                        Box::pin(handle_uyap_request(&meta, &decoded.body, &format!("tünel:{cid_short}")))
+                        Box::pin(handle_uyap_request(&meta, &decoded.body, &format!("tünel:{cid_short}"), hesap))
                             .await;
                     let res_meta = json!({"status": status, "headers": headers});
                     if let Err(e) =
@@ -834,6 +848,12 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
 
                             let mtype = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             let cid = msg.get("cid").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            // İstemcinin hesabı (imzalı; doğrulanamazsa yok sayılır) → bağlantı kimliğine eşlenir.
+                            if matches!(mtype, "offer" | "relay_hello" | "relay") {
+                                if let (Some(c), Some(h)) = (cid.as_deref(), crate::kimlik::hesap_bileti(room_ticket_key.as_deref(), &msg)) {
+                                    crate::kimlik::tunel_ayarla(c, &h);
+                                }
+                            }
 
                             if mtype == "joined" {
                                 room_ticket_key = msg
@@ -887,7 +907,8 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                                     tokio::spawn(async move {
                                                         let cid_short: String = s_clone.cid.as_deref().unwrap_or("").chars().take(8).collect();
                                                         let meta = rmsg.meta.unwrap_or_else(|| json!({}));
-                                                        let (status, headers, body) = handle_uyap_request(&meta, &rmsg.body, &format!("relay:{cid_short}")).await;
+                                                        let hesap = s_clone.cid.as_deref().and_then(crate::kimlik::tunel_hesabi);
+                                                        let (status, headers, body) = handle_uyap_request(&meta, &rmsg.body, &format!("relay:{cid_short}"), hesap).await;
                                                         let res_meta = json!({"status": status, "headers": headers});
                                                         if let Err(e) = send_message(&s_clone, &rmsg.id, "res", Some(res_meta), &body).await {
                                                             println!("[!] Relay cevabi gonderilemedi: {e}");
@@ -905,12 +926,14 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                     let short: String = c.chars().take(6).collect();
                                     println!("[*] İstemci ayrıldı [{short}]; bağlantısı kapatılıyor.");
                                     session.close_one(&c).await;
+                                    crate::kimlik::tunel_sil(&c);
                                     if let Some(s) = relay_senders.remove(&c) {
                                         s.close();
                                     }
                                     relay_reasms.remove(&c);
                                 } else {
                                     session.close_all().await;
+                                    crate::kimlik::tunel_temizle();
                                     for (_, s) in relay_senders.drain() {
                                         s.close();
                                     }
@@ -972,6 +995,11 @@ pub async fn run_office(mut args: OfficeArgs) -> Result<(), String> {
         &user,
         args.password.as_deref(),
     );
+    // İş Listesi: bu bilgisayardaki isteklerin sahibi (paylaşımı başlatan hesap) + büro üyeleri (ad, rol).
+    crate::kimlik::ofis_hesabi_ayarla(&crate::kimlik::hesap_adi(&user, &args.office_code));
+    tokio::spawn(crate::is_api::uyeleri_esitle());
+    // UYAP oturumunu ilk istekte değil hemen aç (durum satırı "kuruldu"yu ya da hatayı göstersin).
+    tokio::spawn(uyap_proxy::oturumu_hemen_ac());
 
     let bind_host = uyap_proxy::_resolve_bind_host(&args.host);
     let mut lan_token: Option<String> = None;

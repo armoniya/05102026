@@ -269,6 +269,29 @@ pub static GW_PASS: Lazy<Mutex<Option<String>>> =
 pub static GW_LOCAL_TOKEN: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 pub static GW_LAN_TICKET: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
+/// Son geçici UYAP giriş hatası (e-imza istemcisi hazır değil, kart takılı değil, UYAP'a ulaşılamadı).
+/// Kontrol Ekranı durum satırı için; başarılı girişte temizlenir. 2026-11-16.
+pub static SON_GECICI_HATA: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+/// Paylaşım başlarken UYAP oturumunu hemen açar (ilk sayfa isteğini beklemez): kullanıcı "Bağlantı kuruldu"yu
+/// ya da hatayı hemen görür. Geçici hatada 20 sn arayla yeniden dener; PIN hatası kapıyı kilitleyince durur.
+/// Paylaşımın tokio çalışma zamanında koşar; paylaşım durunca görev de düşer.
+pub async fn oturumu_hemen_ac() {
+    *SON_GECICI_HATA.lock() = None;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    loop {
+        let Some(gw) = get_gw() else { return };
+        if gw.check_giris_kapisi().is_err() {
+            return;
+        }
+        match gw.ensure_alive().await {
+            Ok(()) => return,
+            Err(_) if gw.check_giris_kapisi().is_err() => return,
+            Err(_) => tokio::time::sleep(Duration::from_secs(20)).await,
+        }
+    }
+}
+
 pub fn get_gw() -> Option<Arc<GatewaySession>> {
     GW.lock().clone()
 }
@@ -417,6 +440,7 @@ impl GatewaySession {
             // E-imza istemcisi hazır değil / kart takılı değil / UYAP'a ulaşılamadı gibi hatalar bir sonraki
             // istekte yeniden denenir (Armonia: istemci açılıştan ~20-30 sn sonra hazır olur). 2026-11-14.
             if e.contains(uyap_login::GECICI_HATA) {
+                *SON_GECICI_HATA.lock() = Some(e.replace(uyap_login::GECICI_HATA, "").replace("Giris hatasi: ", ""));
                 println!("[!] UYAP girişi şimdilik yapılamadı: {}", e.replace(uyap_login::GECICI_HATA, ""));
                 return Err(e.replace(uyap_login::GECICI_HATA, ""));
             }
@@ -428,6 +452,7 @@ impl GatewaySession {
             *self.giris_hatasi.lock() = Some(e.clone());
             return Err(e);
         }
+        *SON_GECICI_HATA.lock() = None;
         println!("[+] Oturum hazır.");
         Ok(())
     }
@@ -2910,6 +2935,50 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     const DURUM = { acik: 'Açık', devam: 'Devam ediyor', onayda: 'Onayda', onaylandi: 'Onaylandı', tamamlandi: 'Tamamlandı' };
     let ben = null;            // {me, people, office} — ilk açılışta alınır
 
+    // 2026-11-16: İş Listesi büro veritabanına taşındı (enjekte/isler.js, /__cu__/veri/is/). Yeni sayfa yüklüyse
+    // bu bloğun bulut bağlantıları kullanılmaz: dosyanın işleri yeni uçlardan okunur (kart rozeti, mor bant,
+    // belge işaretleri), "İş ata" / iş açma / "İşleri göster" yeni sayfaya gider. Banttaki hızlı düğmeler
+    // (onaya gönder, ertesi güne aktar, onay kararı) eski iş numaralarıyla çalıştığı için yeni işlerde gizlenir;
+    // bu işlemler yeni sayfadaki iş panelinde yapılır.
+    function YENI() { return !!window.__cuIsAta; }
+    async function yeniIstek(uc) {
+        const r = await window.fetch('/__cu__/veri/is/' + uc, { cache: 'no-store', credentials: 'same-origin' });
+        let j = null;
+        try { j = await r.json(); } catch (e) {}
+        if (!j || !j.ok) throw new Error((j && j.error) || 'İş Listesi okunamadı.');
+        return j.veri;
+    }
+    async function yeniBen() {
+        const b = await yeniIstek('ben');
+        return { me: { id: b.ben.id, display_name: b.ben.ad, role: b.ben.yonetici ? 'admin' : 'user', account_username: b.ben.hesap },
+                 people: (b.kisiler || []).map(function(k) { return { id: k.id, display_name: k.ad, active: true }; }), office: null };
+    }
+    // Yeni iş satırı → bu bloğun beklediği eski biçim (yalnız okunan alanlar).
+    function eskiBicim(g) {
+        const k = g.uyap_karti || {};
+        const p = String(g.son_tarih || '').split('-').map(Number);
+        const due = p.length === 3 ? Math.floor(new Date(p[0], p[1] - 1, p[2], 17, 0).getTime() / 1000) : null;
+        return { _yeni: true, id: g.id, title: g.baslik, status: g.durum, priority: g.oncelik, due_at: due,
+                 evrak_id: k._evrak || null, evrak_adi: g.evrak_adi || null, taraf_adi: g.taraf_adi || null, barkod: g.barkod || null,
+                 ext_pending: !!g.erteleme_bekliyor, assignee_id: g.sorumlu_id, assignee_name: g.sorumlu_adi,
+                 birim_id: k.birimId != null ? String(k.birimId) : '', birim_adi: g.birim_adi, dosya_no: g.dosya_no };
+    }
+    // "İş ata": yeni sayfanın iş formu, dosya bağıyla. İş açılınca (ya da vazgeçilince) kullanıcı karta döner.
+    function yeniIsAta(d, evrakId, on) {
+        on = on || {};
+        const kart = window.__uyapKartAlanlari ? window.__uyapKartAlanlari(d) : Object.assign({}, d);
+        if (!kart.dosyaTurKodAciklama && (d.dosyaTur || d.dosyaTurKodAciklama)) kart.dosyaTurKodAciklama = d.dosyaTur || d.dosyaTurKodAciklama;
+        if (evrakId) kart._evrak = String(evrakId);
+        const dosyaNo = String(d.dosyaNo || '').trim();
+        window.__cuIsAta({
+            baslik: on.baslik || '', aciklama: on.aciklama || '', sablon_adi: on.sablon || '',
+            birim_adi: d.birimAdi || '', dosya_no: dosyaNo, evrak_adi: on.evrakAdi || '',
+            donus_kart: window.__uyapDosyaAnahtari ? window.__uyapDosyaAnahtari(d) : null,
+            dosya: { birim_adi: d.birimAdi || '', dosya_no: dosyaNo, dosya_turu: kart.dosyaTurKodAciklama || '',
+                     uyap_karti: kart, barkod: on.barkod || '', birim_uyap_id: d.birimId != null ? String(d.birimId) : '' }
+        });
+    }
+
     // UYAP'ın dosyaId'si oturuma bağlı (her girişte değişir): iş ↔ dosya eşleşmesi birim + dosya no ile.
     function dosyaAnahtari(d) { return String(d.birimId || '') + '|' + String(d.dosyaNo || '').trim(); }
     function ayniDosya(t, d) {
@@ -2919,6 +2988,11 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         return String(t.dosya_id) === String(d.dosyaId);
     }
     async function dosyaninIsleri(d) {
+        if (YENI()) {
+            const q = new URLSearchParams({ gorunum: 'tum', durum: 'acik,devam,onayda', dosya_no: String(d.dosyaNo || '').trim(),
+                                            birim_adi: d.birimAdi || '', sinir: '100' });
+            return (await yeniIstek('liste?' + q.toString())).map(eskiBicim);
+        }
         // birim + dosya no varsa yalnız onlar gider: bunları tanımayan eski sunucu süzmeden büronun
         // (yöneticide tüm, üyede kendi) işlerini döndürür ve aşağıdaki süzgeç dosyayı ayırır.
         const p = d.birimId && d.dosyaNo
@@ -2962,6 +3036,11 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     // İş Listesi'ni yeni sekmede açar; işNo verilirse doğrudan o iş.
     function isAc(isNo) {
+        if (YENI()) {
+            if (typeof isNo === 'number' && window.__cuIsGoster) window.__cuIsGoster(isNo);
+            else if (window.__cuIslerAc) window.__cuIslerAc();
+            return;
+        }
         const host = location.hostname;
         const yerel = host === '127.0.0.1' || host === 'localhost' || host === '::1';
         const no = typeof isNo === 'number' ? isNo : null;
@@ -2973,6 +3052,10 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // Kişinin kendisi + büro kişileri (/me): bant ve paneldeki "Onaya gönder" için; 5 dk saklanır.
     let benZamani = 0;
     async function beniGetir(zorla) {
+        if (YENI()) {
+            if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await yeniBen(); benZamani = Date.now(); }
+            return ben;
+        }
         if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await api('/me'); benZamani = Date.now(); }
         return ben;
     }
@@ -2989,6 +3072,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         return isAtanan(t) ? 'gonder' : null;
     }
     function kapanisDugmesi(t, sinif) {
+        if (t._yeni) return null;
         const ey = kapanisEylemi(t);
         if (!ey) return null;
         const b = el('button', null, ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder');
@@ -3001,6 +3085,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // "Ertesi güne aktar": son tarihi bir iş günü ileri alma talebi. Not zorunlu; yönetici / onay
     // yetkilisi İş Listesi'nde kabul edince tarih değişir (sunucudaki ek süre talebi akışı).
     function aktarDugmesi(t, sinif) {
+        if (t._yeni) return null;
         if (kapanisEylemi(t) !== 'gonder') return null;
         if (t.ext_pending) {
             const s = el('span', 'font-size:11px;opacity:.85;', 'aktarım onayda');
@@ -3022,6 +3107,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     function kararDugmeleri(t, kabulSinif, retSinif) {
         const out = [];
+        if (t._yeni) return out;
         if (!onayYetkili(t)) return out;
         const ekle = function(metin, baslik, sinif, tur, kabul) {
             const b = el('button', null, metin);
@@ -3462,6 +3548,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // kart: dosya kartı (evrak ağacından belge seçimi için); evrakId: belge satırından açıldıysa seçili gelir.
     // on: formun ön doldurması {sablon (adı), baslik, aciklama} — ör. bildirimden açılınca.
     async function pencereAc(d, kart, evrakId, on) {
+        if (YENI()) { yeniIsAta(d, evrakId, on); return; }
         kur();
         if (!kutu) return;
         kutu.innerHTML = '';
@@ -4296,7 +4383,8 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             b.addEventListener('click', fn);
             k.appendChild(b);
         };
-        arac('İş Listesi', 'Takvim, raporlar ve büronun tüm işleri (yeni sekmede)', ac);
+        arac('İş Listesi', YENI() ? 'Bugün, takvim, onay bekleyenler ve büronun tüm işleri' : 'Takvim, raporlar ve büronun tüm işleri (yeni sekmede)',
+             function() { if (YENI()) panelKapat(); ac(); });
         const g = window.__uyapGerekceli;
         if (g) {
             const d = g.durum();
@@ -4367,6 +4455,11 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
 
     // Paneli bir dosyanın işleriyle açar (kart düğmesi / birden çok işli belge).
     function panelDosyaAc(d, kart) {
+        if (YENI() && window.__cuIsDosya) {
+            window.__cuIsDosya({ dosya_no: String(d.dosyaNo || '').trim(), birim_adi: d.birimAdi || '',
+                                 donus_kart: window.__uyapDosyaAnahtari ? window.__uyapDosyaAnahtari(d) : null });
+            return;
+        }
         panelKur();
         if (!pnl.kok) return;
         pnl.dosya = { id: dosyaAnahtari(d), d: d, kart: kart || null, ad: (window.__uyapDosyaAdi ? window.__uyapDosyaAdi(d) : '') || String(d.dosyaNo || d.dosyaId) };
@@ -4394,8 +4487,15 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const filtre = anahtar();
         let tekrar = false;
         try {
-            if (!ben) { ben = await api('/me'); cipleriCiz(); }
-            const isler = dosya ? await dosyaninIsleri(dosya.d) : ((await api('/tasks?filtre=' + filtre)).tasks || []);
+            if (!ben) { ben = YENI() ? await yeniBen() : await api('/me'); cipleriCiz(); }
+            let isler;
+            if (dosya) isler = await dosyaninIsleri(dosya.d);
+            else if (YENI()) {
+                // Çekmecedeki "işlerim": yeni veritabanından (benim → sorumlusu olduğum açık işler)
+                const q = filtre === 'onay' ? 'liste?gorunum=onay'
+                    : 'liste?' + new URLSearchParams({ gorunum: 'tum', durum: 'acik,devam,onayda', sorumlu: filtre === 'benim' ? String(ben.me.id) : '' }).toString();
+                isler = (await yeniIstek(q)).map(eskiBicim);
+            } else isler = (await api('/tasks?filtre=' + filtre)).tasks || [];
             if (dosya) dosyaIsleri[dosya.id] = { t: Date.now(), isler: isler };
             if (filtre !== anahtar()) { tekrar = true; return; }   // bu arada süzgeç değişti → yeniden
             pnl.isler = isler;
@@ -5286,6 +5386,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         return 'K' + kesUygunlar(d).map(function(b) { return b.kisiKurumId; }).join(',');
     }
     function kesinlestirmeDugmesi(t, d, sinif) {
+        if (t._yeni) return null;
         if (!d.dosyaId || !kesinlestirmeIsi(t) || !kesUygunlar(d).length) return null;
         const b = el('button', null, 'Kesinleştirme talebi gönder');
         b.type = 'button';
@@ -5590,6 +5691,8 @@ const _EK_BETIK_DOSYALARI: &[&str] = &[
     "gorevcubugu.js",
     "kartlar.js",
     "anasayfa.js",
+    "icra.js",
+    "isler.js",
 ];
 // armonia-renk.css: UYAP stilindeki lacivert/gri renkleri tema değişkenlerimize bağlayan, araclar/renk_uret.py ile
 // üretilen katman (2026-11-14). tema.css'ten önce gelir: elle ince ayarlar eşit özgüllükte kazanır.
@@ -6025,7 +6128,18 @@ pub const LAN_CEREZ: &str = "uyap_lan";
 
 fn _lan_cerezi_gecerli(headers: &HeaderMap) -> bool {
     let deger = extract_cookie(headers, LAN_CEREZ);
-    !deger.is_empty() && constant_time_eq(&deger, &GW_LAN_SECRET)
+    !deger.is_empty()
+        && (constant_time_eq(&deger, &GW_LAN_SECRET) || crate::kimlik::lan_cerezi_coz(&deger, &GW_LAN_SECRET).is_some())
+}
+
+/// İsteğin sahibi (İş Listesi; kimlik.rs). require_auth geçtikten sonra çağrılır: bu bilgisayardan gelen
+/// istek programa girişli hesaptır; yerel ağdan gelen yalnız kişiye özel çerezle tanınır (ortak ofis
+/// parolasıyla girilen eski çerez kişiyi söylemez).
+fn istek_hesabi(headers: &HeaderMap, client_host: &str) -> Option<String> {
+    if _LOCAL_HOSTS.contains(&client_host) {
+        return crate::kimlik::ofis_hesabi();
+    }
+    crate::kimlik::lan_cerezi_coz(&extract_cookie(headers, LAN_CEREZ), &GW_LAN_SECRET)
 }
 
 fn html_escape(s: &str, quote: bool) -> String {
@@ -6062,7 +6176,7 @@ border-radius:16px;padding:24px 26px;box-shadow:0 14px 40px rgba(96,86,66,.14)'>
 <h2 style='margin-top:0'>Ofis UYAP Girişi</h2>\
 <p style='font-size:13px;color:#8C867B'>Bu bilgisayar ofisin UYAP oturumunu yerel ağda paylaşıyor. \
 Programdan (<b>Bağlantıyı Al → Tarayıcıyı Aç</b>) bağlanıyorsanız bu ekranı görmezsiniz. \
-Doğrudan bağlanmak için ofis programına girilen kullanıcı adı ve parolayı yazın.</p>\
+Doğrudan bağlanmak için <b>kendi Çoklu UYAP kullanıcı adınızı ve parolanızı</b> yazın (İş Listesi işlerinizi sizin adınıza gösterir).</p>\
 {}\
 <form method='post' action='/__uyap_lan__/giris' autocomplete='off'>\
 <input type='hidden' name='hedef' value='{}'>\
@@ -6690,13 +6804,31 @@ async fn lan_giris(
     }
     let gw_user = GW_USER.lock().clone();
     let gw_pass = GW_PASS.lock().clone();
-    let dogru = match gw_pass {
+    let ofis_girisi = match gw_pass {
         Some(ref p) if !p.is_empty() => {
             constant_time_eq(&kullanici, &gw_user) && constant_time_eq(&parola, p)
         }
         _ => false,
     };
-    if !dogru {
+    // Kişi: ofis programının hesabıyla girildiyse o hesap; değilse büro üyesinin kendi hesabı bulutta
+    // doğrulanır (yalnız aynı büro; parola saklanmaz).
+    let hesap: Option<String> = if ofis_girisi {
+        crate::kimlik::ofis_hesabi()
+    } else if kullanici.is_empty() || parola.is_empty() {
+        None
+    } else {
+        match crate::is_listesi::hesap_dogrula(&kullanici, &parola).await {
+            Ok(h) => {
+                let buro = |x: &str| x.rsplit_once('@').map(|(_, b)| b.to_lowercase()).unwrap_or_default();
+                match crate::kimlik::ofis_hesabi() {
+                    Some(o) if buro(&o) == buro(&h) => Some(h),
+                    _ => None,
+                }
+            }
+            Err(_) => None,
+        }
+    };
+    if !ofis_girisi && hesap.is_none() {
         _auth_hata_kaydet(&client_host);
         return _lan_sayfa(
             &_lan_giris_sayfasi(&hedef, "Kullanıcı adı veya parola hatalı."),
@@ -6704,10 +6836,11 @@ async fn lan_giris(
         );
     }
     let secure_attr = if scheme == "https" { "; Secure" } else { "" };
-    let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Strict; Path=/{}",
-        LAN_CEREZ, *GW_LAN_SECRET, secure_attr
-    );
+    let deger = match &hesap {
+        Some(h) => crate::kimlik::lan_cerezi(h, &GW_LAN_SECRET),
+        None => GW_LAN_SECRET.to_string(),
+    };
+    let cookie = format!("{}={}; HttpOnly; SameSite=Strict; Path=/{}", LAN_CEREZ, deger, secure_attr);
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header("Location", hedef)
@@ -6772,6 +6905,7 @@ async fn proxy_handler(
         Ok(u) => u,
         Err(rej) => return rej.into_response(),
     };
+    let hesap = istek_hesabi(req.headers(), &client_host);
 
     let req_headers_axum = req.headers().clone();
     let scheme = resolve_scheme(&state, &req_headers_axum);
@@ -6812,6 +6946,31 @@ async fn proxy_handler(
             .header("Cache-Control", "no-store")
             .body(Body::from(ad))
             .unwrap();
+    }
+
+    // İş Listesi (büro veritabanı, kişiye göre): icra_api'den ÖNCE (aynı ön ek).
+    if crate::is_api::is_path(&full_path) {
+        let capraz = req_headers_axum
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("cross-site"))
+            .unwrap_or(false);
+        let (status, out_headers, out_body) =
+            crate::is_api::handle(method.as_str(), &full_path, &query, &body, capraz, hesap.as_deref()).await;
+        return tuple_to_axum_response(status, out_headers, out_body);
+    }
+
+    // Büro veritabanı uçları (İcra Takip Süreçleri sayfası): bütün büro kullanıcılarına açık (kullanıcı kararı
+    // 15.11.2026; kimlik yukarıda require_auth ile doğrulandı). UYAP'a gitmez. Tünelden gelenler office_agent'ta.
+    if crate::icra_api::is_path(&full_path) {
+        let capraz = req_headers_axum
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("cross-site"))
+            .unwrap_or(false);
+        let (status, out_headers, out_body) =
+            crate::icra_api::handle(method.as_str(), &full_path, &query, &body, capraz).await;
+        return tuple_to_axum_response(status, out_headers, out_body);
     }
 
     if is_listesi::is_path(&full_path) {

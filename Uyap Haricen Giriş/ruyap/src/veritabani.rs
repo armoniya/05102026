@@ -36,6 +36,7 @@ const HAVUZ_EN_COK: usize = 8;
 pub static SEMALAR: &[(i32, &str, &str)] = &[
     (1, "baslangic", include_str!("sema/0001_baslangic.sql")),
     (2, "icra", include_str!("sema/0002_icra.sql")),
+    (3, "is_listesi", include_str!("sema/0003_is_listesi.sql")),
 ];
 
 pub type Gunluk = Arc<dyn Fn(&str) + Send + Sync>;
@@ -736,6 +737,10 @@ mod tests {
             crate::icra_veri::veritabani_senaryosu(&mut b);
             crate::icra_tarama::veritabani_senaryosu(&mut b);
             crate::icra_durum::veritabani_senaryosu(&mut b);
+            crate::icra_api::veritabani_senaryosu(&mut b);
+            crate::is_veri::veritabani_senaryosu(&mut b);
+            crate::is_aktar::veritabani_senaryosu(&mut b);
+            crate::is_api::veritabani_senaryosu(&mut b);
         }
         // Parola dosyada açık metin olarak durmaz
         let ayar = fs::read_to_string(ayar_yolu()).unwrap();

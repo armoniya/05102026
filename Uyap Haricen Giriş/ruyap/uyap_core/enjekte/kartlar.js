@@ -86,6 +86,24 @@
                  sekme: window.__uyapSeciliSekme ? window.__uyapSeciliSekme(kartEl) : '', belge: seciliBelge(kartEl) };
     }
 
+    // Kullanıcı kartı kendisi küçülttü ya da X ile kapattı: dinleyenlere haber ver (icra.js: kart İcra Takip
+    // Süreçleri'nden açıldıysa o sayfa yeniden öne gelir). Başka karta geçerken yapılan küçültme bildirilmez.
+    const kapanisDinleyicileri = [];
+    function kapanisBildir(anahtar, neden) {
+        kapanisDinleyicileri.forEach(function(f) { try { f(anahtar, neden); } catch (e) {} });
+    }
+    window.__cuKartKapaninca = function(f) { kapanisDinleyicileri.push(f); };
+    window.__cuGorunurKartAnahtari = function() { const el = gorunurKart(); const s = el && kartDurumu(el); return s ? s.anahtar : null; };
+    window.__cuGorunurKartiKucult = function() { const el = gorunurKart(); return el ? kullaniciKucult(el) : false; };
+    // Başka ekrandan (İş Listesi "İş ata" sonrası) kartı yeniden açma: sekmesi ve belgesiyle.
+    window.__cuKartAc = function(anahtar) { if (bul(anahtar)) ac(anahtar); };
+    function kullaniciKucult(kartEl) {
+        const s = kartDurumu(kartEl);
+        const ok = kucult(kartEl);
+        if (ok && s) kapanisBildir(s.anahtar, 'kucult');
+        return ok;
+    }
+
     // ── Küçült: durumu sakla, kartı kapat ──
     function kucult(kartEl) {
         const s = kartDurumu(kartEl);
@@ -241,7 +259,7 @@
         }
         let kucuk = bas.querySelector('[data-kucult]');
         if (!kucuk) {
-            kucuk = pencereDugmesi('data-kucult', 'icon-minus', 'Görev çubuğuna küçült (sekme ve seçili belge hatırlanır)', function() { kucult(kartEl); });
+            kucuk = pencereDugmesi('data-kucult', 'icon-minus', 'Görev çubuğuna küçült (sekme ve seçili belge hatırlanır)', function() { kullaniciKucult(kartEl); });
             x.parentElement.insertBefore(kucuk, x);
         }
         let tam = bas.querySelector('[data-cu-tam]');
@@ -320,7 +338,7 @@
         kartlar.forEach(function(k) {
             const acik = !!s && k.anahtar === s.anahtar;
             if (k.acik && !acik) {
-                if (xIleKapanan === k.anahtar) { k.sil = true; xIleKapanan = null; }
+                if (xIleKapanan === k.anahtar) { k.sil = true; xIleKapanan = null; kapanisBildir(k.anahtar, 'x'); }
                 else k.t = Date.now();                     // başka nedenle kayboldu: küçültülmüş say
             }
             if (k.acik !== acik) { k.acik = acik; degisti = true; }
@@ -346,7 +364,7 @@
                 kimlik: 'kart:' + k.anahtar, ad: k.ad || k.anahtar, ikon: '📁', on: !!k.acik, kucuk: !k.acik,
                 ust: no, alt: no ? kisaBirim(k.kart.birimAdi) : '',
                 tikla: function() {
-                    if (k.acik) { const el = gorunurKart(); if (el) kucult(el); }
+                    if (k.acik) { const el = gorunurKart(); if (el) kullaniciKucult(el); }
                     else ac(k.anahtar);
                 },
                 kapat: function() {
@@ -355,9 +373,9 @@
                     kaydet();
                     ciz();
                 },
-                menu: function() { return [[[k.acik ? 'Küçült' : 'Aç', function() { if (k.acik) { const el = gorunurKart(); if (el) kucult(el); } else ac(k.anahtar); }]]]; },
+                menu: function() { return [[[k.acik ? 'Küçült' : 'Aç', function() { if (k.acik) { const el = gorunurKart(); if (el) kullaniciKucult(el); } else ac(k.anahtar); }]]]; },
             };
-        }));
+        }), 'kart');
     }
 
     // Kart görev çubuğuna yer bıraksın: UYAP kartı tüm yüksekliği kaplayınca (küçük ekran) görev

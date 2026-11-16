@@ -5,8 +5,9 @@
 // INJECT_VERSION'a katılır.
 //
 // • Görev çubuğu: ekranın altında, tam genişlik, UYAP ekranında her zaman görünür. Girdileri dışarıdan
-//   verilir (kartlar.js: küçültülen UYAP dosya kartları) — API: window.CU.gorev.ayarla([{kimlik, ad, ikon,
-//   on, kucuk, rozet, tikla(), kapat(), menu()}]). Boşken bir ipucu yazısı durur.
+//   verilir (kartlar.js: küçültülen UYAP dosya kartları; icra.js: İcra Takip Süreçleri sayfası) — API:
+//   window.CU.gorev.ayarla([{kimlik, ad, ikon, on, kucuk, rozet, tikla(), kapat(), menu()}], kaynak).
+//   Boşken bir ipucu yazısı durur.
 // • "ÇOKLU UYAP" başlat düğmesi: UYAP'ın sol menüsünü açar/kapatır. Varsayılan kapalı; açılınca görev
 //   çubuğundan yukarı kayar ve sayfayı iter (üstüne binmez). Menü üst çubuğun altından başlar, logo yok.
 // • Kullanıcı kararıyla gizlenen UYAP öğeleri (her sayfada): alt bilgi çubuğu, erişilebilirlik düğmesi ve
@@ -353,7 +354,19 @@
     // Kip değişti (telefon çevrildi, pencere daraldı): menü ölçüleri yeniden alınsın.
     if (window.__cuKipDegisince) window.__cuKipDegisince(function() { if (solAcik) solMenu(true); else ciz(); });
 
+    // Birden çok kaynak girdi verir (kartlar.js: dosya kartları, icra.js: İcra Takip Süreçleri sayfası); her kaynak
+    // kendi listesini bütünüyle yeniler. Çubukta sıra: önce sayfalar ('icra'), sonra dosya kartları.
+    const kaynaklar = {}, KAYNAK_SIRA = ['isler', 'icra', 'kart'];
     window.CU = {
-        gorev: { ayarla: function(liste) { gorevler.length = 0; liste.forEach(function(g) { gorevler.push(g); }); ciz(); } },
+        gorev: { ayarla: function(liste, kaynak) {
+            kaynaklar[kaynak || 'kart'] = liste || [];
+            const adlar = Object.keys(kaynaklar).sort(function(x, y) {
+                const i = KAYNAK_SIRA.indexOf(x), j = KAYNAK_SIRA.indexOf(y);
+                return (i < 0 ? 99 : i) - (j < 0 ? 99 : j);
+            });
+            gorevler.length = 0;
+            adlar.forEach(function(k) { kaynaklar[k].forEach(function(g) { gorevler.push(g); }); });
+            ciz();
+        } },
     };
 })();
