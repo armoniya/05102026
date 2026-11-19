@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::akis_pkcs11;
 use crate::akis_pkcs11 as PyKCS11;
 use crate::akis_pkcs11::{AttrValue, Mechanism, PyKCS11Lib, TemplateVal};
 use crate::cades;
@@ -112,19 +113,88 @@ pub fn _detect_pkcs11_lib() -> Option<String> {
     None
 }
 
+// ── Kart iş parçacığı ────────────────────────────────────────────────────────────────────────────
+//
+// Ölçüm (19.11.2026, AKIS kart): sürücüyü her imzada yükleyip bırakmak kartı baştan okutuyordu (oturum +
+// sertifika ~0,4–0,55 sn) ve yeniden yüklemede takılabiliyordu; Python sürümü (ctypes) DLL'i süreç boyunca
+// tutar. `C_CloseSession` ise her iki dilde ~1 sn (sürücü).
+// Bu yüzden: bütün kart işleri TEK bir iş parçacığında, sürücü bir kez yüklenip hiç bırakılmadan yapılır
+// (AKIS `C_Initialize(NULL)` ile açılır → çağrılar sıralı olmalı; tek iş parçacığı bunu garanti eder). İmza
+// hazır olunca sonuç hemen döner; oturum kapatma ondan SONRA yapılır, sıradaki iş onu bekler.
+
+/// Kart işinin sonucu: (sertifika DER, imzalı öznitelikler, ham imza, ECDSA mı).
+type KartImzasi = (Vec<u8>, Vec<u8>, Vec<u8>, bool);
+
+enum KartIsi {
+    Imza { content_xml: Vec<u8>, pin: String, prefer_serial: Option<String>, cevap: std::sync::mpsc::Sender<Result<KartImzasi, SignError>> },
+    KartVar { cevap: std::sync::mpsc::Sender<bool> },
+}
+
+fn kart_kuyrugu() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<KartIsi>> {
+    static K: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<KartIsi>>> = std::sync::OnceLock::new();
+    K.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<KartIsi>();
+        std::thread::Builder::new()
+            .name("e-imza-kart".into())
+            .spawn(move || {
+                let mut kitaplik: Option<PyKCS11Lib> = None;
+                for is_ in rx {
+                    match is_ {
+                        KartIsi::KartVar { cevap } => {
+                            let var = kitaplik_yukle(&mut kitaplik)
+                                .ok()
+                                .and_then(|p| p.getSlotList(true).ok())
+                                .is_some_and(|s| !s.is_empty());
+                            let _ = cevap.send(var);
+                        }
+                        KartIsi::Imza { content_xml, pin, prefer_serial, cevap } => {
+                            let (sonuc, oturum) = match kitaplik_yukle(&mut kitaplik) {
+                                Ok(p) => kartla_imzala(p, &content_xml, &pin, prefer_serial.as_deref()),
+                                Err(e) => (Err(e), None),
+                            };
+                            let _ = cevap.send(sonuc);
+                            // Sonuç gitti; kapatma (~1 sn) sıradaki işten önce, kullanıcıyı bekletmeden.
+                            if let Some(s) = oturum {
+                                s.logout();
+                                s.closeSession();
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("e-imza iş parçacığı başlatılamadı");
+        std::sync::Mutex::new(tx)
+    })
+}
+
+/// Sürücüyü ilk kullanımda yükler; sonra hep aynısını verir (bırakılmaz). Yükleme başarısızsa sonraki
+/// işte yeniden denenir.
+fn kitaplik_yukle(k: &mut Option<PyKCS11Lib>) -> Result<&PyKCS11Lib, SignError> {
+    if k.is_none() {
+        let lib = _detect_pkcs11_lib().ok_or_else(|| {
+            SignError(
+                "Kart sürücüsü (PKCS#11 DLL: akisp11.dll/etpkcs11.dll) bulunamadı. UYAP_PKCS11_LIB ortam değişkeniyle yolu belirtebilirsiniz.".to_string(),
+            )
+        })?;
+        let mut p = PyKCS11Lib::new();
+        p.load(&lib).map_err(|e| SignError(format!("PKCS#11 modülü yüklenemedi: {}", e)))?;
+        *k = Some(p);
+    }
+    Ok(k.as_ref().expect("yüklendi"))
+}
+
+fn kart_isi_gonder(is_: KartIsi) -> Result<(), SignError> {
+    kart_kuyrugu()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .send(is_)
+        .map_err(|_| SignError("E-imza iş parçacığı çalışmıyor; programı yeniden başlatın.".to_string()))
+}
+
 /// Ofis makinesine takılı, sertifikası olan bir kart var mı? (headless ön kontrol)
 pub fn card_present() -> bool {
-    let Some(lib) = _detect_pkcs11_lib() else {
-        return false;
-    };
-    let mut pkcs11 = PyKCS11Lib::new();
-    if pkcs11.load(&lib).is_err() {
-        return false;
-    }
-    match pkcs11.getSlotList(true) {
-        Ok(slots) => !slots.is_empty(),
-        Err(_) => false,
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    kart_isi_gonder(KartIsi::KartVar { cevap: tx }).is_ok() && rx.recv().unwrap_or(false)
 }
 
 pub fn _p1363_to_der(sig: &[u8]) -> Vec<u8> {
@@ -144,30 +214,42 @@ pub fn _make_sign_sgn(
             "Kart PIN'i bulunamadı (ofis henüz giriş yapmamış olabilir).".to_string(),
         ));
     }
-    let lib = _detect_pkcs11_lib().ok_or_else(|| {
-        SignError(
-            "Kart sürücüsü (PKCS#11 DLL: akisp11.dll/etpkcs11.dll) bulunamadı. UYAP_PKCS11_LIB ortam değişkeniyle yolu belirtebilirsiniz.".to_string(),
-        )
+    let (tx, rx) = std::sync::mpsc::channel();
+    kart_isi_gonder(KartIsi::Imza {
+        content_xml: content_xml.to_vec(),
+        pin: pin.to_string(),
+        prefer_serial: prefer_serial.map(str::to_string),
+        cevap: tx,
     })?;
-
-    let mut pkcs11 = PyKCS11Lib::new();
-    pkcs11
-        .load(&lib)
-        .map_err(|e| SignError(format!("PKCS#11 modülü yüklenemedi: {}", e)))?;
-    let slots = pkcs11
-        .getSlotList(true)
-        .map_err(|e| SignError(format!("Slot listesi alınamadı: {}", e)))?;
-    if slots.is_empty() {
-        return Err(SignError(
-            "Kartı olan okuyucu bulunamadı. E-imza kartı takılı mı?".to_string(),
-        ));
+    let (cert_der, signed_attrs, mut signature, is_ecdsa) =
+        rx.recv().map_err(|_| SignError("E-imza iş parçacığı yanıt vermedi.".to_string()))??;
+    if is_ecdsa && signature.len() % 2 == 0 {
+        signature = _p1363_to_der(&signature);
     }
+    cades::build_cms(content_xml, &cert_der, &signed_attrs, &signature, is_ecdsa)
+        .map_err(SignError)
+}
 
-    let session = pkcs11
-        .openSession(slots[0], PyKCS11::CKF_SERIAL_SESSION)
-        .map_err(|e| SignError(format!("Oturum açılamadı: {}", e)))?;
+/// Kart iş parçacığında: oturum aç → giriş → sertifika → imza. Açılan oturum (varsa) kapatılmak üzere döner.
+fn kartla_imzala(
+    pkcs11: &PyKCS11Lib,
+    content_xml: &[u8],
+    pin: &str,
+    prefer_serial: Option<&str>,
+) -> (Result<KartImzasi, SignError>, Option<akis_pkcs11::Session>) {
+    let slots = match pkcs11.getSlotList(true) {
+        Ok(s) => s,
+        Err(e) => return (Err(SignError(format!("Slot listesi alınamadı: {}", e))), None),
+    };
+    if slots.is_empty() {
+        return (Err(SignError("Kartı olan okuyucu bulunamadı. E-imza kartı takılı mı?".to_string())), None);
+    }
+    let session = match pkcs11.openSession(slots[0], PyKCS11::CKF_SERIAL_SESSION) {
+        Ok(s) => s,
+        Err(e) => return (Err(SignError(format!("Oturum açılamadı: {}", e))), None),
+    };
 
-    let sign_result: Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, bool), SignError> = (|| {
+    let sign_result: Result<KartImzasi, SignError> = (|| {
         session.login_user(pin).map_err(|e| {
             SignError(format!(
                 "Karta giriş yapılamadı (PIN hatalı ya da kart kilitli olabilir). Detay: {}",
@@ -268,19 +350,10 @@ pub fn _make_sign_sgn(
             .sign(priv_key, &to_sign, &mech)
             .map_err(|e| SignError(format!("İmzalama başarısız: {}", e)))?;
 
-        Ok((cert_der, signed_attrs, signature, to_sign, is_ecdsa))
+        Ok((cert_der, signed_attrs, signature, is_ecdsa))
     })();
 
-    session.logout();
-    session.closeSession();
-
-    let (cert_der, signed_attrs, mut signature, _to_sign, is_ecdsa) = sign_result?;
-    if is_ecdsa && signature.len() % 2 == 0 {
-        signature = _p1363_to_der(&signature);
-    }
-
-    cades::build_cms(content_xml, &cert_der, &signed_attrs, &signature, is_ecdsa)
-        .map_err(SignError)
+    (sign_result, Some(session))
 }
 
 fn _sign_content(
@@ -469,4 +542,59 @@ pub fn sign_document(
         if ext.is_empty() { "?" } else { &ext },
         _diag(body)
     )))
+}
+
+/// İmza adımlarının süre ölçümü (elle, PIN'siz; karta giriş yapılmaz):
+///   OLCUM_PDF=<pdf> OLCUM_UDF=<udf> cargo test --release --lib -- udf_signer::olcum --ignored --nocapture
+#[cfg(test)]
+mod olcum {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore]
+    fn imza_adim_sureleri() {
+        // Yeni tasarım: sürücü bir kez yüklenir; kullanıcının beklediği kısım (oturum → sertifika) ile sonradan
+        // yapılan kapatma ayrı ölçülür. (İmza ve giriş PIN ister; ölçülmez.)
+        let t = Instant::now();
+        let mut p = PyKCS11Lib::new();
+        p.load(&_detect_pkcs11_lib().expect("kart sürücüsü yok")).expect("yükleme");
+        println!("RUST sürücü yükle (bir kez): {:?}", t.elapsed());
+        for tur in 1..=3 {
+            let t0 = Instant::now();
+            let slots = p.getSlotList(true).expect("slot");
+            if slots.is_empty() {
+                println!("RUST kart: takılı kart yok");
+                break;
+            }
+            let s = p.openSession(slots[0], PyKCS11::CKF_SERIAL_SESSION).expect("oturum");
+            let certs = s.findObjects(&[(PyKCS11::CKA_CLASS, TemplateVal::Ulong(PyKCS11::CKO_CERTIFICATE))]).expect("bul");
+            for &c in &certs {
+                let _ = s.getAttributeValue(c, &[PyKCS11::CKA_VALUE, PyKCS11::CKA_ID]);
+            }
+            let hazir = t0.elapsed();
+            s.closeSession();
+            println!("RUST kart tur {tur}: kullanıcının beklediği {:?} | sonradan kapatma {:?}", hazir, t0.elapsed() - hazir);
+        }
+        for tur in 1..=2 {
+            let t0 = Instant::now();
+            let var = card_present();
+            println!("RUST card_present (kart iş parçacığı) tur {tur}: {var} {:?}", t0.elapsed());
+        }
+        drop(p);
+        if let Ok(pdf) = std::env::var("OLCUM_PDF") {
+            let t = Instant::now();
+            let r = udf_converter::convert_to_udf_xml(&pdf);
+            println!("RUST pdf→udf: {:?} ({})", t.elapsed(), r.map(|x| format!("{} bayt", x.len())).unwrap_or_else(|e| e));
+        }
+        if let Ok(udf) = std::env::var("OLCUM_UDF") {
+            let b = std::fs::read(&udf).unwrap();
+            let t = Instant::now();
+            let mut z = ZipArchive::new(Cursor::new(&b[..])).unwrap();
+            let mut content = Vec::new();
+            z.by_name("content.xml").unwrap().read_to_end(&mut content).unwrap();
+            let cms_oncesi = t.elapsed();
+            println!("RUST udf aç + content.xml: {:?} ({} bayt)", cms_oncesi, content.len());
+        }
+    }
 }

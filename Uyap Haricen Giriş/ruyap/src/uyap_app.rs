@@ -3171,6 +3171,9 @@ pub fn main() {
     // Light yalnız UYAP'ı paylaşır: toplu iş başlatmayı kapat
     std::env::set_var("UYAP_TOPLU_IS", "0");
 
+    // Uzak bilgisayarda cokluuyap.com'dan açılan UYAP'ın "Paylaş"ı belgeyi buraya verir (panoya, Ctrl+V).
+    crate::yerel_yardimci::baslat();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Çoklu UYAP - Kontrol Ekranı")

@@ -136,7 +136,7 @@
             '#cu-icra tbody.tik{cursor:pointer}#cu-icra tbody.tik:hover td{background:var(--i-serit)}',
             '#cu-icra tbody.sec td{background:var(--i-vurgu-zemin)!important}',
             // Başlıktaki "yaz ya da seç" kutusu + açılır seçenek listesi
-            '#cu-icra table.liste th{vertical-align:top}#cu-icra th.suz{min-width:150px}',
+            '#cu-icra table.liste th{vertical-align:top}#cu-icra th.suz{min-width:150px}#cu-icra th.suz-dosya_no{min-width:112px}',
             '#cu-icra .i-kutu-s{position:relative;display:flex;margin-top:5px}',
             '#cu-icra .i-kutu-s input{flex:1;min-width:0;width:100%;font-weight:400;font-size:12.5px;padding:5px 44px 5px 8px;border-radius:8px;text-overflow:ellipsis}',
             '#cu-icra .i-kutu-s.dolu input{border-color:var(--i-vurgu);background:var(--i-vurgu-zemin);color:var(--i-vurgu-yazi);font-weight:600}',
@@ -214,6 +214,14 @@
             '#cu-icra .i-kutu h3{margin:0 0 4px;font-size:15px}#cu-icra .i-kutu p{margin:0 0 10px;color:var(--i-soluk);font-size:13px}',
             '#cu-icra .gun{display:inline-block;min-width:54px;text-align:center;border:1px solid var(--i-kenar);border-radius:8px;padding:2px 8px;background:var(--i-zemin);font-weight:600}',
             '#cu-icra .i-sarı{background:color-mix(in srgb,#b8901f 16%,var(--i-yuzey));border-radius:10px;padding:8px 12px;font-size:12.5px;margin-top:10px}',
+            // Tebligatlar: dosya grupları kalın çizgiyle ayrılır; tekrarlanan dosya bilgileri soluk
+            '#cu-icra table.teb th.suz{min-width:128px}#cu-icra table.teb th.suz-dosya_no{min-width:104px}',
+            '#cu-icra table.teb td{font-size:13px}#cu-icra table.teb tbody.teb-dosya tr:first-child td{border-top:2px solid var(--i-kenar)}',
+            '#cu-icra table.teb td.tekrar{color:var(--i-silik)}',
+            '#cu-icra .i-sirala{cursor:pointer;user-select:none}#cu-icra .i-sirala:hover{color:var(--i-vurgu-koyu)}',
+            '#cu-icra .i-ortu{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:20;display:flex;align-items:center;justify-content:center}',
+            '#cu-icra .i-pencere{background:var(--i-yuzey);border-radius:14px;padding:14px 16px;width:min(1100px,calc(100vw - 24px));max-height:calc(100vh - 60px);display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.25)}',
+            '#cu-icra .i-pencere-ic{flex:1;overflow:auto;min-height:120px}',
             '#cu-menu-icra .SidebarLabel{font-weight:600}',
             '#cu-menu-icra.on > li > a{background:var(--cu-vurgu-zemin,#e8ecf8)}',
             // Dar ekran: liste satırları kart gibi, panel tam sayfa.
@@ -228,7 +236,9 @@
             'html.cu-dar #cu-icra table.liste thead{display:none}',
             'html.cu-dar #cu-icra table.liste tbody{display:block;border-top:1px solid var(--i-kenar);padding:6px 0}',
             'html.cu-dar #cu-icra table.liste tbody:first-of-type{border-top:0}',
-            'html.cu-dar #cu-icra table.liste tr{display:block}',
+            // Dar ekranda hücreler alt alta: Kesinleşme kendi tebligatının altında kalır (geniş tabloda borçludan sonra).
+            'html.cu-dar #cu-icra table.liste tr{display:flex;flex-direction:column}',
+            'html.cu-dar #cu-icra table.liste td.kes{order:9}',
             'html.cu-dar #cu-icra table.liste td{display:block;border:0!important;padding:2px 12px}',
             'html.cu-dar #cu-icra table.liste td.tb{margin-left:12px;padding-left:10px;border-left:2px solid var(--i-kenar)!important}',
             'html.cu-dar #cu-icra table.liste td.tb.tb0{margin-top:8px}',
@@ -239,20 +249,27 @@
     // ── Durum ──
     const d = {
         sekme: 'surec', filtre: { q: '', asama: '', durum: 'acik', sayfa: 1, kesinlesme: '', tur: '', teblig: '', mazbata: '',
-                                  birim: '', alacakli: '', borclu: '', yil: '', dosya_tur: '', acilis_bas: '', acilis_son: '' },
+                                  birim: '', dosya_no: '', alacakli: '', borclu: '', yil: '', dosya_tur: '', acilis_bas: '', acilis_son: '' },
         ozet: null, liste: null, secili: null, panelSekme: 'borclular', hata: '',
         kutu: null, kutuMetin: '', kutuYazildi: false,   // açık başlık kutusu (anahtar), içindeki yazı
         tumTebligat: {},                                 // bag → true: borçlunun bütün tebligatları açık
         gt: null, gtAcik: false,                         // UYAP'tan güncelleme: son tarama, panel açık mı
-        gtForm: { birim: '', bas: '', son: '' }          // güncelleme kapsamı (yeniden çizimde korunur)
+        gtForm: { birim: '', bas: '', son: '', ptt: true, secimle: true }, // güncelleme kapsamı (yeniden çizimde korunur)
+        // Seçili dosyalar (veritabanı kimliği). Süzgeç değişince korunur; ana ekran düğmeleri seçim varsa yalnız bunlara işler.
+        secim: new Set()
     };
     let kok = null, govde = null, araZaman = null, kutuZaman = null;
     // Başlık süzgeçleri. kodlu: değer sabit bir koddur (yalnız listeden seçilir); değilse yazıyla "içinde geçen" de süzülür.
-    // baslik: sütun başlığının adı (kutunun adından farklıysa). Sıra = tablo sütunları (Takip aşaması 3. kutudan sonra).
+    // baslik: sütun başlığının adı (kutunun adından farklıysa). Sıra = tablo sütunları (Takip aşaması 5. kutudan sonra).
+    // Sütun sırası (kullanıcı isteği 19.11.2026): daire, dosya no, alacaklı, borçlu, kesinleşme, takip aşaması, tebligat …
+    // Listeden seçimde "Tümünü seç" sonra bazılarını kaldırmak da olur: süzgeç "!" + hariç tutulanlar (19.11.2026).
     const SUZGEC = [
-        { k: 'birim', ad: 'İcra dairesi', baslik: 'Dosya', kodlu: false },
-        { k: 'borclu', ad: 'Borçlu', kodlu: false },
+        { k: 'birim', ad: 'İcra dairesi', kodlu: false },
+        { k: 'dosya_no', ad: 'Dosya no', kodlu: false },
         { k: 'alacakli', ad: 'Alacaklı', kodlu: false },
+        { k: 'borclu', ad: 'Borçlu', kodlu: false },
+        // Kesinleşme tebligat başınadır (ödeme emri: takip türünün süresi; 103 / kıymet takdiri: 7 gün; diğerlerinde yok).
+        // Süzgeç borçlunun ödeme emri kesinleşmesine göre süzer.
         { k: 'kesinlesme', ad: 'Kesinleşme', kodlu: true },
         { k: 'tur', ad: 'Tebligat türü', kodlu: false },
         { k: 'teblig', ad: 'Tebliğ durumu', kodlu: false },
@@ -387,10 +404,10 @@
                           stil: 'min-width:38px;font-weight:700', onclick: kucult }),
             e('button', { sinif: 'i-d', metin: 'Kapat', title: 'Sayfayı kapat (görev çubuğundan da çıkar)', onclick: kapat })
         ]));
-        const sekmeler = [['surec', 'Süreçler'], ['sure', 'Kesinleşme Süreleri'], ['tatil', 'Resmî Tatiller']];
+        const sekmeler = [['surec', 'Süreçler'], ['tebligat', 'Tebligatlar'], ['sure', 'Kesinleşme Süreleri'], ['tatil', 'Resmî Tatiller']];
         kok.appendChild(e('div', { sinif: 'i-sekmeler', role: 'tablist' }, sekmeler.map(function(s) {
             return e('button', { sinif: d.sekme === s[0] ? 'on' : '', role: 'tab', metin: s[1],
-                                 onclick: function() { d.sekme = s[0]; ciz(); yukle(); } });
+                                 onclick: function() { d.sekme = s[0]; kutuBirak(); ciz(); yukle(); } });
         })));
         govde = e('div', { sinif: 'i-govde' });
         kok.appendChild(govde);
@@ -414,6 +431,9 @@
                 d.ozet = sonuc[0]; d.liste = sonuc[1];
                 durumYaz();
                 surecCiz();
+            } else if (d.sekme === 'tebligat') {
+                d.teb.liste = await istek('tebligatlar?' + tebSorgusu());
+                tebCiz();
             } else if (d.sekme === 'sure') {
                 sureCiz(await istek('kurallar'));
             } else {
@@ -467,12 +487,15 @@
             t.addEventListener('change', function() { d.filtre[k] = t.value; d.filtre.sayfa = 1; yukle(); });
             return t;
         };
-        const hesapla = e('button', { sinif: 'i-d', metin: 'Yeniden hesapla',
-            title: 'Kesinleşme, tebliğ durumu ve takip aşamasını kayıtlı tebligatlardan yeniden hesaplar (UYAP\'a gitmez)',
+        const hesapla = e('button', { sinif: 'i-d i-hesapla', metin: 'Yeniden hesapla' + (d.secim.size ? ' (' + d.secim.size + ' seçili)' : ''),
+            title: 'Kesinleşme, tebliğ durumu ve takip aşamasını kayıtlı tebligatlardan yeniden hesaplar (UYAP\'a gitmez). Seçim varsa yalnız seçili dosyalar.',
             onclick: async function() {
                 hesapla.disabled = true;
-                try { const s = await istek('hesapla', {}); bildir(s.guncellenen ? s.guncellenen + ' borçlunun durumu güncellendi.' : 'Değişen durum yok.'); yukle(); }
-                catch (x) { bildir(x.message); hesapla.disabled = false; }
+                try {
+                    const s = await istek('hesapla', d.secim.size ? { dosyalar: Array.from(d.secim) } : {});
+                    bildir(s.guncellenen ? s.guncellenen + ' borçlunun durumu güncellendi.' : 'Değişen durum yok.');
+                    yukle();
+                } catch (x) { bildir(x.message); hesapla.disabled = false; }
             } });
         ana.appendChild(e('div', { sinif: 'i-arac' }, [ara, durumSec,
             e('label', { sinif: 'i-onay', title: 'Açılış tarihi aralığı (iki gün dahil)' },
@@ -487,11 +510,12 @@
         ana.appendChild(e('div', { sinif: 'i-suzgecler' + (dar() ? '' : ' ust') }, (dar() ? TUM_SUZGEC : UST_SUZGEC).map(function(z) { return suzgecKutusu(z, true); })));
 
         const l = d.liste;
-        const suzBaslik = function(z) { return e('th', { sinif: 'suz' }, [z.baslik || z.ad, dar() ? null : suzgecKutusu(z, false)]); };
-        const basliklar = SUZGEC.slice(0, 3).map(suzBaslik).concat([e('th', { metin: 'Takip aşaması' })]).concat(SUZGEC.slice(3).map(suzBaslik));
+        const suzBaslik = function(z) { return e('th', { sinif: 'suz suz-' + z.k }, [z.baslik || z.ad, dar() ? null : suzgecKutusu(z, false)]); };
+        const basliklar = SUZGEC.slice(0, 5).map(suzBaslik).concat([e('th', { metin: 'Takip aşaması' })]).concat(SUZGEC.slice(5).map(suzBaslik));
         const tablo = e('table', { sinif: 'liste' }, [e('thead', {}, [e('tr', {}, basliklar)])]);
+        ana.appendChild(secimCubugu(l));
         if (!l || !l.satirlar.length) {
-            tablo.appendChild(e('tbody', {}, [e('tr', {}, [e('td', { colspan: '8', sinif: 'silik', stil: 'text-align:center;padding:22px',
+            tablo.appendChild(e('tbody', {}, [e('tr', {}, [e('td', { colspan: '9', sinif: 'silik', stil: 'text-align:center;padding:22px',
                 metin: 'Bu ölçütlere uyan dosya yok.' })])]));
             ana.appendChild(tablo);
         } else {
@@ -509,7 +533,7 @@
                 ]) : null
             ]));
         }
-        ana.addEventListener('scroll', acilirKapat);
+        ana.addEventListener('scroll', acilirKaydir);
         // Yeniden çizimden sonra: yazılmakta olan başlık kutusu odağını ve açık listesini korur.
         if (d.kutu) {
             const kutu = kok.querySelector('.i-kutu-s[data-k="' + d.kutu + '"] input');
@@ -520,45 +544,80 @@
     }
 
     // ── Başlık süzgeçleri ("yaz ya da seç") ──
-    function secenekler(k) { return (d.liste && d.liste.secenekler && d.liste.secenekler[k]) || []; }
-    function suzgecBul(k) { return TUM_SUZGEC.find(function(z) { return z.k === k; }); }
+    // Süzgeç kutuları iki sekmede ortak: etkin sekmenin süzgeci (F), listesi (L), süzgeç tanımları (SZ).
+    function tebSekmesi() { return d.sekme === 'tebligat'; }
+    function F() { return tebSekmesi() ? d.teb.filtre : d.filtre; }
+    function L() { return tebSekmesi() ? d.teb.liste : d.liste; }
+    function SZ() { return tebSekmesi() ? TEB_SUZGEC : TUM_SUZGEC; }
+    function aktifCiz() { if (tebSekmesi()) tebCiz(); else surecCiz(); }
+    // Tarih aralığı süzgeçleri (sekmede olanlar etiket olarak görünür).
+    const ARALIKLAR = [['acilis', 'Açılış'], ['evrak', 'Evrak tarihi'], ['islem', 'Tebliğ / iade tarihi']];
+    function secenekler(k) { return (L() && L().secenekler && L().secenekler[k]) || []; }
+    function suzgecBul(k) { return SZ().find(function(z) { return z.k === k; }); }
     // Seçili süzgecin ekranda görünen karşılığı (listeden seçildiyse etiketi, yazıldıysa yazının kendisi).
     // Listeden seçilen değerler (birden çok seçilebilir; süzgeçte satır sonuyla ayrılır). Yazıyla süzülüyorsa boş.
     function seciliDegerler(z) {
-        const v = d.filtre[z.k];
-        if (!v) return [];
+        const v = F()[z.k];
+        if (!v || haricMi(z)) return [];
         if (z.kodlu) return v.split('\n');
         return v.charAt(0) === '=' ? v.slice(1).split('\n') : [];
+    }
+    // "Tümünü seç" sonra bazılarını kaldır: süzgeç "!" + hariç tutulanlar ("!" tek başına: hepsi; yalnız boş değer: "!\n").
+    function haricMi(z) { return String(F()[z.k] || '').charAt(0) === '!'; }
+    function haricDegerler(z) {
+        if (!haricMi(z)) return [];
+        const r = F()[z.k].slice(1);
+        return r === '' ? [] : r === '\n' ? [''] : r.split('\n');
+    }
+    function haricYaz(z, liste) { return '!' + (liste.length === 1 && liste[0] === '' ? '\n' : liste.join('\n')); }
+    // Listeden mi seçildi (tam değerler ya da hariç listesi); değilse yazıyla süzülüyor.
+    function listedenMi(z) { const v = F()[z.k]; return !!v && (z.kodlu || v.charAt(0) === '=' || v.charAt(0) === '!'); }
+    function tumunuSec(z) {
+        clearTimeout(kutuZaman);
+        F()[z.k] = '!';
+        F().sayfa = 1;
+        yukle();
     }
     function degerEtiketi(z, deger) {
         const sec = secenekler(z.k).find(function(o) { return o.deger === deger; });
         return sec ? sec.etiket : (deger || '(boş)');
     }
     function suzgecEtiketi(z) {
-        const v = d.filtre[z.k];
+        const v = F()[z.k];
         if (!v) return '';
+        if (haricMi(z)) { const h = haricDegerler(z); return h.length ? 'Tümü (' + h.length + ' hariç)' : 'Tümü'; }
         if (!z.kodlu && v.charAt(0) !== '=') return v;
         const s = seciliDegerler(z);
         return degerEtiketi(z, s[0]) + (s.length > 1 ? ' +' + (s.length - 1) : '');
     }
     // Açılır listede bir seçeneği seçer / bırakır; liste açık kalır, başka seçenekler de işaretlenebilir.
     function secimDegistir(z, deger) {
+        if (haricMi(z)) {
+            const h = haricDegerler(z);
+            const j = h.indexOf(deger);
+            if (j >= 0) h.splice(j, 1); else h.push(deger);
+            clearTimeout(kutuZaman);
+            F()[z.k] = haricYaz(z, h);
+            F().sayfa = 1;
+            yukle();
+            return;
+        }
         const s = seciliDegerler(z);
         const i = s.indexOf(deger);
         if (i >= 0) s.splice(i, 1); else s.push(deger);
         clearTimeout(kutuZaman);
-        d.filtre[z.k] = s.length ? (z.kodlu ? '' : '=') + s.join('\n') : '';
-        d.filtre.sayfa = 1;
+        F()[z.k] = s.length ? (z.kodlu ? '' : '=') + s.join('\n') : '';
+        F().sayfa = 1;
         yukle();
     }
     function suzgecUygula(k, deger) {
         clearTimeout(kutuZaman);
-        d.filtre[k] = deger;
-        d.filtre.sayfa = 1;
+        F()[k] = deger;
+        F().sayfa = 1;
         yukle();
     }
     function suzgecKutusu(z, yerTutucuAd) {
-        const dolu = !!d.filtre[z.k];
+        const dolu = !!F()[z.k];
         const acik = d.kutu === z.k;
         const giris = e('input', { type: 'text', autocomplete: 'off', spellcheck: 'false',
             // Liste açıkken (seçim sonrası yeniden çizim) kutu boş, seçim yer tutucuda: yazı seçimin sonuna eklenmez.
@@ -573,13 +632,13 @@
             d.kutu = z.k; d.kutuMetin = giris.value; d.kutuYazildi = true;
             acilirCiz();
             // Listeden seçim yapılmışsa yazı yalnız açılır listeyi daraltır (seçimler kaybolmasın).
-            if (z.kodlu || seciliDegerler(z).length) return;
+            if (z.kodlu || listedenMi(z)) return;
             // Yazarak süzme: içinde geçenler (kısa bir beklemeyle, her tuşta sorgu gitmesin).
             clearTimeout(kutuZaman);
-            kutuZaman = setTimeout(function() { d.filtre[z.k] = giris.value.trim(); d.filtre.sayfa = 1; yukle(); }, 350);
+            kutuZaman = setTimeout(function() { F()[z.k] = giris.value.trim(); F().sayfa = 1; yukle(); }, 350);
         });
         giris.addEventListener('keydown', function(ev) {
-            if (ev.key === 'Escape') { ev.preventDefault(); kutuBirak(); giris.blur(); surecCiz(); return; }
+            if (ev.key === 'Escape') { ev.preventDefault(); kutuBirak(); giris.blur(); aktifCiz(); return; }
             if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); imlecOynat(ev.key === 'ArrowDown' ? 1 : -1); return; }
             if (ev.key !== 'Enter') return;
             ev.preventDefault();
@@ -613,6 +672,20 @@
         ]);
     }
     function kutuBirak() { d.kutu = null; d.kutuMetin = ''; d.kutuYazildi = false; acilirKapat(); }
+    // Liste kaydırılınca açık seçenek listesi kutunun yeni yerine taşınır; kutu görünür alandan çıkınca kapanır
+    // (geniş tabloda sağdaki kutuya tıklayınca tarayıcı yana kaydırıyor; eskiden liste hemen kapanıyordu).
+    let kaydirZaman = 0;
+    function acilirKaydir(ev) {
+        if (!kok || !kok.querySelector('.i-acilir') || kaydirZaman) return;
+        const ana = ev.currentTarget;
+        kaydirZaman = requestAnimationFrame(function() {
+            kaydirZaman = 0;
+            const kap = d.kutu && kok.querySelector('.i-kutu-s[data-k="' + d.kutu + '"]');
+            if (!kap) { acilirKapat(); return; }
+            const r = kap.getBoundingClientRect(), a = ana.getBoundingClientRect();
+            if (r.bottom < a.top || r.top > a.bottom || r.right < a.left || r.left > a.right) acilirKapat(); else acilirCiz();
+        });
+    }
     function acilirKapat() { if (!kok) return; const a = kok.querySelector('.i-acilir'); if (a) a.remove(); }
     // Kutuya yazılan kelimelerin hepsi etikette geçiyor mu (açılır listeyi daraltmak için).
     function yaziyaUyar(etiket) {
@@ -639,10 +712,11 @@
         const z = suzgecBul(d.kutu);
         const kap = z && kok.querySelector('.i-kutu-s[data-k="' + z.k + '"]');
         if (!kap) return;
-        const secili = d.filtre[z.k];
-        const seciler = seciliDegerler(z);
+        const secili = F()[z.k];
+        const haric = haricMi(z);
+        const seciler = haric ? haricDegerler(z) : seciliDegerler(z);
         const liste = gorunenSecenekler(z);
-        // Seçilip de listede olmayan değerler (sınırın dışında kalan ya da artık adedi olmayan) de görünsün, bırakılabilsin.
+        // Seçilip (ya da hariç tutulup) listede olmayan değerler (sınırın dışında kalan ya da artık adedi olmayan) de görünsün.
         seciler.forEach(function(s) {
             const etiket = degerEtiketi(z, s);
             if (yaziyaUyar(etiket) && !liste.some(function(o) { return o.deger === s; })) liste.unshift({ deger: s, etiket: etiket, adet: null });
@@ -651,15 +725,22 @@
         if (secili) kutu.appendChild(e('div', { sinif: 'sec', role: 'option',
             onmousedown: function(ev) { ev.preventDefault(); kutuBirak(); suzgecUygula(z.k, ''); } },
             [e('span', { sinif: 'ad', metin: 'Hepsi (süzgeci kaldır)' })]));
+        // Tümünü seç: hepsi işaretlenir, istenmeyenler tek tek kaldırılır (süzgeç "hariç" olur).
+        // Kutuya yazı yazılırken gösterilmez (yazılan metinle "hepsi" çelişir).
+        const yaziyor = d.kutuYazildi && d.kutuMetin.trim();
+        if (secenekler(z.k).length > 1 && !(haric && !seciler.length) && !yaziyor) kutu.appendChild(e('div', { sinif: 'sec', role: 'option',
+            title: 'Hepsini işaretler; istemediklerinizin işaretini kaldırın',
+            onmousedown: function(ev) { ev.preventDefault(); tumunuSec(z); } },
+            [e('span', { sinif: 'kt', metin: '' }), e('span', { sinif: 'ad', metin: 'Tümünü seç' })]));
         liste.forEach(function(o) {
-            const on = seciler.indexOf(o.deger) >= 0;
+            const on = haric ? seciler.indexOf(o.deger) < 0 : seciler.indexOf(o.deger) >= 0;
             kutu.appendChild(e('div', { sinif: 'sec' + (on ? ' on' : ''), role: 'option', 'aria-selected': on ? 'true' : 'false',
                 onmousedown: function(ev) { ev.preventDefault(); secimDegistir(z, o.deger); } },
                 [e('span', { sinif: 'kt', metin: on ? '✓' : '' }), e('span', { sinif: 'ad', metin: o.etiket }),
                  e('span', { metin: o.adet === null ? '' : String(o.adet) })]));
         });
         if (!liste.length) kutu.appendChild(e('div', { sinif: 'yok', metin: secenekler(z.k).length ? 'Yazdığınıza uyan seçenek yok.' : 'Bu ölçütlerde seçenek yok.' }));
-        const sinir = d.liste && d.liste.secenek_siniri;
+        const sinir = L() && L().secenek_siniri;
         if (sinir && secenekler(z.k).length >= sinir) kutu.appendChild(e('div', { sinif: 'yok', metin: 'En çok kullanılan ' + sinir + ' seçenek gösteriliyor; diğerleri için yazın.' }));
         kok.appendChild(kutu);
         const r = kap.getBoundingClientRect();
@@ -674,29 +755,69 @@
     // Seçili süzgeçler: tek satırda etiketler; tıklayınca o süzgeç kalkar.
     function seciliCiz(ana) {
         const etiketler = [];
-        if (d.filtre.asama) etiketler.push(['Aşama', ASAMA_KISA[d.filtre.asama] || d.filtre.asama, function() { d.filtre.asama = ''; }]);
-        if (d.filtre.acilis_bas || d.filtre.acilis_son) etiketler.push(['Açılış',
-            (d.filtre.acilis_bas ? gunMetni(d.filtre.acilis_bas) : '…') + ' – ' + (d.filtre.acilis_son ? gunMetni(d.filtre.acilis_son) : '…'),
-            function() { d.filtre.acilis_bas = ''; d.filtre.acilis_son = ''; }]);
-        TUM_SUZGEC.forEach(function(z) {
-            const v = d.filtre[z.k];
+        if (F().asama) etiketler.push(['Aşama', ASAMA_KISA[F().asama] || F().asama, function() { F().asama = ''; }]);
+        ARALIKLAR.forEach(function(a) {
+            const f = F(), b = f[a[0] + '_bas'], s = f[a[0] + '_son'];
+            if (b || s) etiketler.push([a[1], (b ? gunMetni(b) : '…') + ' – ' + (s ? gunMetni(s) : '…'),
+                function() { f[a[0] + '_bas'] = ''; f[a[0] + '_son'] = ''; }]);
+        });
+        SZ().forEach(function(z) {
+            const v = F()[z.k];
             if (!v) return;
-            const yazi = !z.kodlu && v.charAt(0) !== '=';
-            const adlar = yazi ? [] : seciliDegerler(z).map(function(s) { return degerEtiketi(z, s); });
+            const haric = haricMi(z);
+            const yazi = !z.kodlu && !haric && v.charAt(0) !== '=';
+            const adlar = yazi ? [] : (haric ? haricDegerler(z) : seciliDegerler(z)).map(function(s) { return degerEtiketi(z, s); });
             const metin = adlar.join(', ');
-            etiketler.push([z.ad, yazi ? '“' + v + '” geçen' : (metin.length > 70 ? adlar[0] + ' ve ' + (adlar.length - 1) + ' seçim daha' : metin),
-                            function() { d.filtre[z.k] = ''; }]);
+            const kisa = metin.length > 70 ? adlar[0] + ' ve ' + (adlar.length - 1) + ' seçim daha' : metin;
+            etiketler.push([z.ad, yazi ? '“' + v + '” geçen' : haric ? (adlar.length ? 'tümü, hariç: ' + kisa : 'tümü') : kisa,
+                            function() { F()[z.k] = ''; }]);
         });
         if (!etiketler.length) return;
-        const kaldir = function(fn) { return function() { fn(); kutuBirak(); d.filtre.sayfa = 1; yukle(); }; };
+        const kaldir = function(fn) { return function() { fn(); kutuBirak(); F().sayfa = 1; yukle(); }; };
         ana.appendChild(e('div', { sinif: 'i-secili' }, [e('span', { metin: 'Süzgeç:' })].concat(etiketler.map(function(x) {
             return e('button', { sinif: 'et', type: 'button', title: x[0] + ' süzgecini kaldır', onclick: kaldir(x[2]) },
                 [e('span', { metin: x[0] + ':' }), e('b', { metin: x[1] }), e('i', { metin: '✕' })]);
         })).concat(etiketler.length > 1 ? [e('button', { sinif: 'i-dahasi', type: 'button', metin: 'Hepsini kaldır',
             onclick: kaldir(function() {
-                d.filtre.asama = ''; d.filtre.acilis_bas = ''; d.filtre.acilis_son = '';
-                TUM_SUZGEC.forEach(function(z) { d.filtre[z.k] = ''; });
+                const f = F();
+                if (f.asama) f.asama = '';
+                ARALIKLAR.forEach(function(a) { if (a[0] + '_bas' in f) { f[a[0] + '_bas'] = ''; f[a[0] + '_son'] = ''; } });
+                SZ().forEach(function(z) { F()[z.k] = ''; });
             }) })] : [])));
+    }
+
+    // ── Dosya seçimi: satırlardaki onay kutuları + "Tümünü seç" (süzgeçteki bütün dosyalar, bütün sayfalar) ──
+    function secimYaz() {
+        const n = d.secim.size;
+        const sayac = kok && kok.querySelector('.i-secim-sayi');
+        if (sayac) sayac.textContent = n ? n + ' dosya seçili' : 'Seçili dosya yok';
+        const birak = kok && kok.querySelector('.i-secim-birak');
+        if (birak) birak.disabled = !n;
+        const hes = kok && kok.querySelector('.i-hesapla');
+        if (hes) hes.textContent = 'Yeniden hesapla' + (n ? ' (' + n + ' seçili)' : '');
+        if (kok) kok.querySelectorAll('input.i-dosya-sec').forEach(function(k) { k.checked = d.secim.has(Number(k.getAttribute('data-dosya'))); });
+        if (gtGorunsun() && !gtSuruyor()) gtCiz();
+    }
+    function secimCubugu(l) {
+        const toplam = l && l.dosya_sayisi != null ? l.dosya_sayisi : 0;
+        const tumu = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tümünü seç (' + toplam + ' dosya)', disabled: !toplam,
+            title: 'Süzgeçteki bütün dosyaları seçer (bütün sayfalar); önceki seçime eklenir',
+            onclick: async function() {
+                tumu.disabled = true;
+                try {
+                    const idler = await istek('dosya_kimlikleri?' + listeSorgusu());
+                    idler.forEach(function(x) { d.secim.add(x); });
+                    secimYaz();
+                } catch (x) { bildir(x.message); }
+                tumu.disabled = false;
+            } });
+        return e('div', { sinif: 'i-secim', stil: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0' }, [
+            tumu,
+            e('button', { sinif: 'i-d kucuk i-secim-birak', type: 'button', metin: 'Tümünü bırak', disabled: !d.secim.size,
+                onclick: function() { d.secim.clear(); secimYaz(); } }),
+            e('span', { sinif: 'i-secim-sayi alt', metin: d.secim.size ? d.secim.size + ' dosya seçili' : 'Seçili dosya yok' }),
+            e('span', { sinif: 'alt', metin: '· Seçim varsa "Yeniden hesapla" ve "Toplu tarama" yalnız seçili dosyalara işler.' })
+        ]);
     }
 
     // ── Borçlu satırı: künye + borçlunun bütün tebligatları (tebligat başına bir alt satır) ──
@@ -714,6 +835,12 @@
                                                      : e('span', { sinif: 'silik', metin: 'Dönmedi' })])
         ];
     }
+    // Kesinleşme hücresi (tebligat başına). Tabloda borçludan hemen sonra, Takip aşamasından önce durur.
+    function kesinlesmeHucresi(t, suzgecVar, ilk) {
+        const sinif = 'tb kes' + (suzgecVar && !t.uyan ? ' sol' : '') + (ilk ? ' t1' : '');
+        return e('td', { sinif: sinif }, [t.kesinlesme ? e('span', { metin: t.kesinlesme })
+            : e('span', { sinif: 'silik', metin: '—', title: t.kesinlesme_neden || (t.kesinlesme_yok ? 'Bu tebligat türünde kesinleşme yok' : 'Henüz hesaplanmadı') })]);
+    }
     function borcluGovdesi(s) {
         const suzgecVar = !!(d.filtre.tur || d.filtre.teblig || d.filtre.mazbata);
         // Süzgece uyan tebligatlar öne alınır (sıra içinde yeniden eskiye kalır).
@@ -722,27 +849,41 @@
         const gorunen = tumu ? hepsi : hepsi.slice(0, TEBLIGAT_GORUNEN);
         const fazla = hepsi.length - TEBLIGAT_GORUNEN;
         const satirSayisi = Math.max(1, gorunen.length) + (fazla > 0 ? 1 : 0);
+        const secKutu = e('input', { type: 'checkbox', sinif: 'i-dosya-sec', 'data-dosya': String(s.dosya), checked: d.secim.has(s.dosya),
+            'aria-label': 'Dosyayı seç: ' + s.birim + ' ' + s.dosya_no, stil: 'margin:2px 8px 0 0;flex:none',
+            onclick: function(ev) { ev.stopPropagation(); } });
+        secKutu.addEventListener('change', function() {
+            if (secKutu.checked) d.secim.add(s.dosya); else d.secim.delete(s.dosya);
+            secimYaz();
+        });
         const kunye = [
-            e('td', { rowspan: String(satirSayisi) }, [e('div', { sinif: 'dno', metin: s.dosya_no }), e('div', { sinif: 'alt', metin: s.birim }),
+            e('td', { rowspan: String(satirSayisi) }, [e('div', { stil: 'display:flex;align-items:flex-start' }, [secKutu, e('div', { metin: s.birim })])]),
+            e('td', { rowspan: String(satirSayisi) }, [e('div', { sinif: 'dno', metin: s.dosya_no }),
                 e('div', { sinif: 'alt', metin: [s.dosya_tur, s.acilis_tarihi ? 'açılış ' + gunMetni(s.acilis_tarihi) : ''].filter(Boolean).join(' · ') }),
                 s.acik ? null : e('div', { sinif: 'alt', metin: s.dosya_durumu || 'Kapalı' })]),
-            e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [e('span', { sinif: 'silik', metin: 'Borçlu kaydı yok' })]
-                : [s.borclu, s.uyapta_gorulmedi ? e('div', { sinif: 'uyari', metin: 'UYAP\'ta görülmedi' }) : null]),
             e('td', { rowspan: String(satirSayisi), metin: s.alacakli || '—' }),
-            e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [] : [chip(s.asama, s.asama_tarihi)]),
-            e('td', { rowspan: String(satirSayisi), metin: s.kesinlesme || '—' })
+            e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [e('span', { sinif: 'silik', metin: 'Borçlu kaydı yok' })]
+                : [s.borclu, s.uyapta_gorulmedi ? e('div', { sinif: 'uyari', metin: 'UYAP\'ta görülmedi' }) : null])
         ];
+        // Takip aşaması dosya boyunca tek hücre; Kesinleşme (tebligat başına) ondan önce gelir. Sonraki satırlarda
+        // tarayıcı rowspan'lı sütunları atlar, Kesinleşme yine 5. sütuna düşer.
+        const asamaHucre = e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [] : [chip(s.asama, s.asama_tarihi)]);
         const govdeEl = e('tbody', { sinif: 'tik' + (d.secili && d.secili.id === s.dosya ? ' sec' : ''), onclick: function() { dosyaAc(s.dosya); } });
         if (!gorunen.length) {
-            govdeEl.appendChild(e('tr', {}, kunye.concat([e('td', { colspan: '3', sinif: 'tb t1 tb0 silik',
-                metin: s.bag == null ? 'Dosyanın tarafları henüz taranmadı' : 'Bu borçluya gönderilmiş tebligat kaydı yok' })])));
+            // Tebligatsız borçluda itiraz / durdurma gibi borçlu kesinleşmesi yine görünür.
+            govdeEl.appendChild(e('tr', {}, kunye.concat([e('td', { sinif: 'tb kes t1', metin: s.kesinlesme || '—' }), asamaHucre,
+                e('td', { colspan: '3', sinif: 'tb t1 tb0 silik',
+                    metin: s.bag == null ? 'Dosyanın tarafları henüz taranmadı' : 'Bu borçluya gönderilmiş tebligat kaydı yok' })])));
         } else {
             gorunen.forEach(function(t, i) {
-                govdeEl.appendChild(e('tr', { sinif: i ? 'ek' : '' }, (i ? [] : kunye).concat(tebligatHucreleri(t, suzgecVar, i === 0))));
+                const kes = kesinlesmeHucresi(t, suzgecVar, i === 0);
+                govdeEl.appendChild(e('tr', { sinif: i ? 'ek' : '' },
+                    (i ? [kes] : kunye.concat([kes, asamaHucre])).concat(tebligatHucreleri(t, suzgecVar, i === 0))));
             });
         }
         if (fazla > 0) {
-            govdeEl.appendChild(e('tr', { sinif: 'ek' }, [e('td', { colspan: '3', sinif: 'tb' }, [e('button', { sinif: 'i-dahasi', type: 'button',
+            // Kesinleşme sütunu (5.) boş, düğme tebligat sütunlarını (7–9) kaplar; arada Takip aşamasının rowspan'ı var.
+            govdeEl.appendChild(e('tr', { sinif: 'ek' }, [e('td', { sinif: 'tb kes' }), e('td', { colspan: '3', sinif: 'tb' }, [e('button', { sinif: 'i-dahasi', type: 'button',
                 metin: tumu ? 'Daha az göster' : '+' + fazla + ' tebligat daha',
                 title: tumu ? '' : 'Bu borçlunun bütün tebligatlarını göster (' + hepsi.length + ')',
                 onclick: function(ev) { ev.stopPropagation(); if (tumu) delete d.tumTebligat[s.bag]; else d.tumTebligat[s.bag] = true; surecCiz(); } })])]));
@@ -755,8 +896,12 @@
     // izler, durdurur ve doğrulama (captcha) çıkarsa kullanıcıya çözdürür.
     const GT_UC = '/__uyap_agent__/icra_guncelle';
     const GT_SON = ['bitti', 'hata', 'iptal'];
-    const GT_ASAMA = { liste: 'Dosya listesi alınıyor', kunye: 'Künyeler yazılıyor', taraf: 'Taraflar ve borçlu kimlikleri alınıyor',
-                       kapanan: 'Kapanan dosyalar kontrol ediliyor', hesap: 'Durumlar hesaplanıyor', bitti: 'Bitti' };
+    const GT_ASAMA = { liste: 'Dosya listesi alınıyor', arama: 'Seçili dosyalar UYAP\'ta aranıyor', kunye: 'Künyeler yazılıyor', taraf: 'Taraflar ve borçlu kimlikleri alınıyor',
+                       kapanan: 'Kapanan dosyalar kontrol ediliyor', tebligat: 'Tebligatlar alınıyor (evrak listesi, tebligat belgesi, PTT)',
+                       ptt: 'Barkodlar PTT\'de sorgulanıyor', takip: 'Takip türü bilgileri alınıyor', takip_listesi: 'UYAP takip türü listesi alınıyor',
+                       hesap: 'Durumlar hesaplanıyor', bitti: 'Bitti' };
+    const GT_TUR = { liste: 'Dosya listesi', taraf: 'Taraf bilgileri', tebligat: 'Tebligat bilgileri', ptt: 'PTT durumları',
+                     takip: 'Takip türü bilgisi', takip_listesi: 'Takip türü listesi' };
     let gtZaman = null, tsYukleniyor = null;
     function gtSuruyor() { return !!(d.gt && GT_SON.indexOf(d.gt.durum) < 0); }
     function gtGorunsun() { return d.gtAcik || gtSuruyor(); }
@@ -780,7 +925,7 @@
     const CANLI_ARA_MS = 10000;
     let canliIz = '', canliSon = 0, canliSuruyor = false;
     async function canliYenile(t) {
-        const iz = [t.yazilan, t.taraf_cekilen, t.kapandi, t.yeni_dosya].join('/');
+        const iz = [t.yazilan, t.taraf_cekilen, t.kapandi, t.yeni_dosya, t.teb_yazilan].join('/');
         if (iz === canliIz || canliSuruyor || t.captcha || !govde || d.sekme !== 'surec' || d.kutu) return;
         if (Date.now() - canliSon < CANLI_ARA_MS) return;
         const odak = document.activeElement;
@@ -832,10 +977,10 @@
     function gtDugme() {
         const t = d.gt;
         const metin = gtSuruyor()
-            ? 'Güncelleniyor' + (t.toplam ? ' · ' + Math.min(100, Math.round(t.i * 100 / t.toplam)) + '%' : '…')
-            : 'UYAP\'tan güncelle';
+            ? 'Taranıyor' + (t.toplam ? ' · ' + Math.min(100, Math.round(t.i * 100 / t.toplam)) + '%' : '…')
+            : 'Toplu tarama';
         return e('button', { sinif: 'i-d i-gt-dugme' + (gtSuruyor() ? ' ana' : ''), type: 'button', metin: metin,
-            title: 'UYAP\'taki açık icra dosyalarını büro veritabanına alır: dosya listesi ya da taraf bilgileri',
+            title: 'UYAP\'taki açık icra dosyalarını büro veritabanına alır: dosya listesi, taraf ya da tebligat bilgileri',
             onclick: function() { d.gtAcik = gtSuruyor() ? true : !d.gtAcik; gtCiz(); if (d.gtAcik) gtYokla(true); } });
     }
     function mesaiMi() {
@@ -850,15 +995,15 @@
     }
     function gtPaneli() {
         const t = d.gt;
-        const kutu = e('div', { sinif: 'i-gt', role: 'region', 'aria-label': 'UYAP\'tan güncelleme' });
-        kutu.appendChild(e('div', { sinif: 'i-gt-ust' }, [e('b', { metin: 'UYAP\'tan güncelle' }), e('div', { sinif: 'i-bosluk' }),
+        const kutu = e('div', { sinif: 'i-gt', role: 'region', 'aria-label': 'Toplu tarama' });
+        kutu.appendChild(e('div', { sinif: 'i-gt-ust' }, [e('b', { metin: 'Toplu tarama (UYAP)' }), e('div', { sinif: 'i-bosluk' }),
             gtSuruyor() ? null : e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Kapat', onclick: function() { d.gtAcik = false; gtCiz(); } })]));
         if (gtSuruyor()) { gtSurenCiz(kutu, t); return kutu; }
         if (t) gtSonucCiz(kutu, t);
         gtFormCiz(kutu, t);
         return kutu;
     }
-    function gtTurAdi(t) { return t && t.mod === 'taraf' ? 'Taraf bilgileri' : 'Dosya listesi'; }
+    function gtTurAdi(t) { return (t && GT_TUR[t.mod]) || GT_TUR.liste; }
     function gtSurenCiz(kutu, t) {
         kutu.appendChild(e('div', { stil: 'font-weight:600', metin: gtTurAdi(t) + ' güncelleniyor' + (t.kapsam ? ' — ' + t.kapsam : '') }));
         kutu.appendChild(e('div', { metin: GT_ASAMA[t.asama] || t.asama }));
@@ -871,9 +1016,16 @@
         if (t.toplam) parcalar.push(t.i + ' / ' + t.toplam);
         if (t.kalan_sn != null) parcalar.push('kalan ' + sureMetni(t.kalan_sn));
         if (t.mola_kalan_sn != null) parcalar.push('mola: ' + t.mola_kalan_sn + ' sn');
-        parcalar.push(t.alinan + ' dosya alındı', t.yeni_dosya + ' yeni');
+        if (t.mod !== 'ptt' && t.mod !== 'takip_listesi') parcalar.push(t.alinan + ' dosya alındı', t.yeni_dosya + ' yeni');
+        if (t.takip_okunan || t.takip_okunamayan) parcalar.push(t.takip_okunan + ' dosyanın takip türü okundu' + (t.takip_okunamayan ? ' (' + t.takip_okunamayan + ' alınamadı)' : ''));
         if (t.taraf_cekilen) parcalar.push(t.taraf_cekilen + ' dosyanın tarafları / borçlu kimlikleri alındı');
         if (t.kapandi) parcalar.push(t.kapandi + ' kapandı');
+        if (t.mod === 'tebligat' || t.mod === 'ptt') {
+            if (t.pdf_indirilen) parcalar.push(t.pdf_indirilen + ' tebligat belgesi');
+            if (t.ptt_sorulan) parcalar.push(t.ptt_sorulan + ' PTT sorgusu');
+            parcalar.push(t.teb_yazilan + ' tebligat yazıldı (' + t.teb_yeni + ' yeni, ' + t.teb_degisen + ' durumu değişti)');
+            if (t.ptt_kapandi) parcalar.push('PTT yanıt vermiyor, bu tur bırakıldı');
+        }
         kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: parcalar.join(' · ') }));
         if (t.captcha) gtCaptchaCiz(kutu, t);
         if (t.uyarilar && t.uyarilar.length) {
@@ -888,7 +1040,7 @@
         kutu.appendChild(dur);
     }
     function gtSonucCiz(kutu, t) {
-        const tur = t.mod === 'taraf' ? 'Son taraf güncellemesi' : 'Son dosya listesi güncellemesi';
+        const tur = 'Son güncelleme: ' + gtTurAdi(t).toLocaleLowerCase('tr-TR');
         const ad = tur + ({ bitti: ' tamamlandı', iptal: ' durduruldu', hata: ' hatayla bitti' }[t.durum] || '');
         kutu.appendChild(e('div', { stil: 'font-weight:600', metin: ad + (t.kapsam ? ' (' + t.kapsam + ')' : '') }));
         if (t.mesaj) kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: t.mesaj }));
@@ -920,15 +1072,32 @@
             onclick: function() { const s = new Date(); f.bas = basK.value = iso(new Date(s.getFullYear(), s.getMonth(), 1)); f.son = sonK.value = iso(s); } });
         const temizle = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tarihsiz', title: 'Tarih aralığını kaldır',
             onclick: function() { f.bas = basK.value = ''; f.son = sonK.value = ''; } });
-        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [e('label', { sinif: 'i-gt-not', metin: 'Kapsam' }), sec,
+        // Listede seçili dosya varsa kapsam varsayılan olarak yalnız onlardır (gereksiz UYAP isteği olmasın).
+        const secimVar = d.secim.size > 0;
+        const secimle = secimVar && f.secimle;
+        if (secimVar) {
+            const secenek = function(deger, ad) {
+                const r = e('input', { type: 'radio', name: 'i-gt-kapsam', checked: f.secimle === deger });
+                r.addEventListener('change', function() { f.secimle = deger; gtCiz(); });
+                return e('label', { sinif: 'i-gt-not', stil: 'display:inline-flex;gap:4px;align-items:center' }, [r, ad]);
+            };
+            kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [e('b', { sinif: 'i-gt-not', metin: 'Kapsam:' }),
+                secenek(true, 'Listede seçili ' + d.secim.size + ' dosya'), secenek(false, 'Daire / açılış tarihi')]));
+        }
+        [sec, basK, sonK, buAy, temizle].forEach(function(x) { x.disabled = secimle; });
+        kutu.appendChild(e('div', { sinif: 'i-gt-form', stil: secimle ? 'opacity:.5' : '' }, [e('label', { sinif: 'i-gt-not', metin: secimVar ? 'Daire' : 'Kapsam' }), sec,
             e('label', { sinif: 'i-gt-not', metin: 'Açılış' }), basK, '–', sonK, buAy, temizle]));
         const baslat = function(mod, dugme) {
             return async function() {
                 dugme.disabled = true;
                 const govde = { mod: mod };
-                if (f.birim) { govde.birim_id = f.birim; govde.birim_adi = sec.options[sec.selectedIndex].textContent.replace(/ \(\d+ açık\)$/, ''); }
-                if (f.bas) govde.acilis_bas = f.bas;
-                if (f.son) govde.acilis_son = f.son;
+                if (mod === 'tebligat') govde.ptt = !!f.ptt;
+                if (secimle) govde.dosyalar = Array.from(d.secim);
+                else {
+                    if (f.birim) { govde.birim_id = f.birim; govde.birim_adi = sec.options[sec.selectedIndex].textContent.replace(/ \(\d+ açık\)$/, ''); }
+                    if (f.bas) govde.acilis_bas = f.bas;
+                    if (f.son) govde.acilis_son = f.son;
+                }
                 try { d.gt = await gtIstek('', govde); gtYokla(); }
                 catch (x) { bildir(x.message); dugme.disabled = false; }
             };
@@ -939,10 +1108,23 @@
         const taraf = e('button', { sinif: 'i-d', type: 'button', metin: 'Taraf bilgilerini güncelle',
             title: 'Yalnız tarafı ya da borçlu TCKN / vergi no\'su eksik dosyalar sorgulanır' });
         taraf.addEventListener('click', baslat('taraf', taraf));
-        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [liste, taraf,
-            e('span', { sinif: 'i-gt-not', metin: 'Tebligat bilgileri: sonraki aşamada.' })]));
+        const takip = e('button', { sinif: 'i-d', type: 'button', metin: 'Takip türü bilgisi',
+            title: 'Takip türü, yolu ve şekli henüz okunmamış dosyalar sorgulanır (dosya başına 1 istek). Kesinleşme süresi buna göre seçilir.' });
+        takip.addEventListener('click', baslat('takip', takip));
+        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [liste, taraf, takip]));
+        const tebligat = e('button', { sinif: 'i-d', type: 'button', metin: 'Tebligat bilgilerini güncelle',
+            title: 'Her dosyanın tebligat evrakları: barkod, tür, mazbata ve (seçiliyse) PTT durumu. Barkodu bilinen evrakın belgesi yeniden indirilmez.' });
+        tebligat.addEventListener('click', baslat('tebligat', tebligat));
+        const pttK = e('input', { type: 'checkbox', 'aria-label': 'PTT durumunu da sorgula' });
+        pttK.checked = !!f.ptt;
+        pttK.addEventListener('change', function() { f.ptt = pttK.checked; });
+        const yalnizPtt = e('button', { sinif: 'i-d', type: 'button', metin: 'Yalnız PTT',
+            title: 'UYAP\'a gitmeden, kayıtlı ve sonucu kesinleşmemiş barkodların PTT durumunu sorgular' });
+        yalnizPtt.addEventListener('click', baslat('ptt', yalnizPtt));
+        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [tebligat,
+            e('label', { sinif: 'i-gt-not' }, [pttK, ' PTT durumunu da sorgula']), yalnizPtt]));
         kutu.appendChild(e('div', { sinif: 'i-gt-not', stil: 'margin-top:6px',
-            metin: 'Taraf bilgileri dosya başına 1–2 istek atar (~3 sn arayla); bütün açık dosyalarda saatler sürebilir, önce dar bir kapsam seçin.' }));
+            metin: 'Taraf bilgileri dosya başına 1–2, takip türü 1, tebligat bilgileri 2–4 istek atar (~3 sn arayla); bütün açık dosyalarda saatler sürebilir, önce dar bir kapsam seçin. Takip türü bir kez okunur; dosya listesi güncellemesi yeni dosyaların takip türünü kendisi alır. PTT sorgusu barkod başına ~10 sn sürer.' }));
         if (mesaiMi()) {
             kutu.appendChild(e('div', { sinif: 'i-gt-uyari', role: 'note',
                 metin: 'Mesai saatindesiniz: tarama UYAP\'ı yavaşlatabilir ve büronun sorgularıyla çakışabilir. Akşam 18:00\'den sonra çalıştırmanız önerilir.' }));
@@ -962,14 +1144,18 @@
         });
         return tsYukleniyor;
     }
-    function gtCaptchaCiz(kutu, t) {
+    // onEk: '' (toplu tarama) ya da '/dosya' (tek dosya işi); sonra: çözümden sonra yoklayan işlev.
+    function gtCaptchaCiz(kutu, t, onEk, sonra) {
         const c = t.captcha;
         kutu.setAttribute('data-captcha', String(c.n));
         const yer = e('div', { stil: 'margin-top:6px;min-height:65px' });
         const cevap = async function(jeton) {
-            try { d.gt = await gtIstek('/' + t.id + '/captcha', { token: jeton }); } catch (x) { bildir(x.message); }
+            try {
+                const yeni = await gtIstek((onEk || '') + '/' + t.id + '/captcha', { token: jeton });
+                if (!onEk) d.gt = yeni;
+            } catch (x) { bildir(x.message); }
             kutu.removeAttribute('data-captcha');
-            gtYokla();
+            (sonra || gtYokla)();
         };
         kutu.appendChild(e('div', { sinif: 'i-gt-uyari', metin: c.mesaj || 'UYAP güvenlik doğrulaması istiyor.' }));
         kutu.appendChild(yer);
@@ -989,13 +1175,14 @@
             const v = await istek('dosya?id=' + id);
             const g = await istek('gecmis?dosya=' + id);
             d.secili = { id: id, veri: v, gecmis: g };
-            surecCiz();
+            aktifCiz();
         } catch (x) { bildir(x.message); }
     }
     async function seciliyiTazele() {
         if (!d.secili) return;
         const id = d.secili.id;
         await dosyaAc(id);
+        if (tebSekmesi()) { yukle(); return; }
         try {
             const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + listeSorgusu())]);
             d.ozet = sonuc[0]; d.liste = sonuc[1];
@@ -1020,23 +1207,89 @@
         if (!window.__uyapKartiAcDogrudan(t)) bildir('Dosya kartı açılamadı (UYAP sayfası değişmiş olabilir).');
     }
 
+    // ── Dosya panelinden tek dosya güncellemesi: künye (dosya no, durum), taraflar, tebligatlar (tümü ya da seçilenler).
+    // Toplu taramayı beklemez; istek sayısı az, sonuç birkaç saniyede gelir. (icra_guncelle.rs Mod::Dosya)
+    let dosyaIsZaman = null;
+    function dosyaIsSuruyor(id) { const x = d.dosyaIs; return !!(x && x.dosya === id && x.t && GT_SON.indexOf(x.t.durum) < 0); }
+    async function dosyaGuncelle(id, govde) {
+        try {
+            const t = await gtIstek('/dosya', Object.assign({ dosya: id }, govde));
+            d.dosyaIs = { dosya: id, t: t };
+            dosyaIsCizYerinde();
+            dosyaIsYokla();
+        } catch (x) { bildir(x.message); }
+    }
+    async function dosyaIsYokla() {
+        clearTimeout(dosyaIsZaman);
+        const x = d.dosyaIs;
+        if (!x || !x.t) return;
+        let t;
+        try { t = await gtIstek('/dosya/' + x.t.id); }
+        catch (er) { if (d.dosyaIs === x) dosyaIsZaman = setTimeout(dosyaIsYokla, 5000); return; }
+        if (d.dosyaIs !== x) return;
+        x.t = t;
+        if (GT_SON.indexOf(t.durum) < 0) { dosyaIsZaman = setTimeout(dosyaIsYokla, 1500); dosyaIsCizYerinde(); return; }
+        bildir(t.mesaj || 'Bitti.');
+        if (d.secili && d.secili.id === x.dosya) { if (d.tebSecim) d.tebSecim.liste = []; seciliyiTazele(); }
+        else dosyaIsCizYerinde();
+    }
+    function dosyaIsCizYerinde() {
+        const eski = kok && kok.querySelector('.i-dosya-is');
+        if (!eski || !d.secili) return;
+        const x = d.dosyaIs;
+        // Doğrulama kutusu açıkken yeniden çizilmez (çözülen kutu kaybolmasın).
+        if (x && x.t && x.t.captcha && eski.getAttribute('data-captcha') === String(x.t.captcha.n)) return;
+        eski.replaceWith(dosyaIsKutusu(d.secili.id));
+        const dugme = kok.querySelector('.i-dosya-guncelle');
+        if (dugme) dugme.disabled = dosyaIsSuruyor(d.secili.id);
+    }
+    function dosyaIsKutusu(id) {
+        const x = d.dosyaIs;
+        const kutu = e('div', { sinif: 'i-dosya-is' });
+        if (!x || x.dosya !== id || !x.t) return kutu;
+        const t = x.t;
+        kutu.classList.add('i-gt');
+        kutu.setAttribute('role', 'status');
+        if (GT_SON.indexOf(t.durum) < 0) {
+            kutu.appendChild(e('div', { stil: 'font-weight:600', metin: 'Taraf ve tebligatlar alınıyor…' }));
+            kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: t.mesaj || '' }));
+            if (t.captcha) gtCaptchaCiz(kutu, t, '/dosya', dosyaIsYokla);
+            kutu.appendChild(e('button', { sinif: 'i-d kucuk tehlike', type: 'button', metin: 'Durdur', stil: 'margin-top:6px',
+                onclick: async function() { try { await gtIstek('/dosya/' + t.id + '/iptal', {}); } catch (er) { bildir(er.message); } dosyaIsYokla(); } }));
+            return kutu;
+        }
+        kutu.appendChild(e('div', { stil: 'display:flex;gap:8px;align-items:flex-start' }, [
+            e('div', { stil: 'flex:1;font-weight:600', metin: t.mesaj || '' }),
+            e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Kapat', onclick: function() { d.dosyaIs = null; dosyaIsCizYerinde(); } })]));
+        if (t.rapor && t.rapor.length) kutu.appendChild(e('ul', { sinif: 'i-gt-rapor' }, t.rapor.map(function(r) { return e('li', { metin: r }); })));
+        if (t.uyarilar && t.uyarilar.length) {
+            kutu.appendChild(e('details', {}, [e('summary', { metin: t.uyari_sayisi + ' uyarı / not' }),
+                e('ul', { sinif: 'i-gt-uyarilar' }, t.uyarilar.map(function(u) { return e('li', { metin: u }); }))]));
+        }
+        return kutu;
+    }
+
     function panelCiz() {
         const s = d.secili, v = s.veri, k = v.kunye, t = v.takip;
         const panel = e('div', { sinif: 'i-panel' });
         const rozetler = [k.acik ? 'UYAP: Açık' : 'UYAP: ' + (k.durum || 'Kapalı'), 'İşlem: ' + k.islem_durumu_etiket];
-        if (t.okundu) rozetler.push('Takip kodu ' + [t.turu, t.yolu, t.sekli].map(function(x) { return x || '—'; }).join(' / '));
-        rozetler.push(t.itiraz_suresi_gun ? 'İtiraz süresi ' + t.itiraz_suresi_gun + ' gün' : 'Kesinleşme süresi tanımlı değil');
+        if (t.turu_ad) rozetler.push(t.turu_ad + (t.ornek_no ? ' · Örnek ' + t.ornek_no : ''));
+        rozetler.push(k.talimat ? 'Talimat dosyası: kesinleşme yok' : t.itiraz_suresi_gun ? 'İtiraz süresi ' + t.itiraz_suresi_gun + ' gün' : 'Kesinleşme süresi tanımlı değil');
         panel.appendChild(e('div', { sinif: 'p-bas' }, [
             e('div', { stil: 'display:flex;justify-content:space-between;gap:10px;align-items:flex-start' }, [
                 e('div', {}, [e('h2', { metin: k.dosya_no }), e('div', { sinif: 'alt', metin: k.birim + (k.tur ? ' · ' + k.tur : '') + (k.acilis_tarihi ? ' · Açılış ' + gunMetni(k.acilis_tarihi) : '') })]),
-                e('div', { stil: 'display:flex;gap:6px' }, [
+                e('div', { stil: 'display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end' }, [
+                    e('button', { sinif: 'i-d kucuk ana i-dosya-guncelle', metin: 'Taraf ve tebligatları al', disabled: dosyaIsSuruyor(k.id),
+                        title: 'Bu dosyanın künyesini (dosya no, durum), taraflarını ve bütün tebligatlarını UYAP\'tan çeker. Toplu taramayı beklemez.',
+                        onclick: function() { dosyaGuncelle(k.id, { taraf: true, tebligat: true }); } }),
                     e('button', { sinif: 'i-d kucuk', metin: 'UYAP\'ta aç', title: 'Dosyayı UYAP\'ta bulup kartını açar', onclick: function() { uyaptaAc(k.uyap); } }),
-                    e('button', { sinif: 'i-d kucuk', metin: '✕', title: 'Paneli kapat', 'aria-label': 'Paneli kapat', onclick: function() { d.secili = null; surecCiz(); } })
+                    e('button', { sinif: 'i-d kucuk', metin: '✕', title: 'Paneli kapat', 'aria-label': 'Paneli kapat', onclick: function() { d.secili = null; aktifCiz(); } })
                 ])
             ]),
             e('div', { sinif: 'i-rozet' }, rozetler.map(function(r) { return e('span', { metin: r }); })),
-            e('div', { sinif: 'i-sekmeler', stil: 'padding:0;margin:0 -18px;padding-left:18px' }, [['borclular', 'Borçlular'], ['tebligat', 'Tebligatlar (' + v.tebligatlar.length + ')'], ['gecmis', 'Geçmiş'], ['kunye', 'Dosya']].map(function(x) {
-                return e('button', { sinif: d.panelSekme === x[0] ? 'on' : '', metin: x[1], onclick: function() { d.panelSekme = x[0]; surecCiz(); } });
+            dosyaIsKutusu(k.id),
+            e('div', { sinif: 'i-sekmeler', stil: 'padding:0;margin:0 -18px;padding-left:18px' }, [['borclular', 'Borçlular'], ['tebligat', 'Tebligatlar (' + v.tebligatlar.length + ')' + ((v.alinamayan || []).length ? ' · ' + v.alinamayan.length + ' alınamadı' : '')], ['gecmis', 'Geçmiş'], ['kunye', 'Dosya']].map(function(x) {
+                return e('button', { sinif: d.panelSekme === x[0] ? 'on' : '', metin: x[1], onclick: function() { d.panelSekme = x[0]; aktifCiz(); } });
             }))
         ]));
         const ic = e('div', { sinif: 'p-ic' });
@@ -1051,7 +1304,7 @@
     function borclularCiz(ic, v) {
         const borclular = v.taraflar.filter(function(x) { return x.rol === 'borclu'; });
         const digerleri = v.taraflar.filter(function(x) { return x.rol !== 'borclu'; });
-        if (!borclular.length) ic.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Dosyada kayıtlı borçlu yok.' }));
+        if (!borclular.length) ic.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Dosyada kayıtlı borçlu yok. Üstteki "Taraf ve tebligatları al" ile taraflar çekilebilir.' }));
         borclular.forEach(function(b) {
             const adim = SIRA.indexOf(b.asama);
             const sonuc = { iade: 5, itiraz: 6, durduruldu: 6 }[b.asama];
@@ -1079,8 +1332,9 @@
                 e('div', { sinif: 'i-ilerleme', title: 'Takip süreci' }, [0, 1, 2, 3, 4, 5, 6].map(function(i) { return e('i', { sinif: i < dolu ? 'd' : '' }); })),
                 e('div', { sinif: 'sat' }, [e('span', { metin: 'Takip aşaması' }), e('b', { metin: b.asama_metni || '—' })]),
                 e('div', { sinif: 'sat' }, [e('span', { metin: 'Tebliğ' }), e('b', { metin: b.tebligat || '—' })]),
-                e('div', { sinif: 'sat' }, [e('span', { metin: 'Kesinleşme' }), e('b', { metin: b.kesinlesme || '—' })]),
-                e('div', { sinif: 'i-eylem' }, [b.itiraz ? null : tarih, itirazDugme, elle])
+                e('div', { sinif: 'sat' }, [e('span', { metin: 'Kesinleşme' }), e('b', { metin: v.kunye.talimat ? 'Talimat dosyasında kesinleşme yok' : (b.kesinlesme || '—') })]),
+                // Talimat dosyasında itiraz / kesinleşme işaretleri anlamsız: yalnız elle değer (vefat vb.) kalır.
+                e('div', { sinif: 'i-eylem' }, v.kunye.talimat ? [elle] : [b.itiraz ? null : tarih, itirazDugme, elle])
             ]));
         });
         if (digerleri.length) {
@@ -1093,11 +1347,53 @@
     }
 
     function tebligatlarCiz(ic, v) {
-        if (!v.tebligatlar.length) { ic.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Bu dosyada kayıtlı tebligat yok.' })); return; }
+        const id = v.kunye.id;
+        if (!d.tebSecim || d.tebSecim.dosya !== id) d.tebSecim = { dosya: id, liste: [] };
+        const sec = d.tebSecim;
+        const calisiyor = dosyaIsSuruyor(id);
+        const seciliDugme = e('button', { sinif: 'i-d kucuk ana', type: 'button', disabled: calisiyor || !sec.liste.length,
+            title: 'İşaretlenen tebligatların belgesi ve PTT durumu UYAP / PTT\'den yeniden alınır',
+            onclick: function() { dosyaGuncelle(id, { taraf: false, tebligat: true, evraklar: sec.liste.slice() }); } });
+        const seciliYaz = function() { seciliDugme.textContent = 'Seçilenleri sorgula (' + sec.liste.length + ')'; seciliDugme.disabled = calisiyor || !sec.liste.length; };
+        seciliYaz();
+        ic.appendChild(e('div', { sinif: 'i-eylem', stil: 'margin-bottom:8px' }, [seciliDugme,
+            e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tümünü sorgula', disabled: calisiyor,
+                title: 'Dosyadaki bütün tebligat zarfları (UYAP\'a yeni gelenler dahil). Barkodu bilinen belge yeniden indirilmez.',
+                onclick: function() { dosyaGuncelle(id, { taraf: false, tebligat: true }); } })]));
+        const secimKutusu = function(no, ad) {
+            const k = e('input', { type: 'checkbox', 'aria-label': 'Sorgulanacaklara ekle: ' + ad, checked: sec.liste.indexOf(no) >= 0, stil: 'margin:2px 8px 0 0' });
+            k.addEventListener('change', function() {
+                const i = sec.liste.indexOf(no);
+                if (k.checked && i < 0) sec.liste.push(no);
+                if (!k.checked && i >= 0) sec.liste.splice(i, 1);
+                seciliYaz();
+            });
+            return k;
+        };
+        // Belgelerde olup kaydedilemeyen zarflar: nedeniyle; işaretlenip yeniden sorgulanabilir.
+        const alinamayan = v.alinamayan || [];
+        if (alinamayan.length) {
+            ic.appendChild(e('div', { sinif: 'bolum', metin: 'Belgelerde olup alınamayan zarflar (' + alinamayan.length + ')' }));
+            alinamayan.forEach(function(z) {
+                ic.appendChild(e('div', { sinif: 'i-kart' }, [
+                    e('div', { sinif: 'b' }, [e('label', { stil: 'display:flex;align-items:flex-start;cursor:pointer' },
+                        [secimKutusu(z.evrak_no, z.tur), e('div', { sinif: 'ad', metin: z.tur })]), e('span', { sinif: 'alt', metin: z.evrak_tarihi || '' })]),
+                    e('div', { sinif: 'alt', metin: z.muhatap || z.aciklama }),
+                    e('div', { sinif: 'uyari', metin: z.neden ? 'Alınamadı: ' + z.neden : 'Henüz sorgulanmadı' })
+                ]));
+            });
+            if (v.tebligatlar.length) ic.appendChild(e('div', { sinif: 'bolum', metin: 'Kayıtlı tebligatlar' }));
+        }
+        if (!v.tebligatlar.length) {
+            if (!alinamayan.length) ic.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Bu dosyada kayıtlı tebligat yok. "Tümünü sorgula" ile UYAP\'taki tebligatlar alınabilir.' }));
+            return;
+        }
         v.tebligatlar.forEach(function(t) {
             const hareket = e('div');
+            const isaret = secimKutusu(t.evrak_no, (t.tur || 'Tebligat') + ' ' + (t.evrak_tarihi || ''));
             const kart = e('div', { sinif: 'i-kart' }, [
-                e('div', { sinif: 'b' }, [e('div', { sinif: 'ad', metin: t.tur || 'Tebligat' }), e('span', { sinif: 'alt', metin: t.evrak_tarihi })]),
+                e('div', { sinif: 'b' }, [e('label', { stil: 'display:flex;align-items:flex-start;cursor:pointer' }, [isaret, e('div', { sinif: 'ad', metin: t.tur || 'Tebligat' })]),
+                    e('span', { sinif: 'alt', metin: t.evrak_tarihi })]),
                 e('div', { sinif: 'alt', metin: t.muhatap || t.aciklama }),
                 e('div', { sinif: 'sat' }, [e('span', { metin: t.elektronik ? 'E-tebligat' : 'Barkod' }), e('b', { metin: t.barkod || 'henüz yok' })]),
                 e('div', { sinif: 'sat' }, [e('span', { metin: 'Durum' }), e('b', { metin: (t.ptt_durumu || '—') + (t.son_islem_tarihi ? ' · ' + t.son_islem_tarihi : '') })]),
@@ -1142,11 +1438,17 @@
             satir('Açılış', gunMetni(k.acilis_tarihi)), satir('Son güncelleme', k.son_guncelleme)
         ]));
         ic.appendChild(e('div', { sinif: 'bolum', metin: 'Takip' }));
+        const takipAdi = function(ad, kod) { return ad || (kod ? 'Kod ' + kod + ' (adı UYAP\'tan okunmadı)' : '—'); };
         ic.appendChild(e('div', { sinif: 'i-kart' }, t.okundu ? [
-            satir('Takip kodu (tür / yol / şekil)', [t.turu, t.yolu, t.sekli].map(function(x) { return x || '—'; }).join(' / ')),
-            satir('Uygulanan süre', t.itiraz_suresi_gun ? t.itiraz_suresi_gun + ' gün' + (t.kural ? ' (' + t.kural + ')' : '') : 'Tanımlı değil'),
-            satir('Alacak toplamı', t.alacak_toplam), satir('Vekalet ücreti', t.vekalet_ucreti), satir('Tahsil harcı', t.tahsil_harci)
-        ] : [e('div', { sinif: 'alt', metin: 'Takip türü henüz UYAP\'tan okunmadı.' })]));
+            satir('Takip türü', takipAdi(t.turu_ad, t.turu)),
+            satir('Takip yolu', takipAdi(t.yolu_ad, t.yolu)),
+            satir('Takip şekli', takipAdi(t.sekli_ad, t.sekli)),
+            satir('Uygulanan süre', t.kesinlesme_yok || (t.itiraz_suresi_gun ? t.itiraz_suresi_gun + ' gün' + (t.kural ? ' (' + t.kural + ')' : '') : 'Tanımlı değil')),
+            satir('Alacak toplamı', t.alacak_toplam), satir('Vekalet ücreti', t.vekalet_ucreti), satir('Tahsil harcı', t.tahsil_harci),
+            t.okunma ? satir('UYAP\'tan okundu', gunMetni(t.okunma) + t.okunma.slice(10))
+                     : e('div', { sinif: 'alt', stil: 'margin-top:6px', metin: 'Adlar için "UYAP\'tan güncelle" ile takip türünü yeniden okuyun.' })
+        ] : [e('div', { sinif: 'alt', metin: k.talimat ? 'Talimat dosyası: kesinleşme yok (esas dosyada izlenir); takip türü sorulmaz.'
+                                                       : 'Takip türü henüz UYAP\'tan okunmadı. Yukarıdaki "UYAP\'tan güncelle" ile alınır.' })]));
         // İşlem durumu (büronun kendi işareti)
         const sec = e('select', {}, [['aktif', 'Aktif - işlem yapılabilir'], ['pasif', 'Pasif - işlem yapma'], ['beklemede', 'Beklemede']].map(function(o) {
             const op = e('option', { value: o[0], metin: o[1] }); if (k.islem_durumu === o[0]) op.selected = true; return op;
@@ -1160,28 +1462,325 @@
         } })]));
     }
 
+    // ── Tebligatlar (19.11.2026; Python Barkod Sorgu ekranının karşılığı) ──
+    // Her tebligat bir satır; borçluya bağlanmayan zarflar (banka, işveren, vekil, üçüncü kişi) da muhatap adıyla
+    // listede. Her sütunda "yaz ya da seç" süzgeci (Süreçler ile aynı kutular, Tümünü seç / hariç dahil) ve başlığa
+    // tıklayınca sıralama. Sıralama dosyaların sırasını belirler: bir dosyanın zarfları bölünmez, kendi içinde eskiden
+    // yeniye kalır. Seçim dosya başınadır ve Süreçler ile ortaktır (toplu düğmeler seçili dosyalara işler).
+    // Sütunlar: k = süzgeç anahtarı (yoksa süzgeçsiz), s = sıralama alanı, h = hücre içeriği.
+    const TEB_SUTUN = [
+        { ad: 'İcra dairesi', k: 'birim', s: 'birim', tekrar: true, h: function(t) { return t.birim; } },
+        { ad: 'Dosya no', k: 'dosya_no', s: 'dosya_no', tekrar: true, h: function(t) {
+            return [e('div', { sinif: 'dno', metin: t.dosya_no }), t.acik ? null : e('div', { sinif: 'alt', metin: t.dosya_durumu || 'Kapalı' })]; } },
+        { ad: 'Dosya türü', k: 'dosya_tur', s: 'dosya_tur', kodlu: true, tekrar: true, h: function(t) { return t.dosya_tur; } },
+        { ad: 'Takip şekli', k: 'takip', s: 'takip', tekrar: true, h: function(t) { return t.takip || e('span', { sinif: 'silik', metin: '—', title: 'Takip türü henüz okunmadı' }); } },
+        { ad: 'Alacaklı', k: 'alacakli', s: 'alacakli', tekrar: true, h: function(t) { return t.alacakli || '—'; } },
+        { ad: 'Borçlu / Muhatap', k: 'borclu', s: 'borclu', h: function(t) { return t.borclu || e('span', { sinif: 'silik', metin: '(muhatap belirsiz)' }); } },
+        { ad: 'Muhatap türü', k: 'muhatap', s: 'muhatap', kodlu: true, h: function(t) { return t.muhatap_etiket; } },
+        { ad: 'Barkod', k: 'barkod', s: 'barkod', h: function(t) { return t.barkod || e('span', { sinif: 'silik', metin: t.elektronik ? 'E-tebligat' : '—' }); } },
+        { ad: 'Tebligat türü', k: 'tur', s: 'tur', h: function(t) { return t.tur || e('span', { sinif: 'silik', metin: '(türü yok)' }); } },
+        { ad: 'Evrak tarihi', s: 'evrak', h: function(t) { return t.evrak_tarihi; } },
+        { ad: 'Tebliğ / son durum', k: 'teblig', s: 'teblig', h: function(t) {
+            return t.ptt_durumu ? e('div', { sinif: 'uzun', title: t.ptt_durumu, metin: t.ptt_durumu }) : e('span', { sinif: 'silik', metin: 'Henüz sorgulanmadı' }); } },
+        { ad: 'Tebliğ / iade tarihi', s: 'islem', h: function(t) { return t.son_islem_tarihi; } },
+        { ad: 'Teslim şekli / İade nedeni', k: 'teslim', s: 'teslim', h: function(t) { return t.teslim_sekli; } },
+        { ad: 'Mazbata', k: 'mazbata', s: 'mazbata', kodlu: true, h: function(t) {
+            return t.mazbata_var ? e('span', { sinif: 'mz', title: t.mazbata || 'Mazbata dosyaya döndü', metin: 'Döndü' }) : e('span', { sinif: 'silik', metin: 'Dönmedi' }); } },
+        { ad: 'Yeniden tebliğ talebi', k: 'yeniden', s: 'yeniden', kodlu: true, h: function(t) { return t.yeniden ? 'Talep edildi' : ''; } },
+        { ad: 'E-tebligat', k: 'elektronik', s: 'elektronik', kodlu: true, h: function(t) { return t.elektronik ? 'E-tebligat' : 'Fiziki'; } },
+        { ad: 'Kesinleşme', k: 'kesinlesme', s: 'kesinlesme', kodlu: true, h: function(t) {
+            return t.kesinlesme ? t.kesinlesme : e('span', { sinif: 'silik', metin: '—', title: t.kesinlesme_neden || 'Henüz hesaplanmadı' }); } }
+    ];
+    const TEB_SUZGEC = TEB_SUTUN.filter(function(c) { return c.k; }).map(function(c) { return { k: c.k, ad: c.ad, kodlu: !!c.kodlu }; });
+    function tebFiltreBos() {
+        const f = { q: '', durum: 'acik', acilis_bas: '', acilis_son: '', evrak_bas: '', evrak_son: '', islem_bas: '', islem_son: '',
+                    sirala: '', yon: 'artan', sayfa: 1 };
+        TEB_SUZGEC.forEach(function(z) { f[z.k] = ''; });
+        return f;
+    }
+    d.teb = { filtre: tebFiltreBos(), liste: null };
+    function tebSorgusu(sayfasiz) {
+        const f = d.teb.filtre, s = {};
+        ['q', 'durum', 'acilis_bas', 'acilis_son', 'evrak_bas', 'evrak_son', 'islem_bas', 'islem_son', 'sirala', 'yon'].forEach(function(k) { if (f[k]) s[k] = f[k]; });
+        TEB_SUZGEC.forEach(function(z) { if (f[z.k]) s[z.k] = f[z.k]; });
+        if (!sayfasiz) { s.sayfa = String(f.sayfa); s.boyut = '100'; }
+        return new URLSearchParams(s).toString();
+    }
+    let tebAraZaman = null;
+    function tebCiz() {
+        bos(govde);
+        const ana = e('div', { sinif: 'i-ana' });
+        govde.appendChild(ana);
+        const f = d.teb.filtre, l = d.teb.liste;
+        const yenile = function() { f.sayfa = 1; yukle(); };
+        const ara = e('input', { type: 'search', placeholder: 'Dosya no, daire, borçlu / muhatap, alacaklı ya da barkod ara', value: f.q,
+            oninput: function() { clearTimeout(tebAraZaman); tebAraZaman = setTimeout(function() { f.q = ara.value; yenile(); }, 300); } });
+        const durumSec = e('select', { 'aria-label': 'Dosya durumu', title: 'UYAP\'taki dosya durumu' },
+            DURUMLAR.map(function(x) { const o = e('option', { value: x[0], metin: x[1] }); if (f.durum === x[0]) o.selected = true; return o; }));
+        durumSec.addEventListener('change', function() { f.durum = durumSec.value; yenile(); });
+        const aralik = function(k, ad) {
+            const kutu = function(uc, b) {
+                const t = e('input', { type: 'date', value: f[k + uc], title: ad + ': ' + b, 'aria-label': ad + ': ' + b });
+                t.addEventListener('change', function() { f[k + uc] = t.value; yenile(); });
+                return t;
+            };
+            return e('label', { sinif: 'i-onay', title: ad + ' aralığı (iki gün dahil)' }, [ad, kutu('_bas', 'başlangıç'), '–', kutu('_son', 'bitiş')]);
+        };
+        const excel = e('button', { sinif: 'i-d', type: 'button', metin: 'Excel\'e aktar', title: 'Süzülmüş ve sıralı listenin tamamı (bütün sayfalar), her tebligat bir satır; dosya bu cihaza iner',
+            onclick: function() { tebExcel(excel); } });
+        const turEs = e('button', { sinif: 'i-d', type: 'button', metin: 'Tür eşleştir', title: 'Şablon dışı tebligat türlerini bir türe bağlayın (bir kez sorulur)',
+            onclick: function() { turEslestirAc(); } });
+        ana.appendChild(e('div', { sinif: 'i-arac' }, [ara, durumSec, e('div', { sinif: 'i-bosluk' }), gtDugme(), excel, turEs]));
+        ana.appendChild(e('div', { sinif: 'i-arac' }, [aralik('acilis', 'Açılış'), aralik('evrak', 'Evrak tarihi'), aralik('islem', 'Tebliğ / iade tarihi')]));
+        if (gtGorunsun()) ana.appendChild(gtPaneli());
+        if (f.q && document.activeElement !== ara) setTimeout(function() { ara.focus(); ara.setSelectionRange(ara.value.length, ara.value.length); }, 0);
+        seciliCiz(ana);
+        if (dar()) ana.appendChild(e('div', { sinif: 'i-suzgecler' }, TEB_SUZGEC.map(function(z) { return suzgecKutusu(z, true); })));
+        ana.appendChild(tebSecimCubugu(l));
+        const baslik = function(c) {
+            const z = c.k && TEB_SUZGEC.find(function(x) { return x.k === c.k; });
+            const ok = f.sirala === c.s ? (f.yon === 'azalan' ? ' ▼' : ' ▲') : '';
+            const ad = e('span', { sinif: 'i-sirala', role: 'button', tabindex: '0', title: 'Sıralamak için tıklayın (dosyanın tebligatları bölünmez)', metin: c.ad + ok,
+                onclick: function() {
+                    if (f.sirala === c.s) f.yon = f.yon === 'azalan' ? 'artan' : 'azalan'; else { f.sirala = c.s; f.yon = 'artan'; }
+                    yenile();
+                } });
+            return e('th', { sinif: z ? 'suz suz-' + z.k : '' }, [ad, z && !dar() ? suzgecKutusu(z, false) : null]);
+        };
+        const tablo = e('table', { sinif: 'liste teb' }, [e('thead', {}, [e('tr', {}, [e('th', {})].concat(TEB_SUTUN.map(baslik)))])]);
+        if (!l || !l.satirlar.length) {
+            tablo.appendChild(e('tbody', {}, [e('tr', {}, [e('td', { colspan: String(TEB_SUTUN.length + 1), sinif: 'silik', stil: 'text-align:center;padding:22px',
+                metin: 'Bu ölçütlere uyan tebligat yok.' })])]));
+            ana.appendChild(tablo);
+        } else {
+            // Ardışık aynı dosyanın satırları bir grup (tbody): dosya bilgileri ilk satırdan sonra soluk.
+            let grup = null, onceki = null;
+            l.satirlar.forEach(function(t) {
+                if (t.dosya !== onceki) {
+                    grup = e('tbody', { sinif: 'tik teb-dosya' + (d.secili && d.secili.id === t.dosya ? ' sec' : ''), onclick: (function(id) { return function() { dosyaAc(id); }; })(t.dosya) });
+                    tablo.appendChild(grup);
+                }
+                const ilk = t.dosya !== onceki;
+                onceki = t.dosya;
+                const kutu = e('input', { type: 'checkbox', sinif: 'i-dosya-sec', 'data-dosya': String(t.dosya), checked: d.secim.has(t.dosya),
+                    'aria-label': 'Dosyayı seç: ' + t.birim + ' ' + t.dosya_no, onclick: function(ev) { ev.stopPropagation(); } });
+                kutu.addEventListener('change', function() { if (kutu.checked) d.secim.add(t.dosya); else d.secim.delete(t.dosya); secimYaz(); });
+                grup.appendChild(e('tr', { sinif: ilk ? '' : 'ek' }, [e('td', {}, [kutu])].concat(TEB_SUTUN.map(function(c) {
+                    const ic = c.h(t);
+                    return e('td', { sinif: !ilk && c.tekrar ? 'tekrar' : '' }, Array.isArray(ic) ? ic : [ic == null ? '' : ic]);
+                }))));
+            });
+            ana.appendChild(tablo);
+            const son = Math.max(1, Math.ceil(l.toplam / l.boyut));
+            const git = function(n) { return function() { f.sayfa = n; yukle(); }; };
+            ana.appendChild(e('div', { sinif: 'i-sayfa' }, [
+                e('span', { metin: l.toplam + ' tebligat (' + l.dosya_sayisi + ' dosya) · ' + ((l.sayfa - 1) * l.boyut + 1) + '–' + Math.min(l.toplam, l.sayfa * l.boyut) + ' gösteriliyor' }),
+                son > 1 ? e('span', {}, [
+                    e('button', { sinif: 'i-d kucuk', metin: '‹ Önceki', disabled: l.sayfa <= 1, onclick: git(l.sayfa - 1) }), ' ', l.sayfa + ' / ' + son, ' ',
+                    e('button', { sinif: 'i-d kucuk', metin: 'Sonraki ›', disabled: l.sayfa >= son, onclick: git(l.sayfa + 1) })
+                ]) : null
+            ]));
+        }
+        ana.addEventListener('scroll', acilirKaydir);
+        if (d.kutu) {
+            const kutu = kok.querySelector('.i-kutu-s[data-k="' + d.kutu + '"] input');
+            if (kutu) { kutu.focus(); kutu.setSelectionRange(kutu.value.length, kutu.value.length); acilirCiz(); }
+            else acilirKapat();
+        }
+        if (d.secili) panelCiz();
+    }
+    function tebSecimCubugu(l) {
+        const toplam = l ? l.dosya_sayisi : 0;
+        const tumu = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tümünü seç (' + toplam + ' dosya)', disabled: !toplam,
+            title: 'Süzgeçteki bütün tebligatların dosyalarını seçer (bütün sayfalar); önceki seçime eklenir',
+            onclick: async function() {
+                tumu.disabled = true;
+                try { (await istek('tebligat_dosya_kimlikleri?' + tebSorgusu(true))).forEach(function(x) { d.secim.add(x); }); secimYaz(); }
+                catch (x) { bildir(x.message); }
+                tumu.disabled = false;
+            } });
+        return e('div', { sinif: 'i-secim', stil: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0' }, [
+            tumu,
+            e('button', { sinif: 'i-d kucuk i-secim-birak', type: 'button', metin: 'Tümünü bırak', disabled: !d.secim.size, onclick: function() { d.secim.clear(); secimYaz(); } }),
+            e('span', { sinif: 'i-secim-sayi alt', metin: d.secim.size ? d.secim.size + ' dosya seçili' : 'Seçili dosya yok' }),
+            e('span', { sinif: 'alt', metin: '· Seçim dosya başınadır ve Süreçler ile ortaktır; "Toplu tarama" seçim varsa yalnız seçili dosyalara işler.' })
+        ]);
+    }
+    async function tebExcel(dugme) {
+        dugme.disabled = true;
+        try {
+            const r = await fetch(UC + 'tebligatlar_excel?' + tebSorgusu(true), { cache: 'no-store', credentials: 'same-origin' });
+            if (!r.ok) { let m = 'Excel hazırlanamadı (' + r.status + ').'; try { m = (await r.json()).error || m; } catch (x) {} throw new Error(m); }
+            const ad = (/filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') || '') || [])[1] || 'Tebligatlar.xlsx';
+            const url = URL.createObjectURL(await r.blob());
+            const a = e('a', { href: url, download: ad, 'data-uyap-internal': '1', stil: 'display:none' });
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function() { URL.revokeObjectURL(url); }, 30000);
+            bildir('Excel indirildi: ' + ad);
+        } catch (x) { bildir(x.message); }
+        dugme.disabled = false;
+    }
+
+    // ── Tür eşleştir: şablon dışı tebligat türü yazılışlarını gruplar hâlinde bir türe bağlar ──
+    // Tarih ve yazım farkları aynı grupta. Kaydedince mevcut kayıtlar düzeltilir, borçlular yeniden hesaplanır,
+    // sonraki taramalar aynı yazılışı kendiliğinden o türe çevirir; eşleştirilen yazılış bir daha sorulmaz.
+    async function turEslestirAc() {
+        let v;
+        try { v = await istek('tur_eslestirme'); } catch (x) { bildir(x.message); return; }
+        const secimler = {};      // anahtar → tür
+        const isaretli = new Set();
+        const ortu = e('div', { sinif: 'i-ortu', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Tebligat türü eşleştir' });
+        const kapat = function() { ortu.remove(); };
+        ortu.addEventListener('mousedown', function(ev) { if (ev.target === ortu) kapat(); });
+        const pencere = e('div', { sinif: 'i-pencere' });
+        ortu.appendChild(pencere);
+        const govdeT = e('tbody');
+        const durum = e('span', { sinif: 'alt' });
+        const turKutu = e('input', { type: 'text', list: 'cu-tur-secenek', placeholder: 'Tür seçin ya da yeni tür yazın', 'aria-label': 'Atanacak tür', stil: 'width:280px' });
+        const veriListesi = e('datalist', { id: 'cu-tur-secenek' }, v.turler.map(function(t) { return e('option', { value: t }); }));
+        const ciz = function() {
+            bos(govdeT);
+            if (!v.gruplar.length) govdeT.appendChild(e('tr', {}, [e('td', { colspan: '7', sinif: 'silik', stil: 'text-align:center;padding:18px', metin: 'Eşleştirilecek şablon dışı tür yok.' })]));
+            v.gruplar.forEach(function(g) {
+                const k = e('input', { type: 'checkbox', checked: isaretli.has(g.anahtar), 'aria-label': 'Grubu seç: ' + g.ornek });
+                k.addEventListener('change', function() { if (k.checked) isaretli.add(g.anahtar); else isaretli.delete(g.anahtar); durumYaz2(); });
+                govdeT.appendChild(e('tr', {}, [e('td', {}, [k]),
+                    e('td', { title: g.yazilislar.map(function(y) { return y.yazilis + ' (' + y.adet + ')'; }).join('\n'), metin: g.ornek }),
+                    e('td', { metin: String(g.adet) }), e('td', { metin: String(g.cesit) }), e('td', { metin: g.kaynak }),
+                    e('td', { sinif: 'alt', metin: g.ornek_dosya }),
+                    e('td', {}, [secimler[g.anahtar] ? e('b', { metin: secimler[g.anahtar] }) : e('span', { sinif: 'silik', metin: '—' })])]));
+            });
+            durumYaz2();
+        };
+        const durumYaz2 = function() {
+            durum.textContent = v.gruplar.length + ' grup · ' + isaretli.size + ' seçili · ' + Object.keys(secimler).length + ' gruba tür atandı';
+        };
+        const ata = e('button', { sinif: 'i-d', type: 'button', metin: 'Seçili gruplara ata', onclick: function() {
+            const tur = turKutu.value.trim();
+            if (!tur) { bildir('Önce bir tür seçin ya da yazın.'); return; }
+            if (!isaretli.size) { bildir('Önce listeden grup seçin.'); return; }
+            isaretli.forEach(function(a) { secimler[a] = tur; });
+            isaretli.clear();
+            ciz();
+        } });
+        const kaydet = e('button', { sinif: 'i-d ana', type: 'button', metin: 'Kaydet ve uygula', onclick: async function() {
+            const liste = Object.keys(secimler).map(function(a) { return { anahtar: a, tur: secimler[a] }; });
+            if (!liste.length) { bildir('Henüz hiçbir gruba tür atanmadı.'); return; }
+            kaydet.disabled = true;
+            try {
+                const s = await istek('tur_eslestir', { eslesmeler: liste });
+                bildir(s.eslesme + ' eşleştirme kaydedildi; ' + s.degisen + ' tebligatın türü düzeltildi' + (s.guncellenen ? ', ' + s.guncellenen + ' borçlunun durumu güncellendi.' : '.'));
+                kapat();
+                yukle();
+            } catch (x) { bildir(x.message); kaydet.disabled = false; }
+        } });
+        pencere.appendChild(e('div', { sinif: 'i-gt-ust' }, [e('b', { metin: 'Şablon dışı tebligat türleri' }), e('div', { sinif: 'i-bosluk' }),
+            e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Kapat', onclick: kapat })]));
+        pencere.appendChild(e('p', { sinif: 'alt', stil: 'margin:0 0 8px', metin: 'Tarih ve yazım farkları aynı grupta toplanır. Grupları işaretleyip türü seçin ya da yeni bir tür adı yazın, "Seçili gruplara ata" deyin; bitince "Kaydet ve uygula". Eşleştirilen yazılış bir daha sorulmaz.' }));
+        pencere.appendChild(e('div', { sinif: 'i-pencere-ic' }, [e('table', {}, [e('thead', {}, [e('tr', {}, ['', 'En sık yazılış', 'Kayıt', 'Yazılış', 'Kaynak', 'Örnek dosya', 'Seçilen tür'].map(function(b) { return e('th', { metin: b }); }))]), govdeT])]));
+        pencere.appendChild(e('div', { sinif: 'i-gt-form' }, [turKutu, veriListesi, ata, e('div', { sinif: 'i-bosluk' }), durum, kaydet]));
+        kok.appendChild(ortu);
+        ciz();
+    }
+
     // ── Kesinleşme süreleri ──
+    // Süre takip türü → yolu → şekli ADLARIYLA seçilir (19.11.2026, kullanıcı isteği). Kodlar UYAP'ındır ve yalnız
+    // üstündekiyle anlamlıdır (şekil "0" ilamsızda Örnek 7, ilamlıda Örnek 4-5); ekranda gösterilmez. Seçenekler:
+    // UYAP takip açılış ekranının listesi + dosyalarda görülen türler (dosya sayılarıyla) — sunucu `agac` olarak verir.
+    function sekliKisa(ad) { return String(ad || '').replace(/\s*-\s*Eski\s*No\s*:?\s*[\d-]+\s*$/i, ''); }
+    function takipAdi(ad, kod, sekil) { return (sekil ? sekliKisa(ad) : ad) || ('Kod ' + kod + ' (adı bilinmiyor)'); }
+    // Bir kuralın / dağılım satırının takip türü yolu: "İlamsız Takip › Genel Haciz Yoluyla Takip › ÖRNEK: 7 …".
+    function takipYolu(turu, turuAd, yolu, yoluAd, sekli, sekliAd) {
+        if (!turu) return 'Bütün takipler (varsayılan)';
+        const p = [takipAdi(turuAd, turu)];
+        p.push(yolu ? takipAdi(yoluAd, yolu) : 'bütün yollar');
+        if (yolu) p.push(sekli ? takipAdi(sekliAd, sekli, true) : 'bütün şekiller');
+        return p.join(' › ');
+    }
+    let listeZaman = null;
+    function takipListesiAl(dugme) {
+        return async function() {
+            dugme.disabled = true;
+            let t;
+            try { t = await gtIstek('', { mod: 'takip_listesi' }); }
+            catch (x) { bildir(x.message); dugme.disabled = false; return; }
+            if (!t || t.mod !== 'takip_listesi') { bildir('Süren bir toplu tarama var; bitince yeniden deneyin.'); dugme.disabled = false; return; }
+            dugme.textContent = 'Alınıyor…';
+            const bekle = async function() {
+                let s;
+                try { s = await gtIstek('/' + t.id); }
+                catch (x) { bildir(x.message); dugme.disabled = false; dugme.textContent = 'UYAP\'tan takip türü listesini al'; return; }
+                if (GT_SON.indexOf(s.durum) < 0) { listeZaman = setTimeout(bekle, 2000); return; }
+                bildir(s.mesaj || 'Bitti.');
+                if (d.sekme === 'sure') yukle();
+            };
+            clearTimeout(listeZaman);
+            listeZaman = setTimeout(bekle, 1500);
+        };
+    }
     function sureCiz(v) {
         bos(govde);
         const ana = e('div', { sinif: 'i-ana' });
         govde.appendChild(ana);
+        const agac = v.agac || [];
+        const listeAl = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'UYAP\'tan takip türü listesini al',
+            title: 'UYAP takip açılış ekranındaki takip türü, yolu ve şekli listesini alır (birkaç on istek, ofis bilgisayarından)' });
+        listeAl.addEventListener('click', takipListesiAl(listeAl));
         const kutu = e('div', { sinif: 'i-kutu' }, [e('h3', { metin: 'Kesinleşme süreleri' }),
-            e('p', { metin: 'İtiraz süresi takip türüne göre girilir; boş kod "hepsi" demektir, üç kodu boş olan satır varsayılandır. Bir dosyaya en çok kodu tutan süre uygulanır. Süre değişince bütün borçlular yeniden hesaplanır.' })]);
+            e('p', { metin: 'İtiraz süresi takip türüne göre girilir: takip türü, yolu ve şekli UYAP\'taki adlarıyla seçilir; "Bütün …" o kademedeki hepsi demektir. Bir dosyaya en özel uyan süre uygulanır; takip türü seçilmemiş satır varsayılandır. Süre değişince bütün borçlular yeniden hesaplanır.' }),
+            e('div', { sinif: 'i-eylem', stil: 'margin:0 0 6px' }, [listeAl, e('span', { sinif: 'alt', metin: v.liste_zamani
+                ? 'UYAP listesi ' + gunMetni(v.liste_zamani) + v.liste_zamani.slice(10) + ' tarihinde alındı.'
+                : 'UYAP listesi henüz alınmadı; açılır listelerde yalnız dosyalarda görülen türler var.' })])]);
         ana.appendChild(kutu);
         let duzenlenen = null;
         const form = e('div');
         function formCiz(k) {
             bos(form);
             duzenlenen = k ? k.id : null;
-            const alan = function(ph, deger, gen) { return e('input', { type: 'text', placeholder: ph, value: deger || '', stil: 'width:' + gen }); };
-            const tur = alan('Tür kodu', k && k.takibin_turu, '86px'), yol = alan('Yol kodu', k && k.takibin_yolu, '86px'), sek = alan('Şekil kodu', k && k.takibin_sekli, '92px');
-            const ad = alan('Ad (ör. İlamsız — Genel haciz)', k && k.ad, '230px');
-            const gun = e('input', { type: 'number', min: '1', max: '365', placeholder: 'Gün (boş: hesaplanmaz)', value: k && k.gun != null ? String(k.gun) : '', stil: 'width:170px' });
+            const sec = { tur: (k && k.takibin_turu) || '', yol: (k && k.takibin_yolu) || '', sek: (k && k.takibin_sekli) || '' };
+            let adElle = !!(k && k.ad);
+            const turSec = e('select', { 'aria-label': 'Takip türü', stil: 'max-width:240px' });
+            const yolSec = e('select', { 'aria-label': 'Takip yolu', stil: 'max-width:300px' });
+            const sekSec = e('select', { 'aria-label': 'Takip şekli', stil: 'max-width:420px' });
+            const ad = e('input', { type: 'text', placeholder: 'Ad', value: (k && k.ad) || '', stil: 'width:260px', 'aria-label': 'Kuralın adı' });
+            ad.addEventListener('input', function() { adElle = !!ad.value.trim(); });
+            const gun = e('input', { type: 'number', min: '1', max: '365', placeholder: 'Gün (boş: hesaplanmaz)', value: k && k.gun != null ? String(k.gun) : '', stil: 'width:170px', 'aria-label': 'İtiraz süresi (gün)' });
             const aktif = e('input', { type: 'checkbox' }); aktif.checked = !k || k.aktif;
-            form.appendChild(e('div', { sinif: 'i-form' }, [tur, yol, sek, ad, gun, e('label', { sinif: 'i-onay' }, [aktif, 'Etkin']),
-                e('button', { sinif: 'i-d ana', metin: k ? 'Kaydet' : 'Ekle', onclick: async function() {
+            const secenekMetni = function(x, sekil) { return takipAdi(x.ad, x.kod, sekil) + (x.adet ? ' · ' + x.adet + ' dosya' : ''); };
+            const doldur = function(el, liste, secili, hepsi, sekil) {
+                bos(el);
+                el.appendChild(e('option', { value: '', metin: hepsi }));
+                liste.forEach(function(x) { el.appendChild(e('option', { value: x.kod, metin: secenekMetni(x, sekil), title: x.ad || '' })); });
+                if (secili && !liste.some(function(x) { return x.kod === secili; })) el.appendChild(e('option', { value: secili, metin: 'Kod ' + secili + ' (listede yok)' }));
+                el.value = secili;
+            };
+            const adOner = function(tur, yol, sek) {
+                if (!sec.tur) return 'Varsayılan';
+                const p = [tur ? takipAdi(tur.ad, tur.kod) : 'Kod ' + sec.tur];
+                if (sec.yol) p.push(yol ? takipAdi(yol.ad, yol.kod) : 'Kod ' + sec.yol);
+                if (sec.sek) p.push(sek && sek.ornek_no ? 'Örnek ' + sek.ornek_no : sek ? takipAdi(sek.ad, sek.kod, true) : 'Kod ' + sec.sek);
+                return p.join(' · ');
+            };
+            const yenile = function() {
+                const tur = agac.find(function(x) { return x.kod === sec.tur; });
+                const yol = tur && tur.yollar.find(function(x) { return x.kod === sec.yol; });
+                const sek = yol && yol.sekiller.find(function(x) { return x.kod === sec.sek; });
+                doldur(turSec, agac, sec.tur, 'Bütün takip türleri (varsayılan)');
+                doldur(yolSec, tur ? tur.yollar : [], sec.yol, sec.tur ? 'Bütün yollar' : '— önce takip türü —');
+                doldur(sekSec, yol ? yol.sekiller : [], sec.sek, sec.yol ? 'Bütün şekiller' : '— önce takip yolu —', true);
+                yolSec.disabled = !sec.tur;
+                sekSec.disabled = !sec.yol;
+                if (!adElle) ad.value = adOner(tur, yol, sek);
+            };
+            turSec.addEventListener('change', function() { sec.tur = turSec.value; sec.yol = ''; sec.sek = ''; yenile(); });
+            yolSec.addEventListener('change', function() { sec.yol = yolSec.value; sec.sek = ''; yenile(); });
+            sekSec.addEventListener('change', function() { sec.sek = sekSec.value; yenile(); });
+            yenile();
+            form.appendChild(e('div', { sinif: 'i-form' }, [turSec, yolSec, sekSec]));
+            form.appendChild(e('div', { sinif: 'i-form', stil: 'margin-top:-4px' }, [ad, gun, e('label', { sinif: 'i-onay' }, [aktif, 'Etkin']),
+                e('button', { sinif: 'i-d ana', metin: k && k.id ? 'Kaydet' : 'Ekle', onclick: async function() {
                     try {
-                        const s = await istek('kural', { id: duzenlenen, takibin_turu: tur.value, takibin_yolu: yol.value, takibin_sekli: sek.value,
+                        const s = await istek('kural', { id: duzenlenen, takibin_turu: sec.tur, takibin_yolu: sec.yol, takibin_sekli: sec.sek,
                                                          ad: ad.value, gun: gun.value ? Number(gun.value) : null, aktif: aktif.checked });
                         bildir('Kaydedildi' + (s.guncellenen ? '; ' + s.guncellenen + ' borçlunun durumu güncellendi.' : '.'));
                         yukle();
@@ -1189,20 +1788,19 @@
                 } }),
                 k ? e('button', { sinif: 'i-d', metin: 'Vazgeç', onclick: function() { formCiz(null); } }) : null]));
         }
-        if (!v.kurallar.length) kutu.appendChild(e('div', { sinif: 'i-sarı', metin: 'Henüz süre girilmedi: hiçbir dosyada kesinleşme hesaplanmaz. Önce varsayılan süreyi (üç kod boş) ekleyin.' }));
+        if (!v.kurallar.length) kutu.appendChild(e('div', { sinif: 'i-sarı', metin: 'Henüz süre girilmedi: hiçbir dosyada kesinleşme hesaplanmaz. Önce varsayılan süreyi (takip türü seçmeden) ekleyin.' }));
         else {
             kutu.appendChild(e('table', {}, [
-                e('thead', {}, [e('tr', {}, ['Ad', 'Kod (tür / yol / şekil)', 'Süre', ''].map(function(b) { return e('th', { metin: b }); }))]),
+                e('thead', {}, [e('tr', {}, ['Ad', 'Takip türü › yolu › şekli', 'Süre', ''].map(function(b) { return e('th', { metin: b }); }))]),
                 e('tbody', {}, v.kurallar.map(function(k) {
                     const sil = e('button', { sinif: 'i-d kucuk tehlike', metin: 'Sil' });
                     sil.addEventListener('click', async function() {
                         if (!sil.dataset.onay) { sil.dataset.onay = '1'; sil.textContent = 'Emin misiniz?'; setTimeout(function() { delete sil.dataset.onay; sil.textContent = 'Sil'; }, 4000); return; }
                         try { await istek('kural_sil', { id: k.id }); bildir('Silindi.'); yukle(); } catch (x) { bildir(x.message); }
                     });
-                    const kod = [k.takibin_turu, k.takibin_yolu, k.takibin_sekli].map(function(x) { return x || '—'; }).join(' / ');
                     return e('tr', {}, [
-                        e('td', {}, [k.ad || (kod === '— / — / —' ? 'Varsayılan' : ''), k.aktif ? null : e('span', { sinif: 'alt', metin: ' (devre dışı)' })]),
-                        e('td', { metin: kod }),
+                        e('td', {}, [k.ad || (k.takibin_turu ? '' : 'Varsayılan'), k.aktif ? null : e('span', { sinif: 'alt', metin: ' (devre dışı)' })]),
+                        e('td', { metin: takipYolu(k.takibin_turu, k.turu_ad, k.takibin_yolu, k.yolu_ad, k.takibin_sekli, k.sekli_ad) }),
                         e('td', {}, [e('span', { sinif: 'gun', metin: k.gun ? k.gun + ' gün' : '—' })]),
                         e('td', { stil: 'text-align:right;white-space:nowrap' }, [e('button', { sinif: 'i-d kucuk', metin: 'Düzenle', onclick: function() { formCiz(k); } }), ' ', sil])
                     ]);
@@ -1211,14 +1809,14 @@
         }
         kutu.appendChild(form);
         formCiz(null);
-        // Veritabanındaki takip kodları: kural girerken hangi kodun kaç dosyada olduğu
-        const dag = e('div', { sinif: 'i-kutu', stil: 'margin-top:14px' }, [e('h3', { metin: 'Veritabanındaki takip kodları' }),
-            e('p', { metin: 'İcra dosyalarının UYAP\'tan okunan takip kodları ve dosya sayıları. Bir koda süre girmek için "Süre gir"e basın.' })]);
+        // Veritabanındaki takip türleri: kural girerken hangisinin kaç dosyada olduğu
+        const dag = e('div', { sinif: 'i-kutu', stil: 'margin-top:14px' }, [e('h3', { metin: 'Veritabanındaki takip türleri' }),
+            e('p', { metin: 'İcra dosyalarının UYAP\'tan okunan takip türleri ve dosya sayıları. Birine süre girmek için "Süre gir"e basın.' })]);
         if (!v.dagilim.length) dag.appendChild(e('div', { sinif: 'alt', metin: 'Henüz takip türü okunmuş dosya yok.' }));
         else dag.appendChild(e('table', {}, [
-            e('thead', {}, [e('tr', {}, ['Kod (tür / yol / şekil)', 'Dosya', 'Örnek', ''].map(function(b) { return e('th', { metin: b }); }))]),
+            e('thead', {}, [e('tr', {}, ['Takip türü › yolu › şekli', 'Dosya', 'Örnek dosya', ''].map(function(b) { return e('th', { metin: b }); }))]),
             e('tbody', {}, v.dagilim.map(function(x) {
-                return e('tr', {}, [e('td', { metin: [x.turu, x.yolu, x.sekli].map(function(y) { return y || '—'; }).join(' / ') }),
+                return e('tr', {}, [e('td', { metin: takipYolu(x.turu, x.turu_ad, x.yolu, x.yolu_ad, x.sekli, x.sekli_ad) }),
                     e('td', { metin: String(x.adet) }), e('td', { sinif: 'alt', metin: x.ornek || '' }),
                     e('td', { stil: 'text-align:right' }, [e('button', { sinif: 'i-d kucuk', metin: 'Süre gir', onclick: function() {
                         formCiz({ id: null, takibin_turu: x.turu, takibin_yolu: x.yolu, takibin_sekli: x.sekli, ad: '', gun: null, aktif: true });
@@ -1226,7 +1824,7 @@
                     } })])]);
             }))
         ]));
-        if (v.takip_turu_bilinmeyen) dag.appendChild(e('div', { sinif: 'alt', stil: 'margin-top:8px', metin: 'Takip türü henüz okunmamış icra dosyası: ' + v.takip_turu_bilinmeyen + ' (bunlara varsayılan süre uygulanır).' }));
+        if (v.takip_turu_bilinmeyen) dag.appendChild(e('div', { sinif: 'alt', stil: 'margin-top:8px', metin: 'Takip türü henüz okunmamış icra dosyası: ' + v.takip_turu_bilinmeyen + ' (bunlara varsayılan süre uygulanır). Süreçler › Toplu tarama › "Takip türü bilgisi" ile alınır.' }));
         ana.appendChild(dag);
     }
 
@@ -1262,7 +1860,7 @@
         if (a && !a.closest('#cu-menu-icra') && !a.closest('.fav-menu-icon')) kucult();
     }, true);
     document.addEventListener('keydown', function(ev) {
-        if (onde() && ev.key === 'Escape' && d.secili && !ev.target.closest('input,select')) { d.secili = null; surecCiz(); }
+        if (onde() && ev.key === 'Escape' && d.secili && !ev.target.closest('input,select')) { d.secili = null; aktifCiz(); }
     });
     // Bu sayfadan açılan dosya kartı küçültüldü / kapatıldı: sayfa küçükse yeniden öne gelir (açıksa zaten kartın
     // altında duruyor, kart gidince görünür).

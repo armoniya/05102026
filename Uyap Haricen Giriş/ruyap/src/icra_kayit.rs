@@ -272,6 +272,23 @@ pub fn borclu_haritasi<C: GenericClient>(c: &mut C, dosya: Option<i64>) -> Resul
     Ok(harita)
 }
 
+/// Borçluların vekilleri: dosya → [(borçlu bağı, vekil adı)]. "Vekil …" muhataplı tebligatı borçluya bağlamak için.
+pub fn borclu_vekil_haritasi<C: GenericClient>(c: &mut C, dosya: Option<i64>) -> Result<HashMap<i64, Vec<(i64, String)>>, String> {
+    let mut harita: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for s in c
+        .query(
+            "SELECT dt.dosya_id, dt.id, btrim(v.ad || ' ' || v.soyad) FROM dosya_taraf dt
+               JOIN dosya_taraf_vekiller dv ON dv.dosyataraf_id = dt.id JOIN vekil v ON v.id = dv.vekil_id
+              WHERE dt.rol = 'borclu' AND ($1::bigint IS NULL OR dt.dosya_id = $1)",
+            &[&dosya],
+        )
+        .map_err(hata)?
+    {
+        harita.entry(s.get(0)).or_default().push((s.get(1), s.get(2)));
+    }
+    Ok(harita)
+}
+
 /// Bir UYAP taraf satırını bu dosyanın bağına yazar ve bağ kimliğini döner. Önce dosyanın kendi
 /// bağlarında aynı rol + aynı ad aranır (dosya içinde ad tekildir); bulunursa:
 ///   • gelen kimlik bağın tarafında yoksa ve o taraf yalnız bu dosyada kullanılıyorsa kimlik
@@ -601,6 +618,63 @@ fn tutar(v: Option<&Value>) -> String {
     if gecerli { s } else { "0".to_string() }
 }
 
+/// UYAP'ın takip türü / yolu / şekli adı: baş-son boşluk atılır, iç boşluklar teke iner
+/// (" ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49 " → "ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49").
+pub fn takip_adi(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Takip şekli adındaki örnek numarası ("ÖRNEK: 7 …" → "7", "ÖRNEK: 4-5 …" → "4-5"); yoksa boş.
+pub fn ornek_no(sekli_adi: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| Regex::new(r"(?i)\b(?:örnek|ornek|ÖRNEK)\s*(?:no)?\s*[:.]?\s*(\d+(?:\s*-\s*\d+)?)").expect("desen"));
+    r.captures(sekli_adi).map(|m| m[1].chars().filter(|c| !c.is_whitespace()).collect()).unwrap_or_default()
+}
+
+/// UYAP takip açılış ekranının bir seçenek listesi (`icra_takip_turu` / `_yolu` / `_sekli`): `[{value, name}]` →
+/// (kod, ad). Liste değilse ya da öğede kod yoksa atlanır.
+pub fn takip_secenekleri(v: &Value) -> Vec<(String, String)> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| {
+                    let kod = teb::metin(x, "value").trim().to_string();
+                    (!kod.is_empty() && kod.chars().count() <= 8).then(|| (kod, takip_adi(&teb::metin(x, "name"))))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Takip türü listesinin bir öğesi: kademe 1 (tür), 2 (yol), 3 (şekil).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakipSecenegi {
+    pub kademe: i16,
+    pub turu: String,
+    pub yolu: String,
+    pub sekli: String,
+    pub ad: String,
+}
+
+/// UYAP'tan alınan takip türü ağacını `takip_turu_listesi`'ne yazar (eklenir / adı güncellenir; listede artık
+/// olmayan eski öğe silinmez: eski dosyalar o kodu taşıyor olabilir). Döner: yazılan öğe sayısı.
+pub fn takip_listesi_kaydet<C: GenericClient>(c: &mut C, ogeler: &[TakipSecenegi]) -> Result<usize, String> {
+    let mut tx = c.transaction().map_err(hata)?;
+    for o in ogeler {
+        let ad = kirp(&takip_adi(&o.ad), 255);
+        tx.execute(
+            "INSERT INTO takip_turu_listesi (kademe, takibin_turu, takibin_yolu, takibin_sekli, ad, ornek_no)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT ON CONSTRAINT uq_takip_turu_listesi DO UPDATE SET ad = EXCLUDED.ad, ornek_no = EXCLUDED.ornek_no,
+                 guncelleme = now()",
+            &[&o.kademe, &o.turu, &o.yolu, &o.sekli, &ad, &if o.kademe == 3 { ornek_no(&ad) } else { String::new() }],
+        )
+        .map_err(hata)?;
+    }
+    tx.commit().map_err(hata)?;
+    Ok(ogeler.len())
+}
+
 /// `dosyaAyrintiBilgileri_brd` yanıtını dosyanın yargı türüne göre `icra_takip_detay` ya da
 /// `hukuk_dava_detay` tablosuna yazar. Döner: "icra" / "hukuk"; yazılmadıysa `None` (boş yanıt,
 /// hata zarfı ya da ayrıntı tablosu olmayan yargı türü).
@@ -613,19 +687,28 @@ pub fn dosya_ayrinti_kaydet<C: GenericClient>(c: &mut C, dosya: i64, ham: &Value
     };
     let yargi_turu: i16 = s.get(0);
     if yargi_turu == veri::YargiTuru::Icra.kod() {
+        let kod = |a: &str| kirp(teb::metin(ham, a).trim(), 8);
+        let sekli_adi = takip_adi(&teb::metin(ham, "takibinSekliAciklama"));
         c.execute(
             "INSERT INTO icra_takip_detay (dosya_id, takibin_turu, takibin_sekli, takibin_yolu,
-                                           alacak_kalemi_toplam, vekalet_ucreti, tahsil_harci)
-             VALUES ($1, $2, $3, $4, $5::text::numeric, $6::text::numeric, $7::text::numeric)
+                                           takibin_turu_aciklama, takibin_sekli_aciklama, takibin_yolu_aciklama, ornek_no,
+                                           alacak_kalemi_toplam, vekalet_ucreti, tahsil_harci, ayrinti_zamani)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::numeric, $10::text::numeric, $11::text::numeric, now())
              ON CONFLICT (dosya_id) DO UPDATE SET takibin_turu = EXCLUDED.takibin_turu,
                  takibin_sekli = EXCLUDED.takibin_sekli, takibin_yolu = EXCLUDED.takibin_yolu,
+                 takibin_turu_aciklama = EXCLUDED.takibin_turu_aciklama, takibin_sekli_aciklama = EXCLUDED.takibin_sekli_aciklama,
+                 takibin_yolu_aciklama = EXCLUDED.takibin_yolu_aciklama, ornek_no = EXCLUDED.ornek_no,
                  alacak_kalemi_toplam = EXCLUDED.alacak_kalemi_toplam, vekalet_ucreti = EXCLUDED.vekalet_ucreti,
-                 tahsil_harci = EXCLUDED.tahsil_harci, guncelleme = now()",
+                 tahsil_harci = EXCLUDED.tahsil_harci, ayrinti_zamani = now(), guncelleme = now()",
             &[
                 &dosya,
-                &kirp(&teb::metin(ham, "takibinTuru"), 8),
-                &kirp(&teb::metin(ham, "takibinSekli"), 8),
-                &kirp(&teb::metin(ham, "takibinYolu"), 8),
+                &kod("takibinTuru"),
+                &kod("takibinSekli"),
+                &kod("takibinYolu"),
+                &kirp(&takip_adi(&teb::metin(ham, "takibinTuruAciklama")), 120),
+                &kirp(&sekli_adi, 255),
+                &kirp(&takip_adi(&teb::metin(ham, "takibinYoluAciklama")), 120),
+                &ornek_no(&sekli_adi),
                 &tutar(ham.get("alacakKalemToplamTutar")),
                 &tutar(ham.get("vekaletUcreti")),
                 &tutar(ham.get("tahsilHarci")),
@@ -775,20 +858,44 @@ pub fn tebligat_kaydet<C: GenericClient>(c: &mut C, dosya: i64, birim_evrak_no: 
     )
     .map_err(hata)?;
     if !ptt_hatali {
-        tx.execute(
-            "UPDATE tebligat_barkod SET ptt_durumu = $2, son_islem_tarihi = $3, ham_yanit = $4 WHERE id = $1",
-            &[&id, &kirp(&k.ptt_durumu, 255), &kirp(&k.son_islem_tarihi, 40), &sozluk],
-        )
-        .map_err(hata)?;
-        if let Some(h) = sozluk {
-            tx.execute("UPDATE tebligat_barkod SET teslim_sekli = $2 WHERE id = $1", &[&id, &kirp(&teb::ptt_teslim_sekli(h), 150)])
-                .map_err(hata)?;
-            veri::ptt_hareketlerini_yaz(&mut tx, id, h)?;
-        }
+        ptt_alanlarini_yaz(&mut tx, id, &k.ptt_durumu, &k.son_islem_tarihi, sozluk)?;
     }
     veri::ham_tarihleri_turet(&mut tx, "tebligat_barkod", id)?;
     tx.commit().map_err(hata)?;
     Ok(id)
+}
+
+fn ptt_alanlarini_yaz(tx: &mut postgres::Transaction, id: i64, durum: &str, tarih: &str, sozluk: Option<&Value>) -> Result<(), String> {
+    tx.execute(
+        "UPDATE tebligat_barkod SET ptt_durumu = $2, son_islem_tarihi = $3, ham_yanit = $4 WHERE id = $1",
+        &[&id, &kirp(durum, 255), &kirp(tarih, 40), &sozluk],
+    )
+    .map_err(hata)?;
+    if let Some(h) = sozluk {
+        tx.execute("UPDATE tebligat_barkod SET teslim_sekli = $2 WHERE id = $1", &[&id, &kirp(&teb::ptt_teslim_sekli(h), 150)])
+            .map_err(hata)?;
+        veri::ptt_hareketlerini_yaz(tx, id, h)?;
+    }
+    Ok(())
+}
+
+/// "Yalnız PTT" güncellemesi: kayıtlı tebligatın yalnız PTT alanlarını yazar (UYAP alanlarına
+/// dokunmaz). Borçlu bağı boşsa PTT alıcısından bulunanla doldurulur. `_hata` taşıyan yanıt yazılmaz.
+pub fn ptt_sonucu_kaydet<C: GenericClient>(c: &mut C, id: i64, ham: &Value, borclu: Option<i64>) -> Result<(), String> {
+    if !ham.is_object() || teb::dolu(ham.get("_hata")) {
+        return Ok(());
+    }
+    let (durum, tarih) = teb::ptt_durum_ve_tarih(ham);
+    let mut tx = c.transaction().map_err(hata)?;
+    ptt_alanlarini_yaz(&mut tx, id, &durum, &tarih, Some(ham))?;
+    tx.execute(
+        "UPDATE tebligat_barkod SET borclu_id = COALESCE(borclu_id, $2), sorgu_zamani = now() WHERE id = $1",
+        &[&id, &borclu],
+    )
+    .map_err(hata)?;
+    veri::ham_tarihleri_turet(&mut tx, "tebligat_barkod", id)?;
+    tx.commit().map_err(hata)?;
+    Ok(())
 }
 
 // ── Tür eşleştirmeleri ve MTS mükerrerleri ──────────────────────────────────────────────────────
@@ -827,4 +934,27 @@ pub fn mts_mukerrer_ekle<C: GenericClient>(c: &mut C, anahtar: &str) -> Result<(
     )
     .map_err(hata)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn takip_adi_ve_ornek_no() {
+        let ad = takip_adi(" ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49 ");
+        assert_eq!(ad, "ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49");
+        assert_eq!(ornek_no(&ad), "7");
+        assert_eq!(ornek_no("ÖRNEK: 4-5 Para Borcuna Veya Teminat Verilmesine … - Eski No: 53"), "4-5");
+        assert_eq!(ornek_no("Örnek No: 10 Kambiyo Senetlerine Mahsus Haciz Yoluyla Takiplerde Ödeme Emri"), "10");
+        assert_eq!(ornek_no("Genel Haciz Yoluyla Takip"), "");
+    }
+
+    #[test]
+    fn takip_secenekleri_ayristirma() {
+        let v = json!([{"value": 1, "name": " İlamsız Takip "}, {"value": "0", "name": "İlamlı Takip"}, {"name": "kodsuz"}, {"value": "123456789", "name": "uzun"}]);
+        assert_eq!(takip_secenekleri(&v), vec![("1".to_string(), "İlamsız Takip".to_string()), ("0".to_string(), "İlamlı Takip".to_string())]);
+        assert!(takip_secenekleri(&json!({"errorCode": "X"})).is_empty());
+    }
 }

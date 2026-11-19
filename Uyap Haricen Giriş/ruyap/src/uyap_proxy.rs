@@ -6359,6 +6359,11 @@ static _AGENT_PING_ORIGINS: Lazy<HashSet<String>> = Lazy::new(|| {
     set
 });
 
+/// cokluuyap.com gibi yerel programa istek atmasına izin verilen köken mi (ping ve uzak yardımcı aynı listeyi kullanır).
+pub fn agent_koken_izinli(origin: &str) -> bool {
+    _AGENT_PING_ORIGINS.contains(origin.trim_end_matches('/'))
+}
+
 pub(crate) fn _agent_ping_headers(headers: &HeaderMap) -> Vec<(&'static str, String)> {
     let origin = headers
         .get("origin")

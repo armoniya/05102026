@@ -40,6 +40,8 @@ pub static SEMALAR: &[(i32, &str, &str)] = &[
     (4, "is_etiketleri", include_str!("sema/0004_is_etiketleri.sql")),
     (5, "hatirlatici_goruldu", include_str!("sema/0005_hatirlatici_goruldu.sql")),
     (6, "olay_turu", include_str!("sema/0006_olay_turu.sql")),
+    (7, "tebligat_notu", include_str!("sema/0007_tebligat_notu.sql")),
+    (8, "takip_turu", include_str!("sema/0008_takip_turu.sql")),
 ];
 
 pub type Gunluk = Arc<dyn Fn(&str) + Send + Sync>;
@@ -741,6 +743,7 @@ mod tests {
             crate::icra_tarama::veritabani_senaryosu(&mut b);
             crate::icra_durum::veritabani_senaryosu(&mut b);
             crate::icra_api::veritabani_senaryosu(&mut b);
+            crate::icra_tebligatlar::veritabani_senaryosu(&mut b);
             crate::icra_guncelle::veritabani_senaryosu(&mut b);
             crate::is_veri::veritabani_senaryosu(&mut b);
             crate::is_otomatik::veritabani_senaryosu(&mut b);

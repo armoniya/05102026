@@ -704,15 +704,77 @@ fn ptt_alici_borclusu(ham_yanit: &Value, borclular: &[(i64, String)]) -> Option<
     tek(&adaylar)
 }
 
-/// Tebligatın ait olduğu borçlu. `borclular`: dosyanın borçlu bağları (bağ kimliği, görünen ad).
-/// Açıklamadaki BORÇLU muhatabının adı tam bir borçluyla eşleşirse o; değilse `None` (tahmin
-/// yok). Açıklamada muhatap parantezi hiç yoksa (MTS) ve PTT yanıtı varsa alıcıya bakılır.
+/// Tebligatın kime gittiği (evrak açıklamasındaki köşeli parantezden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuhatapTuru {
+    /// "[BORÇLU …]", "[BORÇLU VE MÜFLİS …]"
+    Borclu,
+    /// "[Vekil …]" — borçlu vekiline tebliğ borçluya tebliğ sayılır.
+    Vekil,
+    /// "[Tebligat Yapılacak 3. Taraf …]", "[ARACIKISIKURUM …]" vb.: borçlunun kendisi değil.
+    Ucuncu,
+    /// Açıklamada muhatap yok (MTS: "PTT MTS Tebligat Belgesi").
+    Yok,
+}
+
+pub fn muhatap_turu(aciklama: &str) -> MuhatapTuru {
+    let Some(ic) = muhatap_parantezi(aciklama) else { return MuhatapTuru::Yok };
+    let k = tr_kucuk(&ic);
+    if k.starts_with("borclu") {
+        MuhatapTuru::Borclu
+    } else if k.starts_with("vekil") {
+        MuhatapTuru::Vekil
+    } else {
+        MuhatapTuru::Ucuncu
+    }
+}
+
+/// Vekiller olmadan [`tebligat_borclusunu_coz`] (tarama anında; hesapta vekillerle yeniden çözülür).
 pub fn tebligat_borclusunu_bul(aciklama: &str, borclular: &[(i64, String)], ham_yanit: Option<&Value>) -> Option<i64> {
+    tebligat_borclusunu_coz(aciklama, borclular, &[], ham_yanit)
+}
+
+/// Tebligatın ait olduğu borçlu. `borclular`: dosyanın borçlu bağları (bağ kimliği, görünen ad); `vekiller`:
+/// (borçlu bağı, vekil adı). Kurallar sırayla (kullanıcı bulgusu 19.11.2026: zarflar belgelerde var ama borçluya
+/// bağlanmıyordu):
+///   1. Açıklamada muhatap yoksa (MTS) ve PTT yanıtı varsa alıcının baş harfleri.
+///   2. "BORÇLU …" adı tam bir borçluyla eşleşirse o.
+///   3. "Vekil …" ise o vekilin TEK borçlusu.
+///   4. Dosyada tek borçlu varsa ona — üçüncü kişiye gidenler dahil (listede borçlunun altında görünsün diye);
+///      bunlar kesinleşme hesabına girmez (`icra_durum`, [`muhatap_turu`] = Üçüncü).
+/// Birden çok aday kalırsa `None` (tahmin yok).
+pub fn tebligat_borclusunu_coz(
+    aciklama: &str,
+    borclular: &[(i64, String)],
+    vekiller: &[(i64, String)],
+    ham_yanit: Option<&Value>,
+) -> Option<i64> {
     if let Some(h) = ham_yanit.filter(|h| dolu(Some(*h))) {
         if muhatap_parantezi(aciklama).is_none() {
-            return ptt_alici_borclusu(h, borclular);
+            if let Some(b) = ptt_alici_borclusu(h, borclular) {
+                return Some(b);
+            }
         }
     }
+    if let Some(b) = borclu_adindan(aciklama, borclular) {
+        return Some(b);
+    }
+    if muhatap_turu(aciklama) == MuhatapTuru::Vekil {
+        let ic = muhatap_parantezi(aciklama).unwrap_or_default();
+        let ad: String = ic.chars().skip("vekil".len()).collect();
+        let hedef = kelimeler(&ad);
+        if !hedef.is_empty() {
+            let adaylar: BTreeSet<i64> = vekiller.iter().filter(|(_, v)| kelimeler(v) == hedef).map(|(b, _)| *b).collect();
+            if adaylar.len() == 1 {
+                return adaylar.into_iter().next();
+            }
+        }
+    }
+    tek(&borclular.iter().map(|b| b.0).collect::<Vec<_>>())
+}
+
+/// Açıklamadaki BORÇLU muhatabının adından borçlu (tam / sırası farklı / baş kısmı eşleşen TEK borçlu).
+fn borclu_adindan(aciklama: &str, borclular: &[(i64, String)]) -> Option<i64> {
     let (_, ad) = tebligat_muhatabi(aciklama);
     let hedef = kelimeler(&ad?);
     if hedef.is_empty() {
@@ -950,6 +1012,26 @@ mod tests {
         let ptt = json!({"kabul": {"alici": "A* Y*"}});
         assert_eq!(tebligat_borclusunu_bul("PTT MTS Tebligat Belgesi", &borclular, Some(&ptt)), None);
         assert_eq!(tebligat_borclusunu_bul("PTT MTS Tebligat Belgesi", &borclular, None), None);
+
+        // 19.11.2026 bulguları (canlı açıklamalar):
+        // Tek borçlulu dosya: muhatapsız MTS zarfı ve üçüncü kişiye giden zarf da o borçluya bağlanır
+        let tek = vec![(7, "YAKUP TAŞAR".to_string())];
+        assert_eq!(tebligat_borclusunu_bul("PTT MTS Tebligat Belgesi", &tek, None), Some(7));
+        assert_eq!(tebligat_borclusunu_bul("Elektronik Tebligat[ARACIKISIKURUM İBRAHİM GÜVEN]", &tek, None), Some(7));
+        // Çok borçlulu dosyada üçüncü kişi zarfı tahminle bağlanmaz
+        assert_eq!(bul("Elektronik Tebligat[Tebligat Yapılacak 3. Taraf AKBANK TÜRK ANONİM ŞİRKETİ]"), None);
+        // Vekil: o vekilin TEK borçlusu; vekil birden çok borçlunun vekiliyse tahmin yok
+        let vekiller = vec![(1, "ZEYNEL SAVAŞ".to_string()), (2, "AYŞE KAYA".to_string())];
+        let coz = |a: &str, v: &[(i64, String)]| tebligat_borclusunu_coz(a, &borclular, v, None);
+        assert_eq!(coz("Normal Tebligat[Vekil ZEYNEL SAVAŞ] - Tebliğ Edildi", &vekiller), Some(1));
+        let ortak = vec![(1, "ZEYNEL SAVAŞ".to_string()), (3, "ZEYNEL SAVAŞ".to_string())];
+        assert_eq!(coz("Normal Tebligat[Vekil ZEYNEL SAVAŞ]", &ortak), None);
+        // Muhatap türleri (kesinleşmeye girip girmeyeceği buna bağlı)
+        assert_eq!(muhatap_turu("Normal Tebligat[BORÇLU VE MÜFLİS ŞÜKRÜ DEMİRTAŞ]"), MuhatapTuru::Borclu);
+        assert_eq!(muhatap_turu("Normal Tebligat[Vekil ZEYNEL SAVAŞ] - Tebliğ Edildi"), MuhatapTuru::Vekil);
+        assert_eq!(muhatap_turu("Elektronik Tebligat[ARACIKISIKURUM İBRAHİM GÜVEN]"), MuhatapTuru::Ucuncu);
+        assert_eq!(muhatap_turu("Elektronik Tebligat[Tebligat Yapılacak 3. Taraf QNB BANK ANONİM ŞİRKETİ]"), MuhatapTuru::Ucuncu);
+        assert_eq!(muhatap_turu("PTT MTS Tebligat Belgesi"), MuhatapTuru::Yok);
     }
 
     #[test]

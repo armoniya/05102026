@@ -43,6 +43,7 @@ pub mod udf_signer;
 pub mod uyap_giris_disaridan;
 pub mod yerel_giris;
 pub mod yerel_kapi;
+pub mod yerel_yardimci;
 
 // @proxy modülleri
 pub mod hata_kodlari;
@@ -51,6 +52,7 @@ pub mod sifreli_gunluk;
 pub mod tepsi;
 pub mod is_listesi;
 pub mod is_otomatik;
+pub mod icra_tebligatlar;
 pub mod uyap_proxy;
 // Büro veritabanı (ofis bilgisayarında gömülü PostgreSQL) — 2026-11-15
 pub mod veritabani;

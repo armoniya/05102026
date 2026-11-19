@@ -990,6 +990,29 @@ impl PttTarayici {
 static KILIT: Lazy<AsyncMutex<PttTarayici>> = Lazy::new(|| AsyncMutex::new(PttTarayici::new()));
 static BEKLEYEN: AtomicUsize = AtomicUsize::new(0);
 
+/// Toplu tebligat taraması için: Chrome sorgular arasında AÇIK kalır (her barkodda açılıp
+/// kapanmaz); tur bitince [`toplu_kapat`] çağrılır. Dönen değer PTT'nin ham yanıtıdır (listenin
+/// ilk elemanı), `icra_tarama::ptt_geldi` bunu bekler. Hata olursa tarayıcı kapatılır; sonraki
+/// sorgu temiz bir tarayıcıyla başlar. Tek barkodluk [`sorgula`] ile aynı kilidi paylaşır.
+pub async fn toplu_sorgula(barkod: &str) -> Result<Value, String> {
+    let temiz: String = barkod.chars().filter(|c| c.is_ascii_digit()).collect();
+    if !BARKOD_RE.is_match(&temiz) {
+        return Err("Geçersiz barkod (13 haneli olmalı).".to_string());
+    }
+    let mut tarayici = KILIT.lock().await;
+    let res = tarayici.sorgula_ic(&temiz).await;
+    tarayici.son_sorgu = now_secs();
+    if res.is_err() {
+        tarayici.kapat().await;
+    }
+    res
+}
+
+/// Toplu taramanın sonunda (bitince, durdurulunca ya da hata verince) tarayıcıyı kapatır.
+pub async fn toplu_kapat() {
+    KILIT.lock().await.kapat().await;
+}
+
 // ── Yanıtın özeti ───────────────────────────────────────────────────────────
 
 pub fn _tr_kucuk(s: &str) -> String {

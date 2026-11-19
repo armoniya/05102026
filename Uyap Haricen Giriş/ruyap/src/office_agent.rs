@@ -334,6 +334,32 @@ fn header_ci<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a
         .map(|(_, v)| v.as_str())
 }
 
+/// Tünelden gelen UDF → PDF isteği (ofis vekilindeki `/__uyap_yerel__/udf_pdf` ile aynı iş).
+async fn udf_pdf_tunel(govde: Vec<u8>) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let metin = |kod: u16, m: &str| {
+        let h = HashMap::from([("content-type".to_string(), "text/plain; charset=utf-8".to_string())]);
+        (kod, h, m.as_bytes().to_vec())
+    };
+    if govde.len() > 40 * 1024 * 1024 {
+        return metin(413, "Belge çok büyük.");
+    }
+    if !crate::udf_pdf::udf_zip_mi(&govde) {
+        return metin(415, "UDF değil.");
+    }
+    match tokio::task::spawn_blocking(move || crate::udf_pdf::udf_pdf_uret(&govde)).await {
+        Ok(Ok(pdf)) => (
+            200,
+            HashMap::from([
+                ("content-type".to_string(), "application/pdf".to_string()),
+                ("cache-control".to_string(), "no-store".to_string()),
+            ]),
+            pdf,
+        ),
+        Ok(Err(e)) => metin(422, &e),
+        Err(_) => metin(500, "Çevirme yarıda kaldı."),
+    }
+}
+
 pub async fn handle_uyap_request(
     meta: &Value,
     body: &[u8],
@@ -389,6 +415,11 @@ pub async fn handle_uyap_request(
 
     if jobs::is_control_path(&path) {
         return jobs::handle_control(&method, &path, &query, &body, Some(kaynak)).await;
+    }
+
+    // Uzak cihazdaki "Paylaş": UDF'yi PDF'e çevir (telefonun paylaş ekranı UDF almıyor). Yalnız çeviri; UYAP'a gitmez.
+    if path == "/__uyap_yerel__/udf_pdf" && method.eq_ignore_ascii_case("POST") {
+        return udf_pdf_tunel(body.to_vec()).await;
     }
 
     if let Some(kesik) = uyap_proxy::kesilen_uc_yaniti(&path) {

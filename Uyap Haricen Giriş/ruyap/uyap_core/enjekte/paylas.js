@@ -15,7 +15,9 @@
 //   İndir:   "farklı kaydet" penceresi (izin dolmuşsa tarayıcı indirmesi).
 //   Paylaş:  Bu bilgisayarda TEK TIK, PENCERESİZ (17.11.2026): program belgeyi DOSYA OLARAK panoya koyar
 //            (/__uyap_yerel__/paylas?kip=pano); kullanıcı WhatsApp/Outlook/klasörde Ctrl+V ile yapıştırır.
-//            Başka cihazda (telefon) tarayıcının paylaşım ekranı.
+//            Uzak bilgisayarda (cokluuyap.com, 19.11.2026): o bilgisayarın Çoklu UYAP'ı (yerel yardımcı 127.0.0.1:8801)
+//            panoya koyar; program yoksa indirilir. Telefon / tablet: cihazın paylaş ekranı (UDF → PDF).
+//            Tarayıcının ara paylaşım penceresi masaüstünde hiç açılmaz.
 //
 // UYAP'ın e-imza "İmzalar" rozeti ([aria-label="sign_info"]) gösterilmez; kendiliğinden açılan imza
 // doğrulama penceresi kapatılır (kullanıcı isteği 2026-11-16).
@@ -240,7 +242,31 @@
         setTimeout(function() { document.addEventListener('keydown', kapat, true); }, 300);
         requestAnimationFrame(function() { requestAnimationFrame(baslat); });
     }
-    async function paylas(dosya, el) {
+    // ── Uzak cihaz (cokluuyap.com) — kullanıcı kararı 19.11.2026 ──
+    //   · Bilgisayar: o bilgisayarda Çoklu UYAP açıksa belge ONA verilir (yerel yardımcı 127.0.0.1:8801) ve panoya konur
+    //     → ofisteki gibi "Kopyalandı · Ctrl+V". Program yoksa belge indirilir. Tarayıcının ara paylaşım penceresi AÇILMAZ.
+    //   · Telefon / tablet: doğrudan cihazın paylaş ekranı. UDF'yi o ekran almadığı için PDF'i paylaşılır.
+    const YARDIMCI = 'http://127.0.0.1:8801';
+    function mobilMi() {
+        try { if (navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean' && navigator.userAgentData.mobile) return true; } catch (x) {}
+        const ua = navigator.userAgent || '';
+        // iPadOS kendini Mac olarak tanıtır; dokunmatik Mac yoktur.
+        return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+    }
+    // Yerel yardımcıya ver: program açık değilse bağlantı hemen reddedilir (false). Chrome ilk seferde "bu cihazdaki
+    // uygulamalara erişim" izni sorabilir; yanıt beklenirken süre dolmasın diye uzun tutulur.
+    async function yardimciyaKopyala(dosya) {
+        const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+        const zaman = ctl ? setTimeout(function() { ctl.abort(); }, 90000) : null;
+        try {
+            const r = await fetch(YARDIMCI + '/__yardimci__/paylas', { method: 'POST', body: dosya, cache: 'no-store', mode: 'cors',
+                credentials: 'omit', signal: ctl ? ctl.signal : undefined, headers: { 'X-Cu-Ad': b64(dosya.name) } });
+            return r.ok && (await r.text()).trim() === 'pano';
+        } catch (x) { return false; }
+        finally { if (zaman) clearTimeout(zaman); }
+    }
+    // pdfGetir: UDF gibi paylaş ekranının almadığı türde PDF'ini veren işlev (yoksa null).
+    async function paylas(dosya, el, pdfGetir) {
         const bilgi = kartBilgisi(el);
         if (buBilgisayar()) {
             // Pencere yok: belge dosya olarak panoya konur; istenen yere Ctrl+V.
@@ -248,8 +274,17 @@
             fareUyarisi(dosya.name);
             return 'Kopyalandı ✓';
         }
-        if (tarayiciPaylasabilir(dosya)) return tarayiciylaPaylas(dosya, bilgi);
-        throw new Error('Bu cihazın tarayıcısı ' + etiketi(uzanti(dosya.name)) + ' dosyasını paylaşım ekranına vermiyor. "İndir" ile kaydedip oradan paylaşabilirsiniz.');
+        if (mobilMi()) {
+            let f = dosya;
+            if (!tarayiciPaylasabilir(f) && pdfGetir) f = await pdfGetir();
+            if (tarayiciPaylasabilir(f)) { await tarayiciylaPaylas(f, bilgi); return; }
+            indir(f);
+            return 'İndirildi ✓';
+        }
+        if (await yardimciyaKopyala(dosya)) { fareUyarisi(dosya.name); return 'Kopyalandı ✓'; }
+        indir(dosya);
+        bildir('Belge indirildi. Bu bilgisayarda Çoklu UYAP programı açık olsaydı doğrudan panoya kopyalanırdı (Ctrl+V).');
+        return 'İndirildi ✓';
     }
 
     // ── Görüntüleyiciler ve belge kaynakları ──
@@ -460,14 +495,22 @@
         const oi = dugme('cu-bk-indir', INDIR_SVG), op = dugme('cu-bk-paylas', PAYLAS_SVG);
         const pi = dugme('cu-bk-indir', INDIR_SVG), pp = dugme('cu-bk-paylas', PAYLAS_SVG);
         yaz(oi, 'UDF İndir'); yaz(op, 'UDF Paylaş'); yaz(pi, 'PDF İndir'); yaz(pp, 'PDF Paylaş');
-        oi.title = 'Belgenin aslını kaydet'; op.title = buBilgisayar() ? 'Belgenin aslını kopyalar — WhatsApp, Outlook, klasör… nereye isterseniz Ctrl+V ile yapıştırın' : 'Belgenin aslını paylaş';
-        pi.title = 'PDF olarak kaydet'; pp.title = buBilgisayar() ? 'PDF olarak kopyalar — WhatsApp, Outlook, klasör… nereye isterseniz Ctrl+V ile yapıştırın' : 'PDF olarak paylaş';
+        const kopyalar = !mobilMi();
+        oi.title = 'Belgenin aslını kaydet';
+        op.title = kopyalar ? 'Belgenin aslını kopyalar — WhatsApp, Outlook, klasör… nereye isterseniz Ctrl+V ile yapıştırın'
+            + (buBilgisayar() ? '' : ' (bu bilgisayarda Çoklu UYAP açık değilse indirilir)') : 'Belgeyi paylaş (UDF ise PDF olarak)';
+        pi.title = 'PDF olarak kaydet';
+        pp.title = kopyalar ? 'PDF olarak kopyalar — WhatsApp, Outlook, klasör… nereye isterseniz Ctrl+V ile yapıştırın'
+            + (buBilgisayar() ? '' : ' (bu bilgisayarda Çoklu UYAP açık değilse indirilir)') : 'PDF olarak paylaş';
         g1.appendChild(oi); g1.appendChild(op); g2.appendChild(pi); g2.appendChild(pp);
         const ay = document.createElement('span'); ay.className = 'cu-bk-ayrac';
         c.appendChild(g1); c.appendChild(ay); c.appendChild(g2);
         const k = function() { const x = kaynak(); return [x, durum(x)]; };
         oi.addEventListener('click', calis(oi, 'Hazırlanıyor…', async function() { const [x, d] = k(); seciciyleKaydet((await orjAl(x, d)).f); }));
-        op.addEventListener('click', calis(op, 'Hazırlanıyor…', async function() { const [x, d] = k(); return paylas((await orjAl(x, d)).f, kapEl); }));
+        op.addEventListener('click', calis(op, 'Hazırlanıyor…', async function() {
+            const [x, d] = k();
+            return paylas((await orjAl(x, d)).f, kapEl, async function() { return (await pdfAl(x, d)).f; });
+        }));
         pi.addEventListener('click', calis(pi, 'Hazırlanıyor…', async function() { const [x, d] = k(); seciciyleKaydet((await pdfAl(x, d)).f); }));
         pp.addEventListener('click', calis(pp, 'Hazırlanıyor…', async function() { const [x, d] = k(); return paylas((await pdfAl(x, d)).f, kapEl); }));
         return c;

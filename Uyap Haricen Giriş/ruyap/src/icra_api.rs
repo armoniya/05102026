@@ -11,7 +11,8 @@
 //!   GET  dosya                ?id= — künye, takip türü, taraflar, tebligatlar, uygulanan süre
 //!   GET  gecmis               ?dosya= — durum olayları (yeniden eskiye)
 //!   GET  ptt                  ?tebligat= — PTT hareketleri
-//!   GET  kurallar             kesinleşme süreleri + veritabanındaki takip türü dağılımı
+//!   GET  kurallar             kesinleşme süreleri (adlarıyla) + takip türü ağacı (UYAP listesi + dosyalarda görülenler,
+//!                             dosya sayılarıyla) + veritabanındaki takip türü dağılımı
 //!   POST kural / kural_sil    süre ekle, düzenle, sil (ardından bütün borçlular yeniden hesaplanır)
 //!   GET  tatiller · POST tatil / tatil_sil
 //!   POST itiraz               {bag, edildi, tarih} — elle itiraz
@@ -20,6 +21,7 @@
 //!   POST hesapla              {dosya?} — kesinleşme / tebliğ / takip aşamasını yeniden hesapla
 
 use crate::icra_durum as durum;
+use crate::icra_tebligatlar as teb_liste;
 use crate::icra_tebligat::{self as teb, tr_kucuk};
 use crate::icra_veri::{
     self as veri, durum_olayi_yaz, IslemDurumu, KesinlesmeDurumu, OlayKaynak, OlayTur, Rol, TakipAsamasi, YeniOlay,
@@ -27,7 +29,7 @@ use crate::icra_veri::{
 use chrono::NaiveDate;
 use postgres::GenericClient;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const ON_EK: &str = "__cu__/veri/";
 
@@ -53,7 +55,7 @@ fn gun_coz(v: &Value) -> Result<Option<NaiveDate>, String> {
 }
 
 /// Tarafın görünen adı (SQL): tüzelde unvan, gerçekte ad soyad; yoksa kimlik.
-fn ad_sql(t: &str) -> String {
+pub(crate) fn ad_sql(t: &str) -> String {
     format!(
         "CASE WHEN {t}.tur = 'tuzel'
               THEN COALESCE(NULLIF(btrim({t}.unvan), ''), {t}.mersis_no, NULLIF({t}.vergi_no, ''), 'Taraf #' || {t}.id)
@@ -127,8 +129,11 @@ pub struct Filtre {
     pub asama: String,
     /// Dosyanın UYAP durumu: "acik" | "kapali" | "" (hepsi).
     pub durum: String,
-    /// İcra dairesi. Düz metin: içinde geçen; `=` ile başlarsa tam eşleşme (listeden seçilen).
+    /// İcra dairesi. Düz metin: içinde geçen; `=` ile başlarsa tam eşleşme (listeden seçilen); `!` ile başlarsa
+    /// listedekiler HARİÇ hepsi ("Tümünü seç" sonra bazılarını kaldır; `!` tek başına: hepsi).
     pub birim: String,
+    /// Dosya numarası; aynı kural.
+    pub dosya_no: String,
     /// Dosyanın alacaklılarından biri; aynı kural.
     pub alacakli: String,
     /// Borçlunun adı; aynı kural.
@@ -158,43 +163,74 @@ struct ListeTebligati {
     ptt: String,
     mazbata: bool,
     veri: Value,
+    /// Sabit süreli kesinleşmesi olan türlerde (103, kıymet takdiri) hesap için tebligat bilgisi.
+    sabit: Option<(i16, durum::OdemeEmri)>,
 }
+
+/// Kesinleşme süzgecinde talimat dosyalarının değeri (gerçek bir kesinleşme durumu değildir).
+pub const KES_TALIMAT: &str = "talimat";
 
 /// Listeden seçilen değerler satır sonuyla ayrılır (birden çok seçim: herhangi birine uyan).
 pub const AYRAC: char = '\n';
 
+/// "Hariç" süzgeci: `!` + satır sonuyla ayrılmış değerler → (hariç tutulanlar). `!` tek başına hiçbirini hariç
+/// tutmaz (hepsi seçili); yalnız boş değeri hariç tutmak için `!\n`.
+pub(crate) fn haric_listesi(suzgec: &str) -> Option<Vec<&str>> {
+    suzgec.strip_prefix('!').map(|r| if r.is_empty() { Vec::new() } else { r.split(AYRAC).collect() })
+}
+
+/// Listeden seçim mi (tam değerler ya da hariç listesi); değilse düz yazı.
+fn listeden_mi(suzgec: &str) -> bool {
+    suzgec.starts_with('=') || suzgec.starts_with('!')
+}
+
 /// Başlık kutusundaki metin süzgeci: boş = hepsi; `=değer` tam eşleşme (listeden seçilen; birden çok değer
-/// satır sonuyla ayrılır, herhangi biri yeter); düz metin içinde geçen.
-fn metin_uyar(suzgec: &str, deger: &str) -> bool {
+/// satır sonuyla ayrılır, herhangi biri yeter); `!değer` listedekiler hariç hepsi; düz metin içinde geçen.
+pub(crate) fn metin_uyar(suzgec: &str, deger: &str) -> bool {
+    let d = || tr_kucuk(deger.trim());
+    if let Some(haric) = haric_listesi(suzgec) {
+        let d = d();
+        return !haric.iter().any(|h| tr_kucuk(h.trim()) == d);
+    }
     match suzgec.strip_prefix('=') {
         Some(tamlar) => {
-            let d = tr_kucuk(deger.trim());
+            let d = d();
             tamlar.split(AYRAC).any(|tam| tr_kucuk(tam.trim()) == d)
         }
         None => suzgec.trim().is_empty() || tr_kucuk(deger).contains(tr_kucuk(suzgec.trim()).as_str()),
     }
 }
 
+/// Kodlu (yalnız listeden seçilen) süzgeçlerin ortak kuralı: boş = hepsi; `!…` = listedekiler hariç; yoksa
+/// seçilenlerden biri. `uyar`: bir seçimin değere uyup uymadığı.
+fn kodlu_uyar(suzgec: &str, uyar: impl Fn(&str) -> bool) -> bool {
+    if suzgec.is_empty() {
+        return true;
+    }
+    match haric_listesi(suzgec) {
+        Some(haric) => !haric.iter().any(|h| uyar(h)),
+        None => suzgec.split(AYRAC).any(uyar),
+    }
+}
+
 /// Kodlu (yalnız listeden seçilen) süzgeç: boş = hepsi, yoksa seçilen değerlerden biri.
 fn kod_uyar(suzgec: &str, deger: &str) -> bool {
-    suzgec.is_empty() || suzgec.split(AYRAC).any(|s| s == deger)
+    kodlu_uyar(suzgec, |s| s == deger)
 }
 
 fn mazbata_uyar(suzgec: &str, var: bool) -> bool {
-    suzgec.is_empty()
-        || suzgec.split(AYRAC).any(|s| match s {
-            "var" => var,
-            "yok" => !var,
-            _ => false,
-        })
+    kodlu_uyar(suzgec, |s| match s {
+        "var" => var,
+        "yok" => !var,
+        _ => false,
+    })
 }
 
 fn kesinlesme_uyar(suzgec: &str, kod: &str) -> bool {
-    suzgec.is_empty()
-        || suzgec.split(AYRAC).any(|s| match s {
-            "-" => kod.is_empty(),
-            k => k == kod,
-        })
+    kodlu_uyar(suzgec, |s| match s {
+        "-" => kod.is_empty(),
+        k => k == kod,
+    })
 }
 
 /// Seçenek listesi: değere göre adet, çoktan aza (eşitlikte ada göre).
@@ -206,7 +242,7 @@ fn secenek_listesi(sayim: HashMap<String, i64>, etiket: &dyn Fn(&str) -> String)
 /// (yazılan metin o kutunun kendi seçeneklerini de daraltır, bkz. [`borclu_listesi`]).
 pub const SECENEK_SINIRI: usize = 300;
 
-fn secenek_sinirli(sayim: HashMap<String, i64>, etiket: &dyn Fn(&str) -> String, en_cok: usize) -> Vec<Value> {
+pub(crate) fn secenek_sinirli(sayim: HashMap<String, i64>, etiket: &dyn Fn(&str) -> String, en_cok: usize) -> Vec<Value> {
     let mut v: Vec<(String, i64)> = sayim.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     v.into_iter().take(en_cok).map(|(d, n)| json!({"deger": d, "etiket": etiket(&d), "adet": n})).collect()
@@ -218,6 +254,7 @@ fn secenek_sinirli(sayim: HashMap<String, i64>, etiket: &dyn Fn(&str) -> String,
 #[derive(Clone, Copy, PartialEq)]
 enum Kunye {
     Birim,
+    DosyaNo,
     Alacakli,
     Borclu,
     Yil,
@@ -239,6 +276,18 @@ enum Kunye {
 /// `secenekler`: her süzgeç için, DİĞER süzgeçler uygulanmışken kalan değerler ve satır adetleri — kullanıcı
 /// boş sonuç verecek bir seçenek görmez.
 pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, String> {
+    borclu_listesi_ic(c, f, None)
+}
+
+/// Süzgece uyan BÜTÜN dosyaların kimlikleri (sayfalama yok; listedeki sırayla, tekil). "Tümünü seç" ve
+/// seçili dosyalara işlem için; süzgeç mantığı listeyle aynı yerdedir.
+pub fn suzulen_dosyalar<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Vec<i64>, String> {
+    let mut idler = Vec::new();
+    borclu_listesi_ic(c, f, Some(&mut idler))?;
+    Ok(idler)
+}
+
+fn borclu_listesi_ic<C: GenericClient>(c: &mut C, f: &Filtre, kimlikler: Option<&mut Vec<i64>>) -> Result<Value, String> {
     let durum_kosulu = match f.durum.as_str() {
         "acik" => "AND d.durum_kod = 0",
         "kapali" => "AND d.durum_kod <> 0",
@@ -268,7 +317,8 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
     for s in c
         .query(
             "SELECT tb.borclu_id, tb.id, tb.tebligat_turu, tb.evrak_tarihi, tb.barkod, tb.elektronik_tebligat, tb.ptt_durumu,
-                    tb.son_islem_tarihi, tb.teslim_sekli, tb.tebligat_mazbatasi_var, tb.tebligat_mazbatasi_aciklama
+                    tb.son_islem_tarihi, tb.teslim_sekli, tb.tebligat_mazbatasi_var, tb.tebligat_mazbatasi_aciklama,
+                    tb.birim_evrak_no, tb.evrak_aciklama, tb.evrak_gunu, tb.son_islem_zamani::date
                FROM tebligat_barkod tb JOIN dosya d ON d.id = tb.dosya_id
               WHERE tb.borclu_id IS NOT NULL AND d.yargi_turu = 2
               ORDER BY tb.evrak_gunu DESC NULLS LAST, tb.birim_evrak_no DESC",
@@ -282,8 +332,27 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
             "elektronik": s.get::<_, bool>(5), "ptt_durumu": ptt, "son_islem_tarihi": s.get::<_, String>(7),
             "teslim_sekli": s.get::<_, String>(8), "mazbata_var": mazbata, "mazbata": s.get::<_, String>(10),
         });
-        tebligatlar.entry(s.get(0)).or_default().push(ListeTebligati { tur, ptt, mazbata, veri });
+        let sabit = match durum::tebligat_kesinlesmesi(&tur) {
+            durum::TebligatKesinlesmesi::SabitGun(gun) => Some((gun, durum::OdemeEmri {
+                birim_evrak_no: s.get(11),
+                evrak_aciklama: s.get(12),
+                evrak_tarihi: s.get(3),
+                evrak_gunu: s.get(13),
+                barkod: s.get(4),
+                elektronik_tebligat: s.get(5),
+                ptt_durumu: ptt.clone(),
+                son_islem_tarihi: s.get(7),
+                son_islem_gunu: s.get(14),
+                teslim_sekli: s.get(8),
+                tebligat_mazbatasi_var: mazbata,
+                tebligat_mazbatasi_aciklama: s.get(10),
+            })),
+            _ => None,
+        };
+        tebligatlar.entry(s.get(0)).or_default().push(ListeTebligati { tur, ptt, mazbata, veri, sabit });
     }
+    let tatiller = veri::resmi_tatiller(c)?;
+    let bugun = chrono::Local::now().date_naive();
 
     let (tur_var, teblig_var, mazbata_var) = (!f.tur.trim().is_empty(), !f.teblig.trim().is_empty(), !f.mazbata.is_empty());
     let aranan: Vec<String> = tr_kucuk(&f.q).split_whitespace().map(str::to_string).collect();
@@ -293,6 +362,7 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
     let mut say_mazbata: HashMap<String, i64> = HashMap::new();
     let mut say_kes: HashMap<String, i64> = HashMap::new();
     let mut say_birim: HashMap<String, i64> = HashMap::new();
+    let mut say_dosya_no: HashMap<String, i64> = HashMap::new();
     let mut say_alacakli: HashMap<String, i64> = HashMap::new();
     let mut say_borclu: HashMap<String, i64> = HashMap::new();
     let mut say_yil: HashMap<String, i64> = HashMap::new();
@@ -304,7 +374,7 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
     };
     // Bir kutunun kendi seçenekleri sayılırken o kutunun süzgeci: listeden seçildiyse (`=` / kodlu) yok sayılır,
     // düz yazıysa uygulanır.
-    let yazi = |s: &str| !s.is_empty() && !s.starts_with('=');
+    let yazi = |s: &str| !s.is_empty() && !listeden_mi(s);
     let mut satirlar: Vec<(Option<i64>, Value)> = Vec::new();
     let mut dosyalar: BTreeSet<i64> = BTreeSet::new();
     for s in satir_kayitlari {
@@ -325,8 +395,14 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
         // Künye süzgeçleri; `haric` verilen kutu (kendi seçenekleri sayılırken) yalnız düz yazıysa uygulanır.
         let kunye_uyar = |haric: Option<Kunye>| {
             let uygula = |k: Kunye, deger: &str| haric != Some(k) || yazi(deger);
+            // Alacaklı: "hariç" süzgecinde hariç tutulan bir alacaklısı olan dosya gizlenir; diğerlerinde alacaklılardan biri yeter.
+            let alacakli_uyar = || match f.alacakli.starts_with('!') {
+                true => alacaklilar.iter().all(|a| metin_uyar(&f.alacakli, a)),
+                false => alacaklilar.iter().any(|a| metin_uyar(&f.alacakli, a)),
+            };
             (!uygula(Kunye::Birim, &f.birim) || metin_uyar(&f.birim, &birim))
-                && (!uygula(Kunye::Alacakli, &f.alacakli) || f.alacakli.is_empty() || alacaklilar.iter().any(|a| metin_uyar(&f.alacakli, a)))
+                && (!uygula(Kunye::DosyaNo, &f.dosya_no) || metin_uyar(&f.dosya_no, &dosya_no))
+                && (!uygula(Kunye::Alacakli, &f.alacakli) || f.alacakli.is_empty() || alacakli_uyar())
                 && (!uygula(Kunye::Borclu, &f.borclu) || metin_uyar(&f.borclu, &borclu))
                 && (haric == Some(Kunye::Yil) || kod_uyar(&f.yil, &yil_metni))
                 && (haric == Some(Kunye::Tur) || kod_uyar(&f.dosya_tur, &dosya_tur))
@@ -334,8 +410,11 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
         let kunye_tamam = kunye_uyar(None);
         let bag: Option<i64> = s.get(0);
         let (kes, kes_t): (String, Option<NaiveDate>) = (s.get(10), s.get(11));
+        let talimat = durum::talimat_mi(s.get(20), &dosya_tur);
+        // Talimat dosyasında kesinleşme yok: süzgeçte "Henüz hesaplanmadı"ya karışmasın diye ayrı değer.
+        let kes_suzgec = if talimat { KES_TALIMAT.to_string() } else { kes.clone() };
         let tebl = bag.and_then(|b| tebligatlar.get(&b)).unwrap_or(&bos);
-        let kes_uyar = kesinlesme_uyar(&f.kesinlesme, &kes);
+        let kes_uyar = kesinlesme_uyar(&f.kesinlesme, &kes_suzgec);
         // Hangi süzgeçler hesaba katılsın: bir boyutun seçenekleri hesaplanırken o boyut dışarıda tutulur.
         let teb_uyar = |t: &ListeTebligati, tur: bool, teblig: bool, mazbata: bool| {
             (!tur || metin_uyar(&f.tur, &t.tur)) && (!teblig || metin_uyar(&f.teblig, &t.ptt)) && (!mazbata || mazbata_uyar(&f.mazbata, t.mazbata))
@@ -354,11 +433,14 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
         let suzgec_var = tur_var || teblig_var || mazbata_var;
         let teb_tamam = !suzgec_var || tebl.iter().any(|t| teb_uyar(t, tur_var, teblig_var, mazbata_var));
         if teb_tamam && kunye_tamam {
-            *say_kes.entry(if kes.is_empty() { "-".to_string() } else { kes.clone() }).or_default() += 1;
+            *say_kes.entry(if kes_suzgec.is_empty() { "-".to_string() } else { kes_suzgec.clone() }).or_default() += 1;
         }
         if kes_uyar && teb_tamam {
             if kunye_uyar(Some(Kunye::Birim)) {
                 *say_birim.entry(birim.clone()).or_default() += 1;
+            }
+            if kunye_uyar(Some(Kunye::DosyaNo)) {
+                *say_dosya_no.entry(dosya_no.clone()).or_default() += 1;
             }
             if kunye_uyar(Some(Kunye::Alacakli)) {
                 let uyanlar: BTreeSet<String> =
@@ -388,14 +470,19 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
             "islem_durumu": s.get::<_, String>(6), "borclu": borclu, "alacakli": alacakli,
             "asama": asama, "asama_etiket": if bag.is_some() { TakipAsamasi::etiket_bul(&asama) } else { String::new() },
             "asama_tarihi": gun(asama_t),
-            "kesinlesme": if bag.is_some() { durum::kesinlesme_metni(&kes, kes_t) } else { String::new() },
-            "kesinlesme_durumu": kes, "kesinlesme_tarihi": gun(kes_t),
+            "kesinlesme": if bag.is_some() && !talimat { durum::kesinlesme_metni(&kes, kes_t) } else { String::new() },
+            "kesinlesme_durumu": kes, "kesinlesme_tarihi": gun(kes_t), "talimat": talimat,
             "tebligat": if bag.is_some() { durum::tebligat_metni(&tebl_d, tebl_t, &tebl_s) } else { String::new() },
             "tebligat_durumu": tebl_d,
             "uyapta_gorulmedi": s.get::<_, bool>(15), "itiraz": s.get::<_, bool>(16),
             "uyap": uyap_karti(&s.get::<_, String>(18), &birim, &dosya_no, s.get(20), &dosya_tur, &s.get::<_, String>(19),
                                s.get::<_, String>(4).as_str(), s.get(5)),
         })));
+    }
+    if let Some(out) = kimlikler {
+        let mut gorulen = std::collections::HashSet::new();
+        out.extend(satirlar.iter().filter_map(|(_, s)| s["dosya"].as_i64()).filter(|d| gorulen.insert(*d)));
+        return Ok(Value::Null);
     }
     let toplam = satirlar.len();
     let boyut = f.boyut.clamp(1, 500);
@@ -406,7 +493,10 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
         .skip((sayfa - 1) * boyut)
         .take(boyut)
         .map(|(bag, mut satir)| {
-            // Borçlunun bütün tebligatları; süzgeç varsa uyanlar işaretlenir.
+            // Borçlunun bütün tebligatları; süzgeç varsa uyanlar işaretlenir. Kesinleşme tebligat başına gösterilir:
+            // ödeme emrinde borçlunun hesabı, 103 / kıymet takdirinde sabit süre, diğer türlerde yok.
+            let borclu_kes = satir["kesinlesme"].clone();
+            let talimat = satir["talimat"].as_bool().unwrap_or(false);
             let liste: Vec<Value> = bag
                 .and_then(|b| tebligatlar.get(&b))
                 .unwrap_or(&bos)
@@ -416,6 +506,19 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
                     v["uyan"] = json!(
                         suzgec_var && metin_uyar(&f.tur, &t.tur) && metin_uyar(&f.teblig, &t.ptt) && mazbata_uyar(&f.mazbata, t.mazbata)
                     );
+                    v["kesinlesme"] = match (durum::tebligat_kesinlesmesi(&t.tur), &t.sabit) {
+                        _ if talimat => json!(""),
+                        (durum::TebligatKesinlesmesi::Borclu, _) => borclu_kes.clone(),
+                        (durum::TebligatKesinlesmesi::SabitGun(_), Some((gun, oe))) => {
+                            let (k, kt) = durum::borclu_kesinlesme_hesapla(false, std::slice::from_ref(oe), &tatiller, bugun, None, Some(*gun));
+                            json!(durum::kesinlesme_metni(&k, kt))
+                        }
+                        _ => json!(""),
+                    };
+                    v["kesinlesme_yok"] = json!(talimat || durum::tebligat_kesinlesmesi(&t.tur) == durum::TebligatKesinlesmesi::Yok);
+                    if talimat {
+                        v["kesinlesme_neden"] = json!(durum::TALIMAT_KESINLESME_YOK);
+                    }
                     v
                 })
                 .collect();
@@ -431,6 +534,7 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
         "secenek_siniri": SECENEK_SINIRI,
         "secenekler": {
             "birim": secenek_sinirli(say_birim, &ayni, SECENEK_SINIRI),
+            "dosya_no": secenek_sinirli(say_dosya_no, &ayni, SECENEK_SINIRI),
             "alacakli": secenek_sinirli(say_alacakli, &ayni, SECENEK_SINIRI),
             "borclu": secenek_sinirli(say_borclu, &ayni, SECENEK_SINIRI),
             "yil": yillar,
@@ -438,7 +542,11 @@ pub fn borclu_listesi<C: GenericClient>(c: &mut C, f: &Filtre) -> Result<Value, 
             "tur": secenek_listesi(say_tur, &|d| if d.is_empty() { "(türü yok)".to_string() } else { d.to_string() }),
             "teblig": secenek_listesi(say_teblig, &|d| if d.is_empty() { "Henüz sorgulanmadı".to_string() } else { d.to_string() }),
             "mazbata": secenek_listesi(say_mazbata, &|d| if d == "var" { "Döndü" } else { "Dönmedi" }.to_string()),
-            "kesinlesme": secenek_listesi(say_kes, &|d| if d == "-" { "Henüz hesaplanmadı".to_string() } else { KesinlesmeDurumu::etiket_bul(d) }),
+            "kesinlesme": secenek_listesi(say_kes, &|d| match d {
+                "-" => "Henüz hesaplanmadı".to_string(),
+                KES_TALIMAT => "Talimat dosyası (kesinleşme yok)".to_string(),
+                _ => KesinlesmeDurumu::etiket_bul(d),
+            }),
         },
     }))
 }
@@ -451,7 +559,9 @@ pub fn dosya_ayrintisi<C: GenericClient>(c: &mut C, dosya: i64) -> Result<Option
             "SELECT b.ad, d.dosya_no, d.durum, d.durum_kod, d.tur, to_char(d.acilis_tarihi, 'YYYY-MM-DD'), d.yargi_turu,
                     d.islem_durumu, d.islem_durumu_notu, d.bekleme_bitis_tarihi, to_char(d.son_senkron, 'YYYY-MM-DD HH24:MI'),
                     i.takibin_turu, i.takibin_yolu, i.takibin_sekli, i.alacak_kalemi_toplam::text, i.vekalet_ucreti::text,
-                    i.tahsil_harci::text, b.birim_id, b.turu3, d.tur_kod
+                    i.tahsil_harci::text, b.birim_id, b.turu3, d.tur_kod,
+                    i.takibin_turu_aciklama, i.takibin_yolu_aciklama, i.takibin_sekli_aciklama, i.ornek_no,
+                    to_char(i.ayrinti_zamani, 'YYYY-MM-DD HH24:MI')
                FROM dosya d JOIN birim b ON b.id = d.birim_id LEFT JOIN icra_takip_detay i ON i.dosya_id = d.id
               WHERE d.id = $1",
             &[&dosya],
@@ -462,7 +572,8 @@ pub fn dosya_ayrintisi<C: GenericClient>(c: &mut C, dosya: i64) -> Result<Option
     };
     let kod = |i: usize| d.get::<_, Option<String>>(i).unwrap_or_default();
     let kurallar = veri::kesinlesme_kurallari(c)?;
-    let kural = veri::kesinlesme_kurali_sec(&kurallar, &kod(11), &kod(12), &kod(13));
+    let talimat = durum::talimat_mi(d.get(19), &d.get::<_, String>(4));
+    let kural = veri::kesinlesme_kurali_sec(&kurallar, &kod(11), &kod(12), &kod(13)).filter(|_| !talimat);
     let islem: String = d.get(7);
     let kunye = json!({
         "id": dosya, "birim": d.get::<_, String>(0), "dosya_no": d.get::<_, String>(1), "durum": d.get::<_, String>(2),
@@ -470,14 +581,25 @@ pub fn dosya_ayrintisi<C: GenericClient>(c: &mut C, dosya: i64) -> Result<Option
         "yargi_turu": veri::YargiTuru::coz(d.get(6)).map(|y| y.etiket()),
         "islem_durumu": islem, "islem_durumu_etiket": IslemDurumu::etiket_bul(&islem),
         "islem_durumu_notu": d.get::<_, String>(8), "bekleme_bitis": gun(d.get(9)), "son_guncelleme": d.get::<_, String>(10),
+        "talimat": talimat,
         "uyap": uyap_karti(&d.get::<_, String>(17), &d.get::<_, String>(0), &d.get::<_, String>(1), d.get(19),
                            &d.get::<_, String>(4), &d.get::<_, String>(18), &d.get::<_, String>(2), d.get(3)),
     });
+    let adlar = TakipAdlari::oku(c)?;
+    let ad = |i: usize, kademe: i16| {
+        let kayitli = kod(i);
+        if kayitli.is_empty() { adlar.ad(kademe, &kod(11), &kod(12), &kod(13)) } else { kayitli }
+    };
+    let sekli_adi = ad(22, 3);
     let takip = json!({
         "okundu": d.get::<_, Option<String>>(11).is_some(), "turu": kod(11), "yolu": kod(12), "sekli": kod(13),
+        "turu_ad": ad(20, 1), "yolu_ad": ad(21, 2), "sekli_ad": sekli_adi,
+        "ornek_no": if kod(23).is_empty() { crate::icra_kayit::ornek_no(&sekli_adi) } else { kod(23) },
+        "okunma": d.get::<_, Option<String>>(24),
         "alacak_toplam": d.get::<_, Option<String>>(14), "vekalet_ucreti": d.get::<_, Option<String>>(15),
         "tahsil_harci": d.get::<_, Option<String>>(16),
         "itiraz_suresi_gun": kural.and_then(|k| k.itiraz_suresi_gun), "kural": kural.map(|k| k.ad.clone()),
+        "kesinlesme_yok": if talimat { json!(durum::TALIMAT_KESINLESME_YOK) } else { Value::Null },
     });
 
     let sql = format!(
@@ -533,7 +655,24 @@ pub fn dosya_ayrintisi<C: GenericClient>(c: &mut C, dosya: i64) -> Result<Option
             "borclu": borclu.map(|_| s.get::<_, String>(14)), "hareket_sayisi": s.get::<_, i64>(15),
         }));
     }
-    Ok(Some(json!({"kunye": kunye, "takip": takip, "taraflar": taraflar, "tebligatlar": tebligatlar})))
+    // Evrak listesinde olup tebligat kaydı olmayan zarflar (alınamamış) ve nedeni.
+    let alinamayan: Vec<Value> = c
+        .query(
+            "SELECT e.birim_evrak_no, e.evrak_turu, e.aciklama, to_char(e.evrak_tarihi, 'DD/MM/YYYY'), e.tebligat_notu FROM evrak e
+              WHERE e.dosya_id = $1 AND e.evrak_turu IN ($2, $3)
+                AND NOT EXISTS (SELECT 1 FROM tebligat_barkod tb WHERE tb.dosya_id = e.dosya_id AND tb.birim_evrak_no = e.birim_evrak_no)
+              ORDER BY e.evrak_tarihi DESC NULLS LAST, e.birim_evrak_no DESC",
+            &[&dosya, &teb::HEDEF_TUR, &teb::MTS_TEBLIGAT_TUR],
+        )
+        .map_err(hata)?
+        .iter()
+        .map(|s| {
+            let aciklama: String = s.get(2);
+            json!({"evrak_no": s.get::<_, i32>(0), "tur": s.get::<_, String>(1), "muhatap": teb::tebligat_muhatabi(&aciklama).0,
+                   "aciklama": aciklama, "evrak_tarihi": s.get::<_, Option<String>>(3), "neden": s.get::<_, String>(4)})
+        })
+        .collect();
+    Ok(Some(json!({"kunye": kunye, "takip": takip, "taraflar": taraflar, "tebligatlar": tebligatlar, "alinamayan": alinamayan})))
 }
 
 /// Dosyanın durum geçmişi, yeniden eskiye.
@@ -586,36 +725,169 @@ pub fn ptt_hareketleri<C: GenericClient>(c: &mut C, tebligat: i64) -> Result<Val
 /// Kesinleşme süreleri ve veritabanındaki icra dosyalarının takip kodu dağılımı (kural girerken
 /// hangi kodun kaç dosyada olduğu görülsün); takip türü hiç okunmamış dosya sayısı ayrıca.
 pub fn kurallar<C: GenericClient>(c: &mut C) -> Result<Value, String> {
+    let adlar = TakipAdlari::oku(c)?;
+    let adli = |v: &mut Value, turu: &str, yolu: &str, sekli: &str| {
+        let sekli_adi = if sekli.is_empty() { String::new() } else { adlar.ad(3, turu, yolu, sekli) };
+        v["turu_ad"] = json!(if turu.is_empty() { String::new() } else { adlar.ad(1, turu, "", "") });
+        v["yolu_ad"] = json!(if yolu.is_empty() { String::new() } else { adlar.ad(2, turu, yolu, "") });
+        v["ornek_no"] = json!(crate::icra_kayit::ornek_no(&sekli_adi));
+        v["sekli_ad"] = json!(sekli_adi);
+    };
     let liste: Vec<Value> = veri::kesinlesme_kurallari(c)?
         .iter()
         .map(|k| {
-            json!({"id": k.id, "takibin_turu": k.takibin_turu, "takibin_yolu": k.takibin_yolu, "takibin_sekli": k.takibin_sekli,
-                   "ad": k.ad, "gun": k.itiraz_suresi_gun, "aktif": k.aktif, "aciklama": k.aciklama})
+            let mut v = json!({"id": k.id, "takibin_turu": k.takibin_turu, "takibin_yolu": k.takibin_yolu, "takibin_sekli": k.takibin_sekli,
+                   "ad": k.ad, "gun": k.itiraz_suresi_gun, "aktif": k.aktif, "aciklama": k.aciklama});
+            adli(&mut v, &k.takibin_turu, &k.takibin_yolu, &k.takibin_sekli);
+            v
         })
         .collect();
     let dagilim: Vec<Value> = c
         .query(
             "SELECT i.takibin_turu, i.takibin_yolu, i.takibin_sekli, count(*),
                     (SELECT b.ad || ' ' || d2.dosya_no FROM dosya d2 JOIN birim b ON b.id = d2.birim_id WHERE d2.id = min(d.id))
-               FROM icra_takip_detay i JOIN dosya d ON d.id = i.dosya_id WHERE d.yargi_turu = 2
+               FROM icra_takip_detay i JOIN dosya d ON d.id = i.dosya_id WHERE d.yargi_turu = 2 AND d.tur_kod <> 1
               GROUP BY 1, 2, 3 ORDER BY 4 DESC",
             &[],
         )
         .map_err(hata)?
         .iter()
         .map(|s| {
-            json!({"turu": s.get::<_, String>(0), "yolu": s.get::<_, String>(1), "sekli": s.get::<_, String>(2),
-                   "adet": s.get::<_, i64>(3), "ornek": s.get::<_, Option<String>>(4)})
+            let (turu, yolu, sekli): (String, String, String) = (s.get(0), s.get(1), s.get(2));
+            let mut v = json!({"turu": turu, "yolu": yolu, "sekli": sekli, "adet": s.get::<_, i64>(3), "ornek": s.get::<_, Option<String>>(4)});
+            adli(&mut v, &turu, &yolu, &sekli);
+            v
         })
         .collect();
+    let liste_zamani: Option<String> = c
+        .query_one("SELECT to_char(max(guncelleme), 'YYYY-MM-DD HH24:MI') FROM takip_turu_listesi", &[])
+        .map_err(hata)?
+        .get(0);
     let bilinmeyen: i64 = c
         .query_one(
-            "SELECT count(*) FROM dosya d WHERE d.yargi_turu = 2 AND NOT EXISTS (SELECT 1 FROM icra_takip_detay i WHERE i.dosya_id = d.id)",
+            "SELECT count(*) FROM dosya d WHERE d.yargi_turu = 2 AND d.tur_kod <> 1
+                AND NOT EXISTS (SELECT 1 FROM icra_takip_detay i WHERE i.dosya_id = d.id)",
             &[],
         )
         .map_err(hata)?
         .get(0);
-    Ok(json!({"kurallar": liste, "dagilim": dagilim, "takip_turu_bilinmeyen": bilinmeyen}))
+    Ok(json!({"kurallar": liste, "dagilim": dagilim, "takip_turu_bilinmeyen": bilinmeyen, "agac": takip_agaci(c, &adlar)?,
+              "liste_zamani": liste_zamani}))
+}
+
+/// Takip türü / yolu / şekli adları: UYAP takip açılış listesi (`takip_turu_listesi`), yoksa dosyaların ayrıntısında
+/// görülen ad. Anahtar: (kademe, tür, yol, şekil) — kademe 1'de yol ve şekil, 2'de şekil boştur.
+pub struct TakipAdlari(HashMap<(i16, String, String, String), String>);
+
+impl TakipAdlari {
+    pub fn oku<C: GenericClient>(c: &mut C) -> Result<Self, String> {
+        let mut m: HashMap<(i16, String, String, String), String> = HashMap::new();
+        // Önce dosyalarda görülen adlar, sonra UYAP listesi (liste üstüne yazar).
+        for s in c
+            .query(
+                "SELECT takibin_turu, takibin_yolu, takibin_sekli, max(takibin_turu_aciklama), max(takibin_yolu_aciklama),
+                        max(takibin_sekli_aciklama)
+                   FROM icra_takip_detay WHERE takibin_turu <> '' GROUP BY 1, 2, 3",
+                &[],
+            )
+            .map_err(hata)?
+        {
+            let (turu, yolu, sekli): (String, String, String) = (s.get(0), s.get(1), s.get(2));
+            let (a1, a2, a3): (String, String, String) = (s.get(3), s.get(4), s.get(5));
+            for (anahtar, ad) in [
+                ((1, turu.clone(), String::new(), String::new()), a1),
+                ((2, turu.clone(), yolu.clone(), String::new()), a2),
+                ((3, turu.clone(), yolu.clone(), sekli.clone()), a3),
+            ] {
+                if !ad.is_empty() {
+                    m.insert(anahtar, ad);
+                }
+            }
+        }
+        for s in c.query("SELECT kademe, takibin_turu, takibin_yolu, takibin_sekli, ad FROM takip_turu_listesi WHERE ad <> ''", &[]).map_err(hata)? {
+            m.insert((s.get(0), s.get(1), s.get(2), s.get(3)), s.get(4));
+        }
+        Ok(Self(m))
+    }
+
+    /// Adı; bilinmiyorsa boş.
+    pub fn ad(&self, kademe: i16, turu: &str, yolu: &str, sekli: &str) -> String {
+        let (y, s) = match kademe {
+            1 => ("", ""),
+            2 => (yolu, ""),
+            _ => (yolu, sekli),
+        };
+        self.0.get(&(kademe, turu.to_string(), y.to_string(), s.to_string())).cloned().unwrap_or_default()
+    }
+}
+
+/// Kodları sayıya göre sırala (sayı olmayanlar sonda, metin sırasıyla).
+fn kod_sirasi(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.parse::<i64>(), b.parse::<i64>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        _ => a.cmp(b),
+    }
+}
+
+/// Kesinleşme süresi seçimi için takip türü ağacı: tür → yollar → şekiller, adları ve dosya sayılarıyla. UYAP
+/// listesindeki bütün seçenekler ve dosyalarda görülen (listede olmayan) kodlar birlikte.
+fn takip_agaci<C: GenericClient>(c: &mut C, adlar: &TakipAdlari) -> Result<Value, String> {
+    // tür → yol → şekil → dosya sayısı
+    let mut agac: BTreeMap<String, BTreeMap<String, BTreeMap<String, i64>>> = BTreeMap::new();
+    for s in c.query("SELECT kademe, takibin_turu, takibin_yolu, takibin_sekli FROM takip_turu_listesi", &[]).map_err(hata)? {
+        let (kademe, turu, yolu, sekli): (i16, String, String, String) = (s.get(0), s.get(1), s.get(2), s.get(3));
+        let t = agac.entry(turu).or_default();
+        if kademe >= 2 {
+            let y = t.entry(yolu).or_default();
+            if kademe == 3 {
+                y.entry(sekli).or_default();
+            }
+        }
+    }
+    for s in c
+        .query(
+            "SELECT i.takibin_turu, i.takibin_yolu, i.takibin_sekli, count(*) FROM icra_takip_detay i JOIN dosya d ON d.id = i.dosya_id
+              WHERE d.yargi_turu = 2 AND d.tur_kod <> 1 AND i.takibin_turu <> '' GROUP BY 1, 2, 3",
+            &[],
+        )
+        .map_err(hata)?
+    {
+        let (turu, yolu, sekli, n): (String, String, String, i64) = (s.get(0), s.get(1), s.get(2), s.get(3));
+        let y = agac.entry(turu).or_default().entry(yolu.clone()).or_default();
+        if !yolu.is_empty() {
+            *y.entry(sekli).or_default() += n;
+        }
+    }
+    let sirali = |m: Vec<String>| {
+        let mut m = m;
+        m.sort_by(|a, b| kod_sirasi(a, b));
+        m
+    };
+    let mut out = Vec::new();
+    for turu in sirali(agac.keys().cloned().collect()) {
+        let yollar_m = &agac[&turu];
+        let mut yollar = Vec::new();
+        let mut tur_adet = 0;
+        for yolu in sirali(yollar_m.keys().filter(|y| !y.is_empty()).cloned().collect()) {
+            let sekiller_m = &yollar_m[&yolu];
+            let mut yol_adet = 0;
+            let sekiller: Vec<Value> = sirali(sekiller_m.keys().filter(|x| !x.is_empty()).cloned().collect())
+                .into_iter()
+                .map(|sekli| {
+                    let n = sekiller_m[&sekli];
+                    yol_adet += n;
+                    let ad = adlar.ad(3, &turu, &yolu, &sekli);
+                    json!({"kod": sekli, "ad": ad, "ornek_no": crate::icra_kayit::ornek_no(&ad), "adet": n})
+                })
+                .collect();
+            tur_adet += yol_adet;
+            yollar.push(json!({"kod": yolu, "ad": adlar.ad(2, &turu, &yolu, ""), "adet": yol_adet, "sekiller": sekiller}));
+        }
+        out.push(json!({"kod": turu, "ad": adlar.ad(1, &turu, "", ""), "adet": tur_adet, "yollar": yollar}));
+    }
+    Ok(Value::Array(out))
 }
 
 /// Süre ekler ya da günceller. `gun` boşsa o türde kesinleşme hesaplanmaz. Aynı takip kodu için
@@ -635,6 +907,10 @@ pub fn kural_kaydet<C: GenericClient>(
     let (turu, yolu, sekli) = (turu.trim(), yolu.trim(), sekli.trim());
     if [turu, yolu, sekli].iter().any(|k| k.chars().count() > 8) {
         return Err("Takip kodu en çok 8 karakter olabilir.".into());
+    }
+    // Kodlar yalnız üstündekiyle birlikte anlamlıdır (şekil "0" ilamsızda Örnek 7, ilamlıda Örnek 4-5).
+    if (turu.is_empty() && !yolu.is_empty()) || (yolu.is_empty() && !sekli.is_empty()) {
+        return Err("Takip yolu için önce takip türü, takip şekli için önce takip yolu seçilmeli.".into());
     }
     let gun = match gun {
         Some(g) if !(1..=365).contains(&g) => return Err("Süre 1–365 gün arasında olmalı.".into()),
@@ -770,6 +1046,50 @@ fn sorgu_tam(q: &HashMap<String, String>, anahtar: &str) -> Result<i64, String> 
     q.get(anahtar).and_then(|v| v.trim().parse().ok()).ok_or_else(|| format!("'{anahtar}' eksik."))
 }
 
+/// Liste süzgeçleri (sorgu dizesinden).
+fn filtre_oku(q: &HashMap<String, String>) -> Filtre {
+    Filtre {
+        q: q.get("q").cloned().unwrap_or_default(),
+        asama: q.get("asama").cloned().unwrap_or_default(),
+        // `acik=1` eski istemciler için (yalnız açık); yeni istemci `durum` gönderir.
+        durum: q.get("durum").cloned().unwrap_or_else(|| if q.get("acik").is_some_and(|v| v == "1") { "acik".into() } else { String::new() }),
+        birim: q.get("birim").cloned().unwrap_or_default(),
+        dosya_no: q.get("dosya_no").cloned().unwrap_or_default(),
+        alacakli: q.get("alacakli").cloned().unwrap_or_default(),
+        borclu: q.get("borclu").cloned().unwrap_or_default(),
+        yil: q.get("yil").cloned().unwrap_or_default(),
+        dosya_tur: q.get("dosya_tur").cloned().unwrap_or_default(),
+        acilis_bas: q.get("acilis_bas").and_then(|v| veri::tarih::gun_coz(v)),
+        acilis_son: q.get("acilis_son").and_then(|v| veri::tarih::gun_coz(v)),
+        tur: q.get("tur").cloned().unwrap_or_default(),
+        teblig: q.get("teblig").cloned().unwrap_or_default(),
+        mazbata: q.get("mazbata").cloned().unwrap_or_default(),
+        kesinlesme: q.get("kesinlesme").cloned().unwrap_or_default(),
+        sayfa: q.get("sayfa").and_then(|v| v.parse().ok()).unwrap_or(1),
+        boyut: q.get("boyut").and_then(|v| v.parse().ok()).unwrap_or(50),
+    }
+}
+
+/// Gövdedeki `dosyalar` (seçili dosya kimlikleri); yoksa None.
+pub fn dosya_listesi(g: &Value) -> Result<Option<Vec<i64>>, String> {
+    match g.get("dosyalar") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) if a.len() <= SECIM_EN_COK => a
+            .iter()
+            .map(|x| x.as_i64().filter(|d| *d > 0))
+            .collect::<Option<Vec<i64>>>()
+            .map(Some)
+            .ok_or_else(|| "Dosya listesi geçersiz.".to_string()),
+        Some(_) => Err(format!("Dosya listesi geçersiz (en çok {SECIM_EN_COK} dosya).")),
+    }
+}
+
+/// Seçili dosyalara işlemde en çok dosya.
+pub const SECIM_EN_COK: usize = 50_000;
+/// Seçim bundan küçükse "Yeniden hesapla" yalnız seçili dosyaları tek tek hesaplar; büyükse hepsini tek geçişte
+/// (yerel iş; seçili dosyalar için sonuç aynı).
+const HESAP_TEK_TEK_EN_COK: usize = 500;
+
 /// İsteği veritabanı bağlantısıyla işler. `Ok(None)` = böyle bir uç yok.
 fn dagit(c: &mut postgres::Client, yontem: &str, uc: &str, q: &HashMap<String, String>, g: &Value) -> Result<Option<Value>, String> {
     let bugun = chrono::Local::now().date_naive();
@@ -777,32 +1097,28 @@ fn dagit(c: &mut postgres::Client, yontem: &str, uc: &str, q: &HashMap<String, S
     let evet = |a: &str| g.get(a).and_then(Value::as_bool).unwrap_or(false);
     Ok(Some(match (yontem, uc) {
         ("GET", "ozet") => ozet(c)?,
-        ("GET", "borclular") => borclu_listesi(
-            c,
-            &Filtre {
-                q: q.get("q").cloned().unwrap_or_default(),
-                asama: q.get("asama").cloned().unwrap_or_default(),
-                // `acik=1` eski istemciler için (yalnız açık); yeni istemci `durum` gönderir.
-                durum: q.get("durum").cloned().unwrap_or_else(|| if q.get("acik").is_some_and(|v| v == "1") { "acik".into() } else { String::new() }),
-                birim: q.get("birim").cloned().unwrap_or_default(),
-                alacakli: q.get("alacakli").cloned().unwrap_or_default(),
-                borclu: q.get("borclu").cloned().unwrap_or_default(),
-                yil: q.get("yil").cloned().unwrap_or_default(),
-                dosya_tur: q.get("dosya_tur").cloned().unwrap_or_default(),
-                acilis_bas: q.get("acilis_bas").and_then(|v| veri::tarih::gun_coz(v)),
-                acilis_son: q.get("acilis_son").and_then(|v| veri::tarih::gun_coz(v)),
-                tur: q.get("tur").cloned().unwrap_or_default(),
-                teblig: q.get("teblig").cloned().unwrap_or_default(),
-                mazbata: q.get("mazbata").cloned().unwrap_or_default(),
-                kesinlesme: q.get("kesinlesme").cloned().unwrap_or_default(),
-                sayfa: q.get("sayfa").and_then(|v| v.parse().ok()).unwrap_or(1),
-                boyut: q.get("boyut").and_then(|v| v.parse().ok()).unwrap_or(50),
-            },
-        )?,
+        ("GET", "borclular") => borclu_listesi(c, &filtre_oku(q))?,
+        ("GET", "dosya_kimlikleri") => json!(suzulen_dosyalar(c, &filtre_oku(q))?),
         ("GET", "dosya") => dosya_ayrintisi(c, sorgu_tam(q, "id")?)?.ok_or("Dosya bulunamadı.")?,
         ("GET", "gecmis") => gecmis(c, sorgu_tam(q, "dosya")?)?,
         ("GET", "ptt") => ptt_hareketleri(c, sorgu_tam(q, "tebligat")?)?,
         ("GET", "kurallar") => kurallar(c)?,
+        ("GET", "tebligatlar") => teb_liste::tebligat_listesi(c, &teb_liste::Filtre::oku(q))?,
+        ("GET", "tebligat_dosya_kimlikleri") => json!(teb_liste::tebligat_dosyalari(c, &teb_liste::Filtre::oku(q))?),
+        ("GET", "tur_eslestirme") => teb_liste::tur_eslestirme(c)?,
+        ("POST", "tur_eslestir") => {
+            let liste: Vec<(String, String)> = g
+                .get("eslesmeler")
+                .and_then(Value::as_array)
+                .ok_or("Eşleştirme listesi eksik.")?
+                .iter()
+                .map(|x| (teb::metin(x, "anahtar"), teb::metin(x, "tur")))
+                .collect();
+            let (eslesme, degisen) = teb_liste::tur_eslestir(c, &liste)?;
+            // Tür kesinleşmeyi değiştirir (ör. "Ödeme Emri"): bütün borçlular yeniden hesaplanır.
+            let s = durum::durumlari_guncelle(c, None, bugun, &|_| {})?;
+            json!({"eslesme": eslesme, "degisen": degisen, "guncellenen": s.guncellenen})
+        }
         ("GET", "tatiller") => tatiller(c)?,
         ("POST", "kural") => {
             let id = kural_kaydet(
@@ -847,10 +1163,21 @@ fn dagit(c: &mut postgres::Client, yontem: &str, uc: &str, q: &HashMap<String, S
             veri::islem_durumu_ata(c, tam(g, "dosya")?, d, &metin("notu"), gun_coz(&g["bekleme_bitis"])?)?;
             Value::Null
         }
-        ("POST", "hesapla") => {
-            let s = durum::durumlari_guncelle(c, teb::tam(g, "dosya"), bugun, &|_| {})?;
-            json!({"guncellenen": s.guncellenen, "olay": s.olay})
-        }
+        ("POST", "hesapla") => match dosya_listesi(g)? {
+            Some(idler) if idler.len() <= HESAP_TEK_TEK_EN_COK => {
+                let (mut guncellenen, mut olay) = (0, 0);
+                for d in &idler {
+                    let s = durum::durumlari_guncelle(c, Some(*d), bugun, &|_| {})?;
+                    guncellenen += s.guncellenen;
+                    olay += s.olay;
+                }
+                json!({"guncellenen": guncellenen, "olay": olay, "dosya_sayisi": idler.len()})
+            }
+            secim => {
+                let s = durum::durumlari_guncelle(c, teb::tam(g, "dosya"), bugun, &|_| {})?;
+                json!({"guncellenen": s.guncellenen, "olay": s.olay, "dosya_sayisi": secim.map(|x| x.len())})
+            }
+        },
         _ => return Ok(None),
     }))
 }
@@ -867,6 +1194,27 @@ pub async fn handle(method: &str, path: &str, query: &str, body: &[u8], capraz_s
         return yanit(503, json!({"ok": false, "kod": "E-402", "error": "Büro veritabanı hazır değil."}));
     }
     let q: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+    // Excel: ikili yanıt (JSON zarfı yok); dosya istemcinin tarayıcısında indirilir.
+    if yontem == "GET" && uc == "tebligatlar_excel" {
+        let sonuc = tokio::task::spawn_blocking(move || {
+            let mut c = crate::veritabani::baglanti()?;
+            let c: &mut postgres::Client = &mut c;
+            teb_liste::tebligat_excel(c, &teb_liste::Filtre::oku(&q))
+        })
+        .await;
+        return match sonuc {
+            Ok(Ok(bayt)) => {
+                let mut h = HashMap::new();
+                h.insert("Content-Type".to_string(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string());
+                let ad = format!("Tebligatlar_{}.xlsx", chrono::Local::now().format("%Y%m%d_%H%M"));
+                h.insert("Content-Disposition".to_string(), format!("attachment; filename=\"{ad}\""));
+                h.insert("Cache-Control".to_string(), "no-store".to_string());
+                (200, h, bayt)
+            }
+            Ok(Err(e)) => yanit(500, json!({"ok": false, "error": e})),
+            Err(e) => yanit(500, json!({"ok": false, "error": format!("İşlem tamamlanamadı: {e}")})),
+        };
+    }
     let g: Value = if body.is_empty() {
         json!({})
     } else {
@@ -921,7 +1269,9 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     )
     .unwrap();
     kayit::dosya_taraf_kaydet(c, d2, &[json!({"adi": "MEHMET DEMİR", "rol": "Borçlu", "kisiKurum": "Kişi"})], &sessiz).unwrap();
-    kayit::dosya_ayrinti_kaydet(c, d1, &json!({"takibinTuru": "0", "takibinYolu": "1", "takibinSekli": "7", "alacakKalemToplamTutar": 3762.9})).unwrap();
+    kayit::dosya_ayrinti_kaydet(c, d1, &json!({"takibinTuru": "0", "takibinYolu": "1", "takibinSekli": "7", "alacakKalemToplamTutar": 3762.9,
+        "takibinTuruAciklama": "İlamlı Takip", "takibinYoluAciklama": "İlamların İcrası",
+        "takibinSekliAciklama": " ÖRNEK: 4-5 Para Borcuna Dair İcra Emri - Eski No: 53 "})).unwrap();
     let teb_id: i64 = c
         .query_one(
             "INSERT INTO tebligat_barkod (dosya_id, birim_evrak_no, tebligat_turu, evrak_tarihi, evrak_aciklama, barkod, ptt_durumu,
@@ -948,13 +1298,29 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     let k = al(c, "kurallar", &[]);
     assert_eq!(k["kurallar"].as_array().unwrap().len(), 2);
     assert_eq!(k["kurallar"][0]["ad"], "Varsayılan (7 gün)");
-    assert_eq!(k["dagilim"][0], json!({"turu": "0", "yolu": "1", "sekli": "7", "adet": 1, "ornek": "İzmir 1. İcra Dairesi 2026/5"}));
+    assert_eq!(
+        k["dagilim"][0],
+        json!({"turu": "0", "yolu": "1", "sekli": "7", "adet": 1, "ornek": "İzmir 1. İcra Dairesi 2026/5", "turu_ad": "İlamlı Takip",
+               "yolu_ad": "İlamların İcrası", "sekli_ad": "ÖRNEK: 4-5 Para Borcuna Dair İcra Emri - Eski No: 53", "ornek_no": "4-5"})
+    );
+    // Kural adları: tür + yol seçilmiş, şekil "hepsi"
+    assert_eq!((&k["kurallar"][1]["turu_ad"], &k["kurallar"][1]["yolu_ad"], &k["kurallar"][1]["sekli_ad"]), (&json!("İlamlı Takip"), &json!("İlamların İcrası"), &json!("")));
+    // Ağaç: dosyalarda görülen tür → yol → şekil, dosya sayısıyla (UYAP listesi henüz alınmadı)
+    assert_eq!(k["agac"][0]["kod"], "0");
+    assert_eq!((&k["agac"][0]["ad"], &k["agac"][0]["adet"]), (&json!("İlamlı Takip"), &json!(1)));
+    assert_eq!(k["agac"][0]["yollar"][0]["sekiller"][0], json!({"kod": "7", "ad": "ÖRNEK: 4-5 Para Borcuna Dair İcra Emri - Eski No: 53", "ornek_no": "4-5", "adet": 1}));
+    assert_eq!(k["liste_zamani"], Value::Null);
+    // Kodlar sırayla seçilir: türsüz yol ya da yolsuz şekil olmaz
+    assert!(gonder(c, "kural", json!({"takibin_yolu": "1", "gun": 7})).unwrap_err().contains("önce takip türü"));
+    assert!(gonder(c, "kural", json!({"takibin_turu": "0", "takibin_sekli": "7", "gun": 7})).unwrap_err().contains("önce takip yolu"));
     assert_eq!(k["takip_turu_bilinmeyen"], 1);
 
     // Dosya penceresi: en özel kural uygulanır
     let d = al(c, "dosya", &[("id", &d1.to_string())]);
     assert_eq!(d["kunye"]["dosya_no"], "2026/5");
     assert_eq!((&d["takip"]["itiraz_suresi_gun"], &d["takip"]["kural"], &d["takip"]["alacak_toplam"]), (&json!(10), &json!("İlamsız"), &json!("3762.90")));
+    assert_eq!((&d["takip"]["turu_ad"], &d["takip"]["yolu_ad"], &d["takip"]["ornek_no"]), (&json!("İlamlı Takip"), &json!("İlamların İcrası"), &json!("4-5")));
+    assert!(d["takip"]["okunma"].is_string());
     let taraflar = d["taraflar"].as_array().unwrap();
     assert_eq!(taraflar.len(), 3);
     assert_eq!((&taraflar[0]["rol_etiket"], &taraflar[0]["vekiller"], &taraflar[0]["tuzel"]), (&json!("Alacaklı"), &json!("AYŞE KAYA"), &json!(true)));
@@ -998,6 +1364,8 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     let ahmet_satir = l["satirlar"][0].clone();
     assert_eq!(ahmet_satir["tebligatlar"].as_array().unwrap().len(), 1, "borçlunun bütün tebligatları satırda");
     assert_eq!((&ahmet_satir["tebligatlar"][0]["barkod"], &ahmet_satir["tebligatlar"][0]["uyan"]), (&json!("4007663523293"), &json!(false)));
+    assert_eq!(ahmet_satir["tebligatlar"][0]["kesinlesme"], ahmet_satir["kesinlesme"], "ödeme emri satırı borçlunun kesinleşmesini taşır");
+    assert_eq!(ahmet_satir["tebligatlar"][0]["kesinlesme_yok"], json!(false));
     assert_eq!(l["satirlar"][1]["tebligatlar"], json!([]));
     assert_eq!(l["secenekler"]["tur"], json!([{"deger": "Ödeme Emri", "etiket": "Ödeme Emri", "adet": 1}]));
     assert_eq!(l["secenekler"]["teblig"][0]["deger"], "TESLİM EDİLDİ");
@@ -1046,6 +1414,18 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert_eq!(al(c, "borclular", &[("birim", "izmir")])["toplam"], 3);
     assert_eq!(al(c, "borclular", &[("birim", "=Ankara 3. İcra Dairesi")])["toplam"], 1);
     assert_eq!(al(c, "borclular", &[("birim", "=Ankara")])["toplam"], 0);
+    // Daire "Tümünü seç" sonra bazılarını kaldır: `!` = listedekiler hariç; `!` tek başına hepsi
+    assert_eq!(al(c, "borclular", &[("birim", "!")])["toplam"], 4);
+    assert_eq!(al(c, "borclular", &[("birim", "!Ankara 3. İcra Dairesi")])["toplam"], 3);
+    assert_eq!(al(c, "borclular", &[("birim", "!Ankara 3. İcra Dairesi\nİzmir 1. İcra Dairesi")])["toplam"], 0);
+    let s = al(c, "borclular", &[("birim", "!Ankara 3. İcra Dairesi")]);
+    assert_eq!(s["secenekler"]["birim"].as_array().unwrap().len(), 2, "hariç tutulan daire seçeneklerde kalır (geri eklenebilsin)");
+    assert_eq!(al(c, "borclular", &[("dosya_tur", "!MTS")])["toplam"], 3, "kodlu süzgeçte de hariç");
+    assert_eq!(al(c, "borclular", &[("alacakli", "!Y FAKTORİNG A.Ş.")])["dosya_sayisi"], 2);
+    // Dosya no: ayrı sütun ve süzgeç
+    assert_eq!(al(c, "borclular", &[("dosya_no", "=2025/77")])["satirlar"][0]["dosya"], d3);
+    assert_eq!(al(c, "borclular", &[("dosya_no", "2026/")])["dosya_sayisi"], 2);
+    assert_eq!(al(c, "borclular", &[])["secenekler"]["dosya_no"].as_array().unwrap().len(), 3);
     // Alacaklı: dosyanın alacaklılarından biri
     assert_eq!(al(c, "borclular", &[("alacakli", "x bankasi")])["toplam"], 2, "X BANKASI'nın dosyasındaki iki borçlu");
     assert_eq!(al(c, "borclular", &[("alacakli", "=Y FAKTORİNG A.Ş.")])["dosya_sayisi"], 1);
@@ -1092,6 +1472,13 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert_eq!(al(c, "dosya", &[("id", &d1.to_string())])["taraflar"][1]["kesinlesme"], "Konkordato");
     gonder(c, "hesapla", json!({})).unwrap();
     assert_eq!(al(c, "dosya", &[("id", &d1.to_string())])["taraflar"][1]["kesinlesme"], "Konkordato", "hesap elle girileni ezmez");
+    // Seçili dosyalar: yalnız onlar hesaplanır; süzgeçteki bütün dosya kimlikleri tek istekle
+    assert_eq!(gonder(c, "hesapla", json!({"dosyalar": [d1]})).unwrap().unwrap()["dosya_sayisi"], 1);
+    assert!(gonder(c, "hesapla", json!({"dosyalar": ["x"]})).is_err());
+    let idler = al(c, "dosya_kimlikleri", &[]);
+    let toplam = al(c, "borclular", &[("boyut", "500")])["dosya_sayisi"].clone();
+    assert_eq!(json!(idler.as_array().unwrap().len()), toplam, "kimlik listesi listedeki dosya sayısıyla aynı");
+    assert!(idler.as_array().unwrap().contains(&json!(d1)));
     gonder(c, "kesinlesme_elle", json!({"bag": ahmet_bag, "durum": ""})).unwrap();
     assert!(al(c, "dosya", &[("id", &d1.to_string())])["taraflar"][1]["kesinlesme"].as_str().unwrap().starts_with("Kesinleşme Bekliyor"));
     assert!(gonder(c, "itiraz", json!({"bag": 999999, "edildi": true})).is_err());
@@ -1108,6 +1495,34 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     // Süre silinince yeniden hesaplanır
     gonder(c, "kural_sil", json!({"id": ozel})).unwrap();
     assert_eq!(al(c, "dosya", &[("id", &d1.to_string())])["takip"]["itiraz_suresi_gun"], 7);
+
+    // Talimat dosyası: kesinleşme süzgeçte ayrı değer, tebligatlarda "kesinleşme yok", panelde süre yok
+    let bilinmeyen_once = al(c, "kurallar", &[])["takip_turu_bilinmeyen"].clone();
+    let (dtl, _) = dosya_kunyesi_kaydet(
+        c,
+        &json!({"dosyaId": "t", "dosyaNo": "2026/900", "dosyaDurumKod": 0, "dosyaDurum": "Açık", "dosyaTurKod": 1, "dosyaTur": "Talimat Dosyası",
+                "birimAdi": "İzmir 1. İcra Dairesi", "birimId": 1001}),
+        Some(YargiTuru::Icra.kod()),
+    )
+    .unwrap();
+    kayit::dosya_taraf_kaydet(c, dtl, &[json!({"adi": "VELİ KARA", "rol": "Borçlu", "kisiKurum": "Kişi"})], &sessiz).unwrap();
+    let tbag: i64 = c.query_one("SELECT id FROM dosya_taraf WHERE dosya_id = $1", &[&dtl]).unwrap().get(0);
+    c.execute(
+        "INSERT INTO tebligat_barkod (dosya_id, birim_evrak_no, tebligat_turu, borclu_id, evrak_aciklama, ptt_durumu)
+         VALUES ($1, 2, 'Kıymet Takdiri Raporu', $2, 'Normal Tebligat[BORÇLU VELİ KARA]', 'TESLİM EDİLDİ')",
+        &[&dtl, &tbag],
+    )
+    .unwrap();
+    let k = al(c, "borclular", &[("kesinlesme", "talimat")]);
+    assert_eq!((&k["toplam"], &k["satirlar"][0]["dosya"], &k["satirlar"][0]["talimat"]), (&json!(1), &json!(dtl), &json!(true)));
+    let t0 = &k["satirlar"][0]["tebligatlar"][0];
+    assert_eq!((&t0["kesinlesme"], &t0["kesinlesme_yok"], &t0["kesinlesme_neden"]), (&json!(""), &json!(true), &json!("Talimat dosyasında kesinleşme yok")));
+    let secenek = al(c, "borclular", &[])["secenekler"]["kesinlesme"].clone();
+    assert!(secenek.as_array().unwrap().iter().any(|o| o["deger"] == "talimat" && o["etiket"] == "Talimat dosyası (kesinleşme yok)"), "{secenek}");
+    assert_eq!(al(c, "borclular", &[("kesinlesme", "-"), ("dosya_no", "=2026/900")])["toplam"], 0, "talimat 'henüz hesaplanmadı' sayılmaz");
+    let p = al(c, "dosya", &[("id", &dtl.to_string())]);
+    assert_eq!((&p["kunye"]["talimat"], &p["takip"]["itiraz_suresi_gun"], &p["takip"]["kesinlesme_yok"]), (&json!(true), &Value::Null, &json!("Talimat dosyasında kesinleşme yok")));
+    assert_eq!(al(c, "kurallar", &[])["takip_turu_bilinmeyen"], bilinmeyen_once, "talimatın takip türü bilinmeyen sayılmaz");
 
     c.batch_execute("DELETE FROM dosya; DELETE FROM taraf; DELETE FROM vekil; DELETE FROM birim; DELETE FROM kesinlesme_kurali").unwrap();
 }

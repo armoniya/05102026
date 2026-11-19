@@ -211,6 +211,16 @@ pub fn pdf_geldi<C: GenericClient>(
                     .map_err(|e| format!("veritabanı: {e}"))?;
                     ctx.dosya_barkodlari.insert(barkod.clone(), (diger_no, tur));
                 }
+                // Bu evrakta muhatap yazıyor ("[BORÇLU VE MÜFLİS X]"), tutulan kayıtta yazmıyorsa ("PTT MTS Tebligat
+                // Belgesi") muhatap tutulan kayda geçer; borçlu bir sonraki hesapta bulunur (kullanıcı bulgusu 19.11.2026).
+                if teb::muhatap_turu(&aciklama) != teb::MuhatapTuru::Yok {
+                    c.execute(
+                        "UPDATE tebligat_barkod SET evrak_aciklama = $3 WHERE dosya_id = $1 AND birim_evrak_no = $2
+                            AND position('[' in evrak_aciklama) = 0",
+                        &[&ctx.dosya, &diger_no, &crate::icra_veri::kirp(&aciklama, 500)],
+                    )
+                    .map_err(|e| format!("veritabanı: {e}"))?;
+                }
                 kayit::mts_mukerrer_ekle(c, &anahtar)?;
                 ctx.mts_mukerrer.insert(anahtar);
                 return Ok(Adim::Atla(format!("MTS: {barkod} bu dosyada evrak {diger_no}'de zaten var")));

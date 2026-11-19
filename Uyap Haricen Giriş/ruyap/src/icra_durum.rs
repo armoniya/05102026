@@ -163,6 +163,41 @@ pub fn durdurma_kesinlesme_kodu(durum: &str) -> Option<&'static str> {
     })
 }
 
+/// 103 davetiyesi ve kıymet takdiri raporunda kesinleşme süresi (her takip türünde aynı).
+pub const SABIT_KESINLESME_GUN: i16 = 7;
+
+/// Tebligat türüne göre kesinleşme (kullanıcı kuralı 19.11.2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TebligatKesinlesmesi {
+    /// Ödeme emri (ilamlı icra emri de bu türe düşer): takip türünün süresiyle borçlu hesabı.
+    Borclu,
+    /// 103 davetiyesi, kıymet takdiri raporu: takip türünden bağımsız sabit süre.
+    SabitGun(i16),
+    /// Maaş / banka haczi, haciz ihbarnamesi, bilirkişi raporu vb.: kesinleşme yok.
+    Yok,
+}
+
+/// UYAP dosya türü kodu: Talimat Dosyası (İcra Dosyası 35, MTS 294).
+pub const TALIMAT_TUR_KODU: i32 = 1;
+
+/// Talimat dosyası mı. Talimat dosyasında kesinleşme olmaz (kesinleşme esas dosyada izlenir); kesinleşme
+/// hesaplanmaz, süzgeçte ayrı görünür, "kesinleşme kontrolü" işi açılmaz, takip türü sorulmaz (kullanıcı kuralı
+/// 19.11.2026; Python'da da "Dosya Türü" Esas / Talimat ayrı tutuluyordu).
+pub fn talimat_mi(tur_kod: i32, tur: &str) -> bool {
+    tur_kod == TALIMAT_TUR_KODU || tr_kucuk(tur).contains("talimat")
+}
+
+/// Talimat dosyasındaki tebligatın ve borçlunun kesinleşme yerine gösterilen açıklama.
+pub const TALIMAT_KESINLESME_YOK: &str = "Talimat dosyasında kesinleşme yok";
+
+pub fn tebligat_kesinlesmesi(tebligat_turu: &str) -> TebligatKesinlesmesi {
+    match tebligat_turu {
+        "Ödeme Emri" => TebligatKesinlesmesi::Borclu,
+        "103 Davetiyesi" | "Kıymet Takdiri Raporu" => TebligatKesinlesmesi::SabitGun(SABIT_KESINLESME_GUN),
+        _ => TebligatKesinlesmesi::Yok,
+    }
+}
+
 /// Borçlunun kesinleşme durumu ve günü. Borçluya bağlı ödeme emri yoksa ya da takip türü için
 /// süre tanımlı değilse boş döner.
 pub fn borclu_kesinlesme_hesapla(
@@ -332,6 +367,7 @@ pub fn takip_asamasi_metni(asama: &str, tarih: Option<NaiveDate>) -> String {
 /// kayıt sayısı.
 pub fn tebligat_borclularini_duzelt<C: GenericClient>(c: &mut C, dosya: Option<i64>) -> Result<usize, String> {
     let borclular = kayit::borclu_haritasi(c, dosya)?;
+    let vekiller = kayit::borclu_vekil_haritasi(c, dosya)?;
     let satirlar = c
         .query(
             "SELECT id, dosya_id, evrak_aciklama, ham_yanit, borclu_id FROM tebligat_barkod
@@ -346,7 +382,12 @@ pub fn tebligat_borclularini_duzelt<C: GenericClient>(c: &mut C, dosya: Option<i
         let aciklama: String = s.get(2);
         let ham: Option<Value> = s.get(3);
         let eski: Option<i64> = s.get(4);
-        let yeni = teb::tebligat_borclusunu_bul(&aciklama, borclular.get(&dosya_id).unwrap_or(&bos), ham.as_ref());
+        let yeni = teb::tebligat_borclusunu_coz(
+            &aciklama,
+            borclular.get(&dosya_id).unwrap_or(&bos),
+            vekiller.get(&dosya_id).unwrap_or(&bos),
+            ham.as_ref(),
+        );
         if yeni != eski {
             c.execute("UPDATE tebligat_barkod SET borclu_id = $2 WHERE id = $1", &[&id, &yeni]).map_err(hata)?;
             degisen += 1;
@@ -408,6 +449,10 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
         )
         .map_err(hata)?
     {
+        // Üçüncü kişiye giden zarf (borçlu tek diye borçluya bağlanmış olabilir) borçlunun tebliği ve kesinleşmesi değildir.
+        if teb::muhatap_turu(&s.get::<_, String>(2)) == teb::MuhatapTuru::Ucuncu {
+            continue;
+        }
         odeme_emirleri.entry(s.get(0)).or_default().push(OdemeEmri {
             birim_evrak_no: s.get(1),
             evrak_aciklama: s.get(2),
@@ -429,7 +474,7 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
             "SELECT dt.id, dt.dosya_id, dt.itiraz_edildi_mi, dt.itiraz_tarihi, dt.kesinlesme_durumu, dt.kesinlesme_tarihi,
                     dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli, dt.takip_asamasi,
                     dt.takip_asamasi_tarihi, d.durum, d.yargi_turu,
-                    COALESCE(i.takibin_turu, ''), COALESCE(i.takibin_yolu, ''), COALESCE(i.takibin_sekli, '')
+                    COALESCE(i.takibin_turu, ''), COALESCE(i.takibin_yolu, ''), COALESCE(i.takibin_sekli, ''), d.tur_kod, d.tur
                FROM dosya_taraf dt JOIN dosya d ON d.id = dt.dosya_id
                LEFT JOIN icra_takip_detay i ON i.dosya_id = d.id
               WHERE dt.rol = 'borclu'
@@ -464,6 +509,7 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
         let durum: String = s.get(11);
         let icra_mi = s.get::<_, i16>(12) == icra;
         let (turu, yolu, sekli): (String, String, String) = (s.get(13), s.get(14), s.get(15));
+        let talimat = icra_mi && talimat_mi(s.get(16), &s.get::<_, String>(17));
         let oe = odeme_emirleri.get(&id).unwrap_or(&bos);
 
         let durdurma = if icra_mi { durdurma_kesinlesme_kodu(&durum) } else { None };
@@ -471,14 +517,18 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
             tanimsiz.insert(durum.clone());
         }
         let kural = veri::kesinlesme_kurali_sec(&kurallar, &turu, &yolu, &sekli);
-        if kural.is_none() {
+        if kural.is_none() && !talimat {
             let ya = |x: &str| if x.is_empty() { "?".to_string() } else { x.to_string() };
             kuralsiz.insert(format!("{}/{}/{}", ya(&turu), ya(&yolu), ya(&sekli)));
         }
         let mut yeni = eski.clone();
         (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) =
             borclu_kesinlesme_hesapla(itiraz, oe, &tatiller, bugun, durdurma, kural.and_then(|k| k.itiraz_suresi_gun));
-        if elle.contains(&eski.kesinlesme_durumu.as_str()) && !itiraz {
+        if talimat {
+            // Talimat dosyasında kesinleşme yok (elle girilen konkordato / vefat / vasi korunur).
+            (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) = (String::new(), None);
+        }
+        if elle.contains(&eski.kesinlesme_durumu.as_str()) && (!itiraz || talimat) {
             (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) = (eski.kesinlesme_durumu.clone(), eski.kesinlesme_tarihi);
         }
         (yeni.tebligat_durumu, yeni.tebligat_durum_tarihi, yeni.tebligat_sekli) = borclu_tebligat_hesapla(oe, bugun);
@@ -571,7 +621,10 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
         let mut gecisler: Vec<(&str, OlayTur, Option<NaiveDate>, Option<NaiveDate>)> = Vec::new();
         if let Some(o) = otomatik::tebligat_olayi(&eski.tebligat_durumu, &yeni.tebligat_durumu) {
             let son_gun = if o == "tebligat:teblig_edildi" { yeni.kesinlesme_tarihi } else { None };
-            gecisler.push((o, OlayTur::Tebligat, yeni.tebligat_durum_tarihi, son_gun));
+            // Talimatta "kesinleşme tarihi kontrol" işi anlamsız.
+            if !(talimat && o == "tebligat:teblig_edildi") {
+                gecisler.push((o, OlayTur::Tebligat, yeni.tebligat_durum_tarihi, son_gun));
+            }
         }
         if let Some(o) = otomatik::kesinlesme_olayi(&eski.kesinlesme_durumu, &yeni.kesinlesme_durumu) {
             gecisler.push((o, OlayTur::Kesinlesme, yeni.kesinlesme_tarihi, None));
@@ -754,15 +807,19 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert!(uyarilar.borrow().iter().any(|m| m.contains("?/?/?")), "{uyarilar:?}");
     assert_eq!((durum(c).2.as_str(), durum(c).4.as_str()), ("", "iade"));
 
-    // Yanlış bağlanmış tebligat çözülür (bankaya giden tebligat borçluya bağlı kalmaz)
+    // Tek borçlulu dosyada üçüncü kişiye giden zarf da borçluya bağlanır (listede borçlunun altında görünsün; kullanıcı
+    // kararı 19.11.2026) ama borçlunun tebliğ / kesinleşme hesabına GİRMEZ: PTT'de "teslim edildi" görünen üçüncü kişi
+    // ödeme emri borçlunun "iade" durumunu değiştirmez.
     c.execute(
-        "INSERT INTO tebligat_barkod (dosya_id, birim_evrak_no, tebligat_turu, borclu_id, evrak_aciklama)
-         VALUES ($1, 11, 'Banka', $2, 'Elektronik Tebligat[Tebligat Yapılacak 3. Taraf DENİZBANK A.Ş.]')",
-        &[&d, &bag],
+        "INSERT INTO tebligat_barkod (dosya_id, birim_evrak_no, tebligat_turu, borclu_id, evrak_aciklama, ptt_durumu, son_islem_tarihi)
+         VALUES ($1, 11, 'Ödeme Emri', NULL, 'Elektronik Tebligat[ARACIKISIKURUM DENİZBANK A.Ş.]', 'TESLİM EDİLDİ', '10/10/2026')",
+        &[&d],
     )
     .unwrap();
     assert_eq!(tebligat_borclularini_duzelt(c, Some(d)).unwrap(), 1);
-    assert_eq!(say(c, "SELECT count(*) FROM tebligat_barkod WHERE birim_evrak_no = 11 AND borclu_id IS NULL"), 1);
+    assert_eq!(say(c, &format!("SELECT count(*) FROM tebligat_barkod WHERE birim_evrak_no = 11 AND borclu_id = {bag}")), 1);
+    durumlari_guncelle(c, Some(d), g(2026, 10, 14), &sessiz).unwrap();
+    assert_eq!(durum(c).4, "iade", "üçüncü kişi zarfı borçlunun tebliğ durumunu değiştirmez");
 
     // Bütün dosyalar kipi: icra dışı dosyada takip aşaması yazılmaz; yeni icra borçlusu yakalanır
     let (h, _) = dosya_kunyesi_kaydet(c, &kunye("2026/7", 2002, "İzmir 3. Asliye Hukuk Mahkemesi"), Some(YargiTuru::Hukuk.kod())).unwrap();
@@ -773,6 +830,36 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert_eq!(say(c, "SELECT count(*) FROM dosya_taraf dt JOIN dosya d ON d.id = dt.dosya_id WHERE d.yargi_turu = 1 AND dt.takip_asamasi = ''"), 1);
     assert_eq!(say(c, "SELECT count(*) FROM dosya_taraf WHERE takip_asamasi = 'takip_talebi'"), 1);
     assert_eq!(durumlari_guncelle(c, None, g(2026, 10, 14), &sessiz).unwrap(), Sonuc::default());
+
+    // Talimat dosyası: tebliğ edilmiş ödeme emri olsa da kesinleşme hesaplanmaz, süre uyarısı verilmez,
+    // "kesinleşme tarihi kontrol" işi açılmaz; tebliğ durumu yine yazılır.
+    c.batch_execute("INSERT INTO kesinlesme_kurali (itiraz_suresi_gun, ad) VALUES (7, 'Varsayılan')").unwrap();
+    let mut tk = kunye("2026/9", 1001, "İzmir 1. İcra Dairesi");
+    tk["dosyaTurKod"] = json!(1);
+    tk["dosyaTur"] = json!("Talimat Dosyası");
+    let (dt_, _) = dosya_kunyesi_kaydet(c, &tk, Some(YargiTuru::Icra.kod())).unwrap();
+    kayit::dosya_taraf_kaydet(c, dt_, &[json!({"adi": "VELİ KARA", "rol": "Borçlu", "kisiKurum": "Kişi"})], &sessiz).unwrap();
+    let tbag: i64 = c.query_one("SELECT id FROM dosya_taraf WHERE dosya_id = $1 AND rol = 'borclu'", &[&dt_]).unwrap().get(0);
+    c.execute(
+        "INSERT INTO tebligat_barkod (dosya_id, birim_evrak_no, tebligat_turu, borclu_id, evrak_aciklama, barkod, ptt_durumu, son_islem_tarihi,
+                                      tebligat_mazbatasi_var, tebligat_mazbatasi_aciklama)
+         VALUES ($1, 3, 'Ödeme Emri', $2, 'Normal Tebligat[BORÇLU VELİ KARA]', '4007663523299', 'TESLİM EDİLDİ', '01/10/2026', true,
+                 'Ödeme Emri - [VELİ KARA] - Barkod Numarası: 4007663523299 - Tebliğ Edildi')",
+        &[&dt_, &tbag],
+    )
+    .unwrap();
+    let tid: i64 = c.query_one("SELECT id FROM tebligat_barkod WHERE dosya_id = $1", &[&dt_]).unwrap().get(0);
+    ham_tarihleri_turet(c, "tebligat_barkod", tid).unwrap();
+    // Önce "dağıtımda" sayılsın, sonra tebliğ geçişi olsun (otomatik iş gerçek geçişte açılır)
+    c.execute("UPDATE dosya_taraf SET tebligat_durumu = 'dagitimda' WHERE id = $1", &[&tbag]).unwrap();
+    let uyarilar = std::cell::RefCell::new(Vec::new());
+    let s = durumlari_guncelle(c, Some(dt_), g(2026, 10, 3), &|m: &str| uyarilar.borrow_mut().push(m.to_string())).unwrap();
+    let (kes, teb_d): (String, String) =
+        c.query_one("SELECT kesinlesme_durumu, tebligat_durumu FROM dosya_taraf WHERE id = $1", &[&tbag]).map(|r| (r.get(0), r.get(1))).unwrap();
+    assert_eq!((kes.as_str(), teb_d.as_str()), ("", "teblig_edildi"), "talimatta kesinleşme yok, tebliğ var");
+    assert_eq!(s.otomatik_is, 0, "talimatta kesinleşme kontrol işi açılmaz");
+    assert!(!uyarilar.borrow().iter().any(|m| m.contains("Kesinleşme süresi")), "{uyarilar:?}");
+    assert!(talimat_mi(1, "") && talimat_mi(0, "Talimat Dosyası") && !talimat_mi(35, "İcra Dosyası"));
 
     c.batch_execute("DELETE FROM dosya; DELETE FROM taraf; DELETE FROM birim; DELETE FROM kesinlesme_kurali").unwrap();
 }
@@ -845,6 +932,25 @@ mod tests {
         assert_eq!(mazbata_sonucu("Normal Tebligat[BORÇLU TEBLİĞ EDİLDİ A.Ş.]"), MazbataSonucu::Yok, "ad içindeki ifade sayılmaz");
         assert_eq!(mazbata_sonucu("Tebliğ Edildi"), MazbataSonucu::Edildi);
         assert_eq!(mazbata_sonucu(""), MazbataSonucu::Yok);
+    }
+
+    #[test]
+    fn tebligat_turune_gore_kesinlesme() {
+        use TebligatKesinlesmesi::*;
+        assert_eq!(tebligat_kesinlesmesi("Ödeme Emri"), Borclu);
+        assert_eq!(tebligat_kesinlesmesi("103 Davetiyesi"), SabitGun(7));
+        assert_eq!(tebligat_kesinlesmesi("Kıymet Takdiri Raporu"), SabitGun(7));
+        for tur in ["Maaş", "Maaş (Haciz İhbarnamesi)", "Maaş (Haciz Müzekkeresi)", "Banka (Haciz İhbarnamesi)", "Haciz İhbarnamesi",
+                    "Bilirkişi Raporu", "Satış İlanı", "Belirsiz", ""] {
+            assert_eq!(tebligat_kesinlesmesi(tur), Yok, "{tur}");
+        }
+        // 103: 7 gün sabit, takip türünün süresi kullanılmaz (05.10 tebliğ + mazbata → 13.10 kesinleşir)
+        let bos = Tatiller::new();
+        let davetiye = fiziki("TESLİM EDİLDİ", Some(g(2026, 10, 5)), "Normal Tebligat[BORÇLU X] - Tebliğ Edildi");
+        assert_eq!(
+            borclu_kesinlesme_hesapla(false, &[davetiye], &bos, g(2026, 10, 13), None, Some(SABIT_KESINLESME_GUN)),
+            ("kesinlesti".into(), Some(g(2026, 10, 13)))
+        );
     }
 
     #[test]
