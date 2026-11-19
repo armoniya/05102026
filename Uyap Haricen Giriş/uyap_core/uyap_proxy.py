@@ -170,6 +170,23 @@ TEXT_TYPES = (
     "application/json", "application/xml", "image/svg",
 )
 
+# Ana sayfada kaldırılan bölümlerin veri uçları: UYAP'a HİÇ gitmez, boş yanıt döner (kullanıcı kararı
+# 2026-11-11: kullanılmayan bölümler yüklenmesin). Yanıt biçimi UYAP'ınkiyle aynı olmalı (Duyurular: dizi),
+# yoksa UYAP'ın sayfası hata verebilir. Hem yerel bağlantı (proxy) hem ofis ajanı (tünel) bu tabloya bakar.
+KESILEN_UCLAR = {
+    "getDuyurularYayinda.ajx": b"[]",       # Duyurular bandı
+}
+
+
+def kesilen_uc_yaniti(path):
+    """Kesilen uçsa (status, headers, body), değilse None."""
+    ad = (path or "").lstrip("/").split("?", 1)[0]
+    govde = KESILEN_UCLAR.get(ad)
+    if govde is None:
+        return None
+    return 200, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}, govde
+
+
 # Globals wired up in main() before the server starts serving.
 gw = None              # type: GatewaySession | None
 IDLE_INTERVAL = 5      # seconds between idle session probes
@@ -459,7 +476,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const toast = document.createElement('div');
         toast.setAttribute('data-msg', message);
         toast.style.cssText = `
-            background: rgba(18, 18, 24, 0.85);
+            background: rgba(var(--cu-panel-rgb), 0.85);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             color: #f3f4f6;
@@ -489,7 +506,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const btn = document.createElement('button');
             btn.textContent = 'Yenile';
             btn.style.cssText = `
-                background: linear-gradient(135deg, #4f46e5, #6366f1);
+                background: linear-gradient(135deg, var(--cu-vurgu), var(--cu-vurgu-orta));
                 color: #ffffff;
                 border: none;
                 padding: 8px 16px;
@@ -497,17 +514,17 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 cursor: pointer;
                 font-size: 13px;
                 font-weight: 600;
-                box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+                box-shadow: 0 4px 12px rgba(var(--cu-vurgu-rgb), 0.3);
                 transition: all 0.2s ease;
                 white-space: nowrap;
             `;
             btn.onmouseover = () => {
                 btn.style.transform = 'translateY(-1px)';
-                btn.style.boxShadow = '0 6px 16px rgba(79, 70, 229, 0.4)';
+                btn.style.boxShadow = '0 6px 16px rgba(var(--cu-vurgu-rgb), 0.4)';
             };
             btn.onmouseout = () => {
                 btn.style.transform = 'translateY(0)';
-                btn.style.boxShadow = '0 4px 12px rgba(79, 70, 229, 0.3)';
+                btn.style.boxShadow = '0 4px 12px rgba(var(--cu-vurgu-rgb), 0.3)';
             };
             btn.onclick = () => {
                 action();
@@ -867,8 +884,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
 })();
 
 // ── UDF E-İMZA KÖPRÜSÜ (sürükle-bırak) ───────────────────────────────────────────────
-// Sağ altta HER ZAMAN duran bir alan. Kullanıcı bir .udf / .doc / .docx / .pdf dosyasını
-// oraya sürükler ya da tıklayıp seçer. Dosya ofise gider; ofis gerekiyorsa UDF'ye çevirip
+// Sabit düğmesi yok: alan, sayfaya belge sürüklenince ya da Çoklu UYAP çekmecesinden (Araçlar → E-İmza)
+// açılır. Kullanıcı bir .udf / .doc / .docx / .pdf dosyasını oraya sürükler ya da tıklayıp seçer. Dosya ofise gider; ofis gerekiyorsa UDF'ye çevirip
 // e-imzayla imzalar (headless) ve imzalı .udf geri gelir. Sonra UYAP'ta bir dosya yükleme
 // alanına tıklandığında imzalı UDF otomatik yerleştirilir (DataTransfer).
 (function() {
@@ -876,7 +893,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     const ACCEPT = ['.udf', '.doc', '.docx', '.pdf'];
     let staged = null;                  // {name, bytes(Uint8Array)} — imzalanmış, yüklemeye hazır
     let pending = null;                 // {name, bytes(Uint8Array)} — onay bekleyen (henüz imzalanmadı)
-    let collapsed = true;               // varsayılan: küçük buton; tıklayınca açılır
+    let collapsed = true;               // varsayılan: alan gizli (sürükleme / çekmece açar)
 
     function whenBody(cb) {
         if (document.body) { cb(); return; }
@@ -909,20 +926,68 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     // ── Açılır/kapanır görünüm ────────────────────────────────────────────────────────
     function render() {
         const widget = document.getElementById('uyap-eimza-widget');
-        const fab = document.getElementById('uyap-eimza-fab');
-        if (!widget || !fab) return;
-        // Yalnız ONAY bekleyen belge varken açık kalmaya zorlanır. İmzalı belge hazır
-        // beklerken (staged) kutu küçülebilir; düğme ✅ ile "hazır belge var" der
-        // (2026-09-23: eskiden staged da zorla açık tutuyor, ekranda yer kaplıyordu).
+        if (!widget) return;
+        // Yalnız ONAY bekleyen belge varken açık kalmaya zorlanır. Sabit düğme yok (2026-11-11):
+        // alan; belge sürüklenince, UYAP'tan belge indirilince ya da Çoklu UYAP çekmecesinden
+        // (Araçlar → E-İmza) açılır. "İmzalı belge hazır" bilgisi çekmecede ve tutamaçta görünür.
         if (pending) collapsed = false;
         widget.style.display = collapsed ? 'none' : 'block';
-        fab.style.display = collapsed ? 'flex' : 'none';
-        fab.textContent = staged ? '✅' : '🖋️';
-        fab.title = staged ? 'İmzalı belge hazır — UYAP yükleme alanına tıklayınca eklenir'
-                           : 'E-İmza';
     }
     function expand() { collapsed = false; render(); }
     function collapse() { if (pending) return; collapsed = true; render(); }
+    window.__uyapEimza = {
+        ac: function() { buildWidget(); expand(); },
+        durum: function() { return { hazir: !!staged, ad: staged ? staged.name : '', bekleyen: !!pending }; },
+    };
+    // Pencereye belge sürüklenince alan kendiliğinden belirir ve "Buraya bırakın" hedefi olur.
+    // Kapanma: sürükleme sürdükçe tarayıcı ~50 ms'de bir dragover gönderir; 600 ms gelmezse
+    // sürükleme bitmiş ya da pencereden çıkılmıştır. (dragleave KULLANILMAZ: Chrome her öğe
+    // sınırında dragleave atar ve relatedTarget çoğu zaman boştur → alan bırakmadan kapanıyordu,
+    // kullanıcı bulgusu 2026-11-11.)
+    // suruklemeVar: sayfada belge sürükleniyor; suruklemeActi: alanı bu sürükleme açtı.
+    let suruklemeVar = false, suruklemeActi = false, suruklemeZamani = null;
+    function belgeSurukleniyor(ev) {
+        const t = ev.dataTransfer && ev.dataTransfer.types;
+        return !!(t && Array.prototype.indexOf.call(t, 'Files') !== -1);
+    }
+    function hedefVurgu(acik) {
+        const w = document.getElementById('uyap-eimza-widget');
+        const ipucu = document.getElementById('uyap-eimza-birak');
+        if (!w) return;
+        w.style.width = acik ? '260px' : '210px';
+        w.style.padding = acik ? '22px 14px' : '12px';
+        w.style.borderColor = acik ? 'var(--cu-vurgu-parlak)' : 'rgba(255,255,255,0.18)';
+        w.style.borderWidth = acik ? '2px' : '1px';
+        if (ipucu) ipucu.style.display = acik ? 'block' : 'none';
+    }
+    function suruklemeBitti(birakildi) {
+        clearTimeout(suruklemeZamani);
+        if (!suruklemeVar) return;
+        suruklemeVar = false;
+        hedefVurgu(false);
+        // Yalnız sürüklemenin açtığı alan kapanır; kullanıcı önceden açtıysa açık kalır.
+        if (!birakildi && suruklemeActi && !pending) collapse();
+        suruklemeActi = false;
+    }
+    window.addEventListener('dragover', function(ev) {
+        if (!belgeSurukleniyor(ev)) return;
+        if (!suruklemeVar) {
+            suruklemeVar = true;
+            buildWidget();
+            suruklemeActi = collapsed;
+            if (!pending && !staged) resetActions();   // önceki denemenin mesajı kalmasın
+            expand();
+            hedefVurgu(true);
+        }
+        clearTimeout(suruklemeZamani);
+        suruklemeZamani = setTimeout(function() { suruklemeBitti(false); }, 600);
+    }, true);
+    window.addEventListener('drop', function(ev) {
+        // Alanın üstüne bırakıldıysa açık kalır (onay ya da hata mesajı görünsün).
+        const alanda = !!(ev.target && ev.target.closest && ev.target.closest('#uyap-eimza-widget'));
+        suruklemeBitti(alanda);
+    }, true);
+    window.addEventListener('dragend', function() { suruklemeBitti(false); }, true);
 
     // ── Dosya seçilince: ÖNCE onay iste (otomatik imzalama yok) ────────────────────────
     function stageForConfirm(file) {
@@ -944,7 +1009,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         info.textContent = '📄 ' + file.name;
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;gap:6px;';
-        const ok = mkBtn('E-imzala', '#4f46e5', () => { const f = pending; pending = null; processFile(f); });
+        const ok = mkBtn('E-imzala', 'var(--cu-vurgu)', () => { const f = pending; pending = null; processFile(f); });
         const no = mkBtn('Vazgeç', 'rgba(255,255,255,0.10)', () => { pending = null; resetActions(); collapse(); });
         row.appendChild(ok); row.appendChild(no);
         wrap.appendChild(info); wrap.appendChild(row);
@@ -953,7 +1018,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     function mkBtn(label, bg, onclick) {
         const b = document.createElement('button');
         b.textContent = label;
-        b.style.cssText = 'flex:1;background:' + bg + ';color:#fff;border:1px solid rgba(255,255,255,0.15);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;';
+        b.style.cssText = 'flex:1;background:' + bg + ';color:' + (/--cu-vurgu/.test(bg) ? 'var(--cu-vurgu-uzeri,#fff)' : '#fff') + ';border:1px solid rgba(255,255,255,0.15);padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;';
         b.onclick = (ev) => { ev.stopPropagation(); onclick(); };
         return b;
     }
@@ -1008,7 +1073,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         wrap.appendChild(b);
     }
 
-    // ── Sağ alttaki açılır/kapanır sürükle-bırak alanı ────────────────────────────────
+    // ── Sürükle-bırak alanı (görev çubuğunun üstünde, sağda) ─────────────────────────
     function buildWidget() {
         if (document.getElementById('uyap-eimza-root')) return;
         const w = document.createElement('div');
@@ -1016,25 +1081,20 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         // ('uyap-eimza-widget') paylaşıyordu; render() getElementById ile DIŞ kabı
         // bulup gizliyor, mor 🖋️ düğmesi de onunla birlikte kayboluyordu.
         w.id = 'uyap-eimza-root';
-        w.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;';
-
-        // Küçük başlatıcı buton (kapalıyken)
-        const fab = document.createElement('div');
-        fab.id = 'uyap-eimza-fab';
-        fab.title = 'E-İmza';
-        fab.style.cssText = 'width:46px;height:46px;border-radius:50%;background:rgba(79,70,229,0.95);box-shadow:0 6px 20px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;';
-        fab.textContent = '🖋️';
-        fab.addEventListener('click', expand);
+        // Alttan 56 px: görev çubuğunun (44 px) hemen üstü; sağdan 44 px: sağ kenardaki "Loglamayı
+        // Başlat" düğmesinin görünen ~28 px'ini örtmez.
+        w.style.cssText = 'position:fixed;bottom:56px;right:44px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;';
 
         // Açık widget
         const widget = document.createElement('div');
         widget.id = 'uyap-eimza-widget';
-        widget.style.cssText = 'display:none;width:210px;padding:12px;border-radius:14px;background:rgba(18,18,24,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px dashed rgba(255,255,255,0.18);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;cursor:pointer;transition:border-color .2s,background .2s;';
+        widget.style.cssText = 'display:none;width:210px;padding:12px;border-radius:14px;background:rgba(var(--cu-panel-rgb),0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px dashed rgba(255,255,255,0.18);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;cursor:pointer;transition:border-color .2s,background .2s;';
         widget.innerHTML =
             '<div style="display:flex;align-items:center;justify-content:space-between;">' +
               '<div style="font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;"><span style="font-size:15px;">🖋️</span> E-İmza</div>' +
               '<span id="uyap-eimza-collapse" title="Küçült" style="font-size:16px;line-height:1;color:#9ca3af;cursor:pointer;padding:0 4px;">–</span>' +
             '</div>' +
+            '<div id="uyap-eimza-birak" style="display:none;margin-top:10px;font-size:13px;font-weight:700;color:var(--cu-vurgu-acik);text-align:center;">Belgeyi buraya bırakın<br><span style="font-weight:400;font-size:11.5px;">bıraktıktan sonra imza için onay istenir</span></div>' +
             '<div style="font-size:11.5px;color:#cbd5e1;margin-top:6px;line-height:1.4;">Belgeyi <b>sürükle</b> ya da tıkla.<br>.udf · .doc · .docx · .pdf</div>' +
             '<div id="uyap-eimza-status" style="font-size:11.5px;margin-top:8px;min-height:14px;line-height:1.4;color:#cbd5e1;"></div>' +
             '<div id="uyap-eimza-actions" style="margin-top:8px;"></div>';
@@ -1056,20 +1116,21 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         // sürükle-bırak widget üzerine
         ['dragenter', 'dragover'].forEach(t => widget.addEventListener(t, (ev) => {
             ev.preventDefault(); ev.stopPropagation();
-            widget.style.borderColor = '#6366f1'; widget.style.background = 'rgba(79,70,229,0.18)';
+            widget.style.borderColor = 'var(--cu-vurgu-orta)'; widget.style.background = 'rgba(var(--cu-vurgu-rgb),0.18)';
         }));
         ['dragleave', 'dragend'].forEach(t => widget.addEventListener(t, (ev) => {
             ev.preventDefault(); ev.stopPropagation();
-            widget.style.borderColor = 'rgba(255,255,255,0.18)'; widget.style.background = 'rgba(18,18,24,0.92)';
+            // Sayfa üzerinde sürükleme sürüyorsa "bırakma hedefi" çerçevesi kalır.
+            widget.style.borderColor = suruklemeVar ? 'var(--cu-vurgu-parlak)' : 'rgba(255,255,255,0.18)';
+            widget.style.background = 'rgba(var(--cu-panel-rgb),0.92)';
         }));
         widget.addEventListener('drop', (ev) => {
             ev.preventDefault(); ev.stopPropagation();
-            widget.style.borderColor = 'rgba(255,255,255,0.18)'; widget.style.background = 'rgba(18,18,24,0.92)';
+            widget.style.borderColor = 'rgba(255,255,255,0.18)'; widget.style.background = 'rgba(var(--cu-panel-rgb),0.92)';
             const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
             if (f) stageForConfirm(f);
         });
 
-        w.appendChild(fab);
         w.appendChild(widget);
         document.body.appendChild(w);
 
@@ -1109,7 +1170,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
 
     // ── İndirilen belgeyi yakalayıp "imzalayayım mı?" diye sor ───────────────────────
     // UYAP'ta bir .udf/.doc/.docx/.pdf indirme bağlantısına tıklanınca: dosya normal
-    // iner AMA biz de baytları çekip sağ alttaki onay akışına (stageForConfirm) sokarız.
+    // iner AMA biz de baytları çekip E-İmza alanının onay akışına (stageForConfirm) sokarız.
     let _nativeFetch = null;
     function nativeFetch() {
         if (_nativeFetch) return _nativeFetch;
@@ -1466,7 +1527,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const il = ilEl(); lastIl = il ? (il.value || '') : null;
             lastBirim = alanDegeri(q('yargiBirim'));
             lastMahkeme = alanDegeri(mahkemeEl());
-            if (!t.value) openWithRetry(function() { return firstPresent(TUR_IDS); });
+            // Ana sayfadan doldurularak gelindiyse tür kutusu açılmasın (değerleri dolduran kendisi verir).
+            if (!t.value && Date.now() - kisayolZamani > 10000) openWithRetry(function() { return firstPresent(TUR_IDS); });
             return;
         }
         const cb = alanDegeri(q('yargiBirim'));      // birim seçildi → Mahkeme listesini aç
@@ -1670,6 +1732,61 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         });
     }
     setInterval(function() { if (document.body) tekKutuKur(); }, 700);
+
+    // ── Ana sayfa konsolu (enjekte/anasayfa.js) için: formu doldurup UYAP'ın kendi sorgusunu çalıştır ──
+    // p = {tur: '0'|'1'|'2', birim: tablo kodu, mahkeme: birimId|'' , kapali: bool, yil, sira}.
+    // Çok sonuçlu aramada kullanılır: sonuç UYAP'ın kendi listesinde görünür. Değerler formun durum
+    // işlevleriyle verilir (formData.setters, canlı 2026-11-11: setSelectedYargiTur/Birimi/Mahkeme,
+    // setDosyaDurumu(true = açık)); sorgu formData.actions.onSearch ile başlatılır.
+    function durumBekle(kosul, ms) {
+        return new Promise(function(coz) {
+            const bas = Date.now();
+            (function bak() {
+                const f = sorguFormu();
+                if (f && kosul(f)) return coz(f);
+                if (Date.now() - bas > (ms || 6000)) return coz(null);
+                setTimeout(bak, 80);
+            })();
+        });
+    }
+    async function formuDoldurVeSorgula(p) {
+        kisayolZamani = Date.now();
+        let f = await durumBekle(function() { return true; }, 10000);
+        if (!f) return 'Dosya Sorgulama formu açılamadı.';
+        kisayolZamani = Date.now();
+        if (f.state.selectedYargiTur !== p.tur) { f.setters.setSelectedYargiTur(p.tur); await turGorundu(p.tur); }
+        f = await durumBekle(function(x) { return x.state.selectedYargiTur === p.tur; });
+        if (!f) return 'Yargı türü seçilemedi.';
+        const bw = dxBileseni(q('yargiBirim'));
+        if (bw) {                                  // birim listesi henüz gelmediyse saklı listeyi ver
+            try {
+                const ds = bw.option('dataSource');
+                if (!(Array.isArray(ds) && ds.some(function(x) { return x && String(x.tablo) === p.birim; }))) bw.option('dataSource', await birimListesiGetir(p.tur));
+            } catch (e) {}
+        }
+        kisayolZamani = Date.now();
+        f.setters.setSelectedYargiBirimi(p.birim);
+        f = await durumBekle(function(x) { return x.state.selectedYargiBirimi === p.birim; });
+        if (!f) return 'Yargı birimi seçilemedi.';
+        if (f.state.dosyaDurumu !== !p.kapali) {
+            f.setters.setDosyaDurumu(!p.kapali);
+            f = (await durumBekle(function(x) { return x.state.dosyaDurumu === !p.kapali; })) || f;
+        }
+        if (p.mahkeme) {
+            kisayolZamani = Date.now();
+            f.setters.setSelectedMahkeme(p.mahkeme);
+            f = (await durumBekle(function(x) { return String(x.state.selectedMahkeme) === String(p.mahkeme); })) || f;
+        }
+        const label = document.querySelector('label[for="dosyaYilNo"]');
+        if (p.yil && label && !(await yilNoYaz(label, p.yil, p.sira))) return 'Dosya yıl/no yazılamadı.';
+        const tek = document.querySelector('[data-tekno] input');
+        if (tek && p.yil) tek.value = p.yil + '/' + p.sira;
+        f = sorguFormu() || f;
+        if (f.actions && typeof f.actions.onSearch === 'function') f.actions.onSearch();
+        return '';
+    }
+    window.__uyapSorgu = { KISAYOLLAR: KISAYOLLAR, TUR_ADI: TUR_ADI, kucuk: kucuk, birimListesiGetir: birimListesiGetir,
+                           birimBul: birimBul, formuDoldurVeSorgula: formuDoldurVeSorgula };
 })();
 
 // ── TÜM EVRAKI İNDİR ─────────────────────────────────────────────────────────────────
@@ -1713,11 +1830,18 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
         return null;
     }
-    // Kart başlığında düğmelerimizin dayanağı: "Kart Görünümü" (listeden açılan kart) yoksa "Tam Ekran".
+    // Kart başlığında düğmelerimizin dayanağı: "Kart Görünümü" (listeden açılan kart) yoksa UYAP'ın tam ekran
+    // düğmesi. O düğmenin yazısı kart tam ekrandayken "Küçült"e döner (canlı, 2026-11-11): kart tam ekran
+    // açıldığı için (kartlar.js) yalnız "Tam Ekran" yazısı aranınca dayanak bulunamıyor, "İşler" ve "Evrak
+    // İndir" düğmeleri başlığa eklenemiyordu (görev çubuğundan geri açılan kartta hep). Yazının iki hâli ve
+    // simgesi de kabul edilir; kendi pencere düğmelerimiz (kartlar.js: data-kucult, data-cu-tam) hariç.
     function baslikDayanagi(baslik) {
         const btn = Array.from(baslik.querySelectorAll('[role=button]'));
         return btn.find(function(b) { return /Kart Görünümü/.test(b.textContent); })
-            || btn.find(function(b) { return /Tam Ekran/.test(b.textContent); }) || null;
+            || btn.find(function(b) {
+                if (b.hasAttribute('data-kucult') || b.hasAttribute('data-cu-tam')) return false;
+                return /Tam Ekran|Normal Ekran|Küçült/.test(b.textContent) || !!b.querySelector('.icon-maximize, .icon-minimize');
+            }) || null;
     }
     window.__uyapBaslikDayanagi = baslikDayanagi;
     function dosyaAdi(d) {
@@ -1729,8 +1853,9 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     window.__uyapDosyaAdi = dosyaAdi;
 
     // ── Kartlara düğme ekle (React kartı yeniden çizerse düğme de yeniden eklenir) ──
-    // "Seçili Belgeleri İndir (N)" yalnız evrak ağacında işaret varken görünür.
-    function kartDugmesi(baslik, ozellik, ikon, metin, ipucu, kapsam) {
+    // 2026-11-11: "Tüm Evrakı İndir" + "Seçili Belgeleri İndir (N)" TEK düğmede birleşti: "Evrak İndir"
+    // (işaret varken "Evrak İndir (N)"). Kapsam (tümü / işaretliler) açılan formda seçilir.
+    function kartDugmesi(baslik, ozellik, ikon, metin, ipucu) {
         const b = document.createElement('div');
         b.setAttribute(ozellik, '1');
         b.setAttribute('role', 'button');
@@ -1744,7 +1869,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const kart = baslik.closest('.dosya-sorgula-popup');
             const d = kart && kartVerisi(kart);
             if (!d) { panelMesaj('Bu kartın dosya bilgisi okunamadı; kartı kapatıp yeniden açın.'); return; }
-            secenekAc(kart, String(d.dosyaId), dosyaAdi(d), kapsam);
+            secenekAc(kart, String(d.dosyaId), dosyaAdi(d), kartSecimi(kart).size ? 'secili' : 'tum');
         });
         return b;
     }
@@ -1755,21 +1880,14 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 const dayanak = baslikDayanagi(baslik);
                 const yer = dayanak ? dayanak.parentElement : null;
                 if (!yer) return;
-                tum = kartDugmesi(baslik, 'data-tumevrak', 'icon-download', 'Tüm Evrakı İndir',
-                                  'Bu dosyadaki tüm evrakı PDF olarak indir', 'tum');
+                tum = kartDugmesi(baslik, 'data-tumevrak', 'icon-download', 'Evrak İndir',
+                                  'Bu dosyanın evrakını PDF olarak indir (tümü ya da Evrak sekmesinde işaretledikleriniz)');
                 yer.insertBefore(tum, dayanak);
-            }
-            let secili = baslik.querySelector('[data-tumevrak-secili]');
-            if (!secili) {
-                secili = kartDugmesi(baslik, 'data-tumevrak-secili', 'icon-check-square', 'Seçili Belgeleri İndir',
-                                     'Evrak sekmesinde işaretlediğiniz belgeleri PDF olarak indir', 'secili');
-                tum.parentElement.insertBefore(secili, tum);
             }
             const kart = baslik.closest('.dosya-sorgula-popup');
             const n = kart ? kartSecimi(kart).size : 0;
-            secili.style.display = n ? '' : 'none';
-            const metin = secili.querySelector('[data-metin]');
-            const yeni = 'Seçili Belgeleri İndir (' + n + ')';
+            const metin = tum.querySelector('[data-metin]');
+            const yeni = n ? 'Evrak İndir (' + n + ')' : 'Evrak İndir';
             if (metin && metin.textContent !== yeni) metin.textContent = yeni;
         });
     }
@@ -1959,14 +2077,14 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return e;
     }
     function dugme(metin, renk, fn) {
-        const b = el('button', 'margin:6px 6px 0 0;padding:5px 10px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:#fff;background:' + renk + ';', metin);
+        const b = el('button', 'margin:6px 6px 0 0;padding:5px 10px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:' + (/--cu-vurgu/.test(renk) ? 'var(--cu-vurgu-uzeri,#fff)' : '#fff') + ';background:' + renk + ';', metin);
         b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(); });
         return b;
     }
     let panel, govde, mesajEl, form;
     function panelKur() {
         if (panel || !document.body) return;
-        panel = el('div', 'position:fixed;top:72px;right:24px;z-index:2147483646;width:320px;max-height:70vh;overflow:auto;padding:12px;border-radius:12px;background:rgba(18,18,24,0.95);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
+        panel = el('div', 'position:fixed;top:72px;right:24px;z-index:2147483646;width:320px;max-height:70vh;overflow:auto;padding:12px;border-radius:12px;background:rgba(var(--cu-panel-rgb),0.95);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
         panel.id = 'uyap-tumevrak-panel';
         // UYAP'ın label/span/a renk kuralları paneldeki yazıyı koyu yapıyordu (koyu zeminde
         // okunmuyordu): panel içinde renk panelden miras alınır; satır içi renkler yine geçerli.
@@ -2011,22 +2129,32 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const r = form.querySelector('input[name="uyapTumEvrak_' + ad + '"]:checked');
         return r ? r.value : null;
     }
-    // Form yalnız çıktıyı sorar; kapsam basılan düğmeden gelir ("Tüm Evrakı İndir" → tüm,
-    // "Seçili Belgeleri İndir (N)" → kartta işaretlenenler). Seçili formda sayı canlı güncellenir.
-    let formKarti = null, formKapsami = null, kapsamEl = null;
+    // Form kapsamı (tümü / işaretliler) ve çıktıyı sorar. Kartta işaret varsa "işaretliler" seçili
+    // gelir; işaret sayısı form açıkken canlı güncellenir.
+    let formKarti = null, kapsamEl = null, kapsamRadyo = null;
     function formSayisiniTazele(kart) {
-        if (!kapsamEl || kart !== formKarti || formKapsami !== 'secili') return;
+        if (!kapsamEl || kart !== formKarti) return;
         const n = kartSecimi(kart).size;
-        kapsamEl.textContent = n ? (n + ' işaretli belge') : 'İşaretli belge kalmadı.';
+        kapsamEl.textContent = n ? 'İşaretli belgeler (' + n + ')' : 'İşaretli belgeler (Evrak sekmesinde belge işaretleyin)';
+        if (kapsamRadyo) {
+            kapsamRadyo.disabled = !n;
+            if (!n && kapsamRadyo.checked) {
+                const tum = form.querySelector('input[name="uyapTumEvrak_kapsam"][value="tum"]');
+                if (tum) tum.checked = true;
+            }
+        }
     }
     function secenekAc(kart, dosyaId, ad, kapsam) {
         panelAc();
         form.innerHTML = '';
         const kutu = el('div', 'margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
         kutu.appendChild(el('div', 'font-weight:600;word-break:break-word;', ad || 'UYAP dosyası'));
-        kapsamEl = el('div', 'margin-top:2px;color:#cbd5e1;', 'Tüm belgeler');
-        kutu.appendChild(kapsamEl);
-        formKarti = kart; formKapsami = kapsam;
+        const kapsamGrubu = radyoGrubu('Belgeler', 'kapsam', [['tum', 'Tüm belgeler'], ['secili', 'İşaretli belgeler']], kapsam);
+        form.appendChild(kutu);
+        kutu.appendChild(kapsamGrubu);
+        kapsamRadyo = kapsamGrubu.querySelector('input[value="secili"]');
+        kapsamEl = kapsamRadyo.nextSibling;               // etiket metni (sayı canlı güncellenir)
+        formKarti = kart;
         formSayisiniTazele(kart);
         kutu.appendChild(radyoGrubu('Çıktı', 'cikti', [
             ['tek', 'Tek PDF'],
@@ -2034,6 +2162,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         ], tercih('cikti', 'tek')));
         kutu.appendChild(dugme('İndir', '#059669', function() {
             const cikti = secilenDeger('cikti');
+            const kapsam = secilenDeger('kapsam') || 'tum';
             const evraklar = kapsam === 'secili' ? secilenEvraklar(kart) : null;
             if (kapsam === 'secili' && !evraklar.length) { panelMesaj('İşaretli belge yok.'); return; }
             tercihYaz('cikti', cikti);
@@ -2044,7 +2173,6 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             form.innerHTML = ''; formKarti = null;
             if (!Object.keys(isler).length) panel.style.display = 'none';
         }));
-        form.appendChild(kutu);
     }
 
     function panelAc() { panelKur(); if (panel) { panel.style.display = 'block'; mesajEl.textContent = ''; } }
@@ -2163,7 +2291,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return e;
     }
     function dugme(metin, renk, fn) {
-        const b = el('button', 'margin:8px 6px 0 0;padding:5px 10px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:#fff;background:' + renk + ';', metin);
+        const b = el('button', 'margin:8px 6px 0 0;padding:5px 10px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:' + (/--cu-vurgu/.test(renk) ? 'var(--cu-vurgu-uzeri,#fff)' : '#fff') + ';background:' + renk + ';', metin);
         b.type = 'button';
         b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(b); });
         return b;
@@ -2187,16 +2315,15 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
 
     function panelKur() {
         if (panel || !document.body) return;
-        panel = el('div', 'position:fixed;left:16px;bottom:96px;z-index:2147483646;width:420px;max-width:calc(100vw - 32px);max-height:75vh;overflow:auto;padding:12px;border-radius:12px;background:rgba(18,18,24,0.96);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
+        // Sağ üstte, Çoklu UYAP çekmecesinin (Araçlar → Gerekçeli Kararlar) açıldığı tarafta.
+        panel = el('div', 'position:fixed;right:40px;top:72px;z-index:2147483646;width:420px;max-width:calc(100vw - 32px);max-height:75vh;overflow:auto;padding:12px;border-radius:12px;background:rgba(var(--cu-panel-rgb),0.96);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.35);color:#f3f4f6;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
         panel.id = 'uyap-gerekceli-panel';
         const stil = document.createElement('style');
         stil.textContent =
             '#uyap-gerekceli-panel{color:#f3f4f6!important}' +
             '#uyap-gerekceli-panel div,#uyap-gerekceli-panel span,#uyap-gerekceli-panel label,' +
             '#uyap-gerekceli-panel p{color:inherit;font-family:inherit;font-size:inherit;margin-bottom:0}' +
-            '#uyap-gerekceli-panel input{accent-color:#10b981;margin:0}' +
-            '#uyap-gerekceli-dugme{position:fixed;left:16px;bottom:56px;z-index:2147483645;padding:8px 14px;border:0;border-radius:999px;cursor:pointer;background:#0f766e;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 6px 18px rgba(15,118,110,0.35)}' +
-            '#uyap-gerekceli-dugme:hover{background:#115e59}';
+            '#uyap-gerekceli-panel input{accent-color:#10b981;margin:0}';
         document.head.appendChild(stil);
         const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;');
         ust.appendChild(el('div', 'font-size:13px;font-weight:700;', 'Gerekçeli Kararlar'));
@@ -2551,19 +2678,21 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
     }
 
-    // Sabit düğme (UYAP sayfası yeniden çizilse de geri gelir); süren tarama varsa izlemeye devam.
+    // 2026-11-11: sol alttaki sabit düğme kaldırıldı; panel Çoklu UYAP çekmecesinden (Araçlar) açılır.
+    // Süren tarama varsa izlemeye devam edilir, durumu çekmecede görünür.
+    window.__uyapGerekceli = {
+        ac: ac,
+        durum: function() {
+            if (!tarama) return '';
+            if (tarama.durum === 'bitti') return 'Son tarama bitti';
+            if (SON.indexOf(tarama.durum) !== -1 || tarama.durum === 'secim') return '';
+            return 'Tarama sürüyor';
+        },
+    };
     let ilkKontrol = false;
     setInterval(function() {
         if (!document.body) return;
         panelKur();
-        if (!document.getElementById('uyap-gerekceli-dugme')) {
-            const b = el('button', null, 'Gerekçeli Kararlar');
-            b.id = 'uyap-gerekceli-dugme';
-            b.type = 'button';
-            b.title = 'Hukuk dosyalarında gerekçeli kararları bul ve indir (geçici)';
-            b.addEventListener('click', ac);
-            document.body.appendChild(b);
-        }
         if (!ilkKontrol) {
             ilkKontrol = true;
             api('').then(function(j) {
@@ -2633,7 +2762,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         return e;
     }
     function dugme(metin, renk, fn) {
-        const b = el('button', 'margin:10px 6px 0 0;padding:6px 12px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:#fff;background:' + renk + ';', metin);
+        const b = el('button', 'margin:10px 6px 0 0;padding:6px 12px;border:0;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;color:' + (/--cu-vurgu/.test(renk) ? 'var(--cu-vurgu-uzeri,#fff)' : '#fff') + ';background:' + renk + ';', metin);
         b.type = 'button';
         b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(b); });
         return b;
@@ -2801,7 +2930,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         kutu.appendChild(alan('Not', not));
         kutu.appendChild(el('div', 'margin-top:6px;color:#9ca3af;font-size:11px;',
             'Talep yöneticiye / onay yetkilisine gider; kabul edilince son tarih değişir.'));
-        kutu.appendChild(dugme('Onaya gönder', '#4f46e5', async function(b) {
+        kutu.appendChild(dugme('Onaya gönder', 'var(--cu-vurgu)', async function(b) {
             if (!not.value.trim()) { mesajEl.textContent = 'Aktarma nedenini yazın.'; not.focus(); return; }
             if (!yeni.value) { mesajEl.textContent = 'Yeni tarihi seçin.'; yeni.focus(); return; }
             b.disabled = true;
@@ -2877,7 +3006,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         kutu.appendChild(alan('Not', not));
         kutu.appendChild(el('div', 'margin-top:6px;color:#9ca3af;font-size:11px;',
             'Bildirim, İş Listesi\'nde “Bildirimler”den açtığınız cihazlara ve bağladıysanız Telegram\'a gider.'));
-        kutu.appendChild(dugme('Kur', '#4f46e5', async function(b) {
+        kutu.appendChild(dugme('Kur', 'var(--cu-vurgu)', async function(b) {
             const ts = secim.deger();
             if (!ts) { mesajEl.textContent = 'Tarih ve saat seçin.'; secim.girdi.focus(); return; }
             b.disabled = true;
@@ -3086,42 +3215,46 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             '#uyap-isata div,#uyap-isata span,#uyap-isata label,#uyap-isata a,#uyap-isata p{color:inherit;font-family:inherit;font-size:inherit;margin-bottom:0}' +
             '#uyap-isata input,#uyap-isata textarea,#uyap-isata select{width:100%;box-sizing:border-box;margin-top:3px;padding:6px 8px;border-radius:7px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.08);color:#f3f4f6;font:inherit}' +
             '#uyap-isata select option{color:#111827}' +
-            '#uyap-islistesi-dugme{position:fixed;left:16px;bottom:16px;z-index:2147483645;padding:8px 14px;border:0;border-radius:999px;cursor:pointer;background:#4f46e5;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 6px 18px rgba(79,70,229,0.35)}' +
-            '#uyap-islistesi-dugme:hover{background:#4338ca}' +
             // Evrak ağacı: bitmemiş işi olan belge mor; satır sonunda işe giden düğme ("+ İş" yalnız üstüne gelince).
-            '.uyap-isli-belge{background:#ede9fe!important;box-shadow:inset 3px 0 0 #7c3aed;border-radius:6px}' +
-            '.uyap-isli-belge,.uyap-isli-belge .dx-treeview-item-content,.uyap-isli-belge span{color:#6d28d9!important;font-weight:600}' +
+            '.uyap-isli-belge{background:var(--cu-vurgu-zemin)!important;box-shadow:inset 3px 0 0 var(--cu-vurgu-yazi);border-radius:6px}' +
+            '.uyap-isli-belge,.uyap-isli-belge .dx-treeview-item-content,.uyap-isli-belge span{color:var(--cu-vurgu-yazi)!important;font-weight:600}' +
             // Dosya Bilgileri / Evrak sekmesinde "bu dosyada yapılacak iş var" bandı.
-            '.uyap-is-uyari{display:flex;align-items:center;gap:12px;margin:8px 8px 4px;padding:8px 12px;border-radius:8px;background:#ede9fe;border:1px solid #c4b5fd;box-shadow:inset 4px 0 0 #4f46e5;color:#3730a3;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}' +
-            '.uyap-is-uyari-is{display:inline-block;margin-right:10px;color:#4338ca;text-decoration:underline;cursor:pointer}' +
-            '.uyap-is-uyari-dugme{flex:none;padding:6px 14px;border:0;border-radius:7px;background:#4f46e5;color:#fff;font-weight:600;cursor:pointer}' +
-            '.uyap-is-uyari-dugme:hover{background:#4338ca}' +
-            '.uyap-belge-is{margin-left:8px;padding:1px 8px;border:0;border-radius:999px;background:#4f46e5;color:#fff;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;vertical-align:middle;white-space:nowrap}' +
-            '.uyap-belge-is:hover{background:#4338ca}' +
-            '.uyap-belge-is.bos{display:none;background:transparent;color:#6d28d9;border:1px dashed #a78bfa}' +
+            '.uyap-is-uyari{display:flex;align-items:center;gap:12px;margin:8px 8px 4px;padding:8px 12px;border-radius:8px;background:var(--cu-vurgu-zemin);border:1px solid var(--cu-vurgu-acik);box-shadow:inset 4px 0 0 var(--cu-vurgu);color:var(--cu-vurgu-yazi);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}' +
+            '.uyap-is-uyari-is{display:inline-block;margin-right:10px;color:var(--cu-vurgu-koyu);text-decoration:underline;cursor:pointer}' +
+            '.uyap-is-uyari-dugme{flex:none;padding:6px 14px;border:0;border-radius:7px;background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);font-weight:600;cursor:pointer}' +
+            '.uyap-is-uyari-dugme:hover{background:var(--cu-vurgu-koyu)}' +
+            // Belge satırındaki iş düğmesi (kullanıcı bulgusu 2026-11-11: UYAP metne order:2 verdiği için sona eklenen
+            // düğme metnin SOLUNDA beliriyor, yazıyı itiyor ve dar sütuna sıkıştırıyordu). İşli belgede "İş →"
+            // satırın en sonunda (order:3, indirme simgesinin sağı) kalıcı durur; işsiz belgedeki "+ İş" yalnız
+            // fare gelince, indirme simgesinin solunda akış DIŞINDA belirir — metin hiç kaymaz.
+            '.evrak-treeview .dx-treeview-item{position:relative}' +
+            '.uyap-belge-is{order:3;flex:none;align-self:center;margin-left:4px;padding:1px 8px;border:0;border-radius:999px;background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)}' +
+            '.uyap-belge-is:hover{background:var(--cu-vurgu-koyu)}' +
+            '.uyap-belge-is.bos{display:none;position:absolute;right:52px;top:50%;transform:translateY(-50%);z-index:2;margin:0;background:#fff;color:var(--cu-vurgu-yazi);border:1px dashed var(--cu-vurgu-kenar)}' +
             '.dx-treeview-item:hover > .uyap-belge-is.bos{display:inline-block}' +
-            '.uyap-belge-is.bos:hover{background:#ede9fe}' +
+            '.uyap-belge-is.bos:hover{background:var(--cu-vurgu-zemin)}' +
             '.uyap-is-uyari-satir{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin-top:2px}' +
-            '.uyap-is-uyari-kucuk{padding:1px 9px;border:1px solid #6366f1;border-radius:999px;background:#fff;color:#4338ca;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer}' +
-            '.uyap-is-uyari-kucuk:hover{background:#e0e7ff}' +
+            '.uyap-is-uyari-kucuk{padding:1px 9px;border:1px solid var(--cu-vurgu-orta);border-radius:999px;background:#fff;color:var(--cu-vurgu-koyu);font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer}' +
+            '.uyap-is-uyari-kucuk:hover{background:var(--cu-vurgu-zemin)}' +
             // İş Ata penceresi: şablon / süre çipleri.
             '#uyap-isata .ia-cip{display:inline-block;margin:4px 4px 0 0;padding:3px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.22);background:transparent;color:#e5e7eb;cursor:pointer;font-family:inherit;font-size:12px;line-height:1.4}' +
             '#uyap-isata .ia-cip:hover{background:rgba(255,255,255,0.08)}' +
             '#uyap-isata .ia-cip.buro{border-color:rgba(167,139,250,0.65)}' +
-            '#uyap-isata .ia-cip.sec{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
+            '#uyap-isata .ia-cip.sec{background:var(--cu-vurgu);border-color:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff)}' +
             '#uyap-isata .ia-not{margin-top:4px;font-size:11px;color:#9ca3af}' +
-            '#uyap-isata .ia-link{padding:0;border:0;background:none;color:#c4b5fd;cursor:pointer;font-family:inherit;font-size:11px;text-decoration:underline}' +
-            '#uyap-isata .ia-link:hover{color:#ddd6fe}' +
+            '#uyap-isata .ia-link{padding:0;border:0;background:none;color:var(--cu-vurgu-acik);cursor:pointer;font-family:inherit;font-size:11px;text-decoration:underline}' +
+            '#uyap-isata .ia-link:hover{color:var(--cu-vurgu-zemin)}' +
             // Sağ tık menüsü.
             '#uyap-sagmenu .uyap-sagmenu-madde{padding:6px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-            '#uyap-sagmenu .uyap-sagmenu-madde:hover,#uyap-sagmenu .uyap-sagmenu-madde.sec{background:rgba(79,70,229,0.4)}' +
+            '#uyap-sagmenu .uyap-sagmenu-madde:hover,#uyap-sagmenu .uyap-sagmenu-madde.sec{background:rgba(var(--cu-vurgu-rgb),0.4)}' +
             // UYAP ana sayfası "Bildirimler": bildirimin dosyasına iş.
-            '.uyap-bildirim-is{margin-left:8px;padding:1px 9px;border:1px solid #a78bfa;border-radius:999px;background:#ede9fe;color:#5b21b6;font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap}' +
-            '.uyap-bildirim-is:hover{background:#ddd6fe}';
+            '.uyap-bildirim-is{margin-left:8px;padding:1px 9px;border:1px solid var(--cu-vurgu-kenar);border-radius:999px;background:var(--cu-vurgu-zemin);color:var(--cu-vurgu-yazi);font:600 11px/18px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;cursor:pointer;white-space:nowrap}' +
+            '.uyap-bildirim-is:hover{background:var(--cu-vurgu-zemin)}';
         document.head.appendChild(stil);
         ort =el('div', 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,0.45);display:none;align-items:flex-start;justify-content:center;padding-top:8vh;');
+        ort.id = 'uyap-isata-ort';
         ort.addEventListener('click', function(ev) { if (ev.target === ort) kapat(); });
-        kutu = el('div', 'width:min(520px,92vw);max-height:80vh;overflow:auto;padding:16px;border-radius:12px;background:rgba(18,18,24,0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;');
+        kutu = el('div', 'width:min(520px,92vw);max-height:80vh;overflow:auto;padding:16px;border-radius:12px;background:rgba(var(--cu-panel-rgb),0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;');
         kutu.id = 'uyap-isata';
         ort.appendChild(kutu);
         document.body.appendChild(ort);
@@ -3181,7 +3314,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             s.appendChild(el('div', 'color:#cbd5e1;', [DURUM[t.status] || t.status, kim, t.due_at ? 'Son: ' + tarih(t.due_at) : '']
                 .filter(Boolean).join(' · ')));
             if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
-            if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+            if (t.evrak_id) s.appendChild(el('div', 'color:var(--cu-vurgu-acik);word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
             if (t.barkod) s.appendChild(el('div', 'color:#cbd5e1;', 'Barkod: ' + t.barkod));
             const pb = pttDugmesi(t, 'ia-cip');
             if (pb) s.appendChild(pb);
@@ -3341,7 +3474,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         let taraflar = [];
         const tarafYok = el('option', null, '— Taraf seçilmedi —'); tarafYok.value = ''; taraf.appendChild(tarafYok);
         const baslik = el('input'); baslik.maxLength = 300; baslik.placeholder = 'Ne yapılacak? (ör. Tebligat kontrol)';
-        const onizleme = el('div', 'margin-top:3px;color:#a5b4fc;word-break:break-word;');
+        const onizleme = el('div', 'margin-top:3px;color:var(--cu-vurgu-acik);word-break:break-word;');
         function tamBaslik() {
             const ad = taraf.value !== '' && taraflar[Number(taraf.value)] ? adDuzelt(taraflar[Number(taraf.value)].adi) : '';
             const is = baslik.value.trim();
@@ -3525,7 +3658,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 && Array.prototype.some.call(belge.options, function(o) { return o.value === acik.evrakId; })) belge.value = acik.evrakId;
         };
         barkodGoster();
-        f.appendChild(dugme('Kaydet', '#4f46e5', async function(b) {
+        f.appendChild(dugme('Kaydet', 'var(--cu-vurgu)', async function(b) {
             if (!baslik.value.trim()) { mesajEl.textContent = 'Ne yapılacağını yazın ya da bir şablon seçin.'; baslik.focus(); return; }
             const bk = barkod.value.replace(/\D/g, '');
             if (pttSablonu(seciliSablon) && bk.length !== 13) {
@@ -3672,10 +3805,15 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     async function dosyayiBul(dosya, bt2) {
         const m = /(\d{4})\s*\/\s*(\d+)/.exec(String(dosya.dosyaNo || ''));
         if (!m || !dosya.birimId) return null;
-        const j = await uyapPost('search_phrase_detayli.ajx', {
-            dosyaDurumKod: typeof dosya.dosyaDurumKod === 'number' ? dosya.dosyaDurumKod : 0,
-            pageSize: 50, pageNumber: 1, dosyaYil: Number(m[1]), dosyaSira: Number(m[2]),
-            birimId: String(dosya.birimId), birimTuru2: bt2 });
+        // Önbelleği (SWR) atlayan ham fetch: önbellek search_phrase_detayli yanıtını da saklıyor ve
+        // önceki oturumun (artık geçersiz) dosyaId'sini dönebiliyordu (2026-11-11).
+        const r = await hamFetch('/search_phrase_detayli.ajx', { method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' },
+            body: JSON.stringify({
+                dosyaDurumKod: typeof dosya.dosyaDurumKod === 'number' ? dosya.dosyaDurumKod : 0,
+                pageSize: 50, pageNumber: 1, dosyaYil: Number(m[1]), dosyaSira: Number(m[2]),
+                birimId: String(dosya.birimId), birimTuru2: bt2 }) });
+        const j = await r.json();
         const kayitlar = Array.isArray(j) && Array.isArray(j[0]) ? j[0] : (Array.isArray(j) ? j : []);
         return kayitlar.find(function(k) {
             return k && String(k.birimId) === String(dosya.birimId) && String(k.dosyaNo).trim() === m[1] + '/' + m[2];
@@ -3746,9 +3884,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         if (uyapKartiAc(dosya)) { sil(); evrakSekmesiIstendi = Date.now(); return; }
         sil();
         if (!acmaUyarisi && document.body) {
-            acmaUyarisi = el('div', 'position:fixed;left:16px;bottom:60px;z-index:2147483646;max-width:360px;padding:10px 12px;border-radius:10px;background:rgba(18,18,24,0.95);color:#fca5a5;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;',
+            acmaUyarisi = el('div', 'position:fixed;left:16px;bottom:60px;z-index:2147483646;max-width:360px;padding:10px 12px;border-radius:10px;background:rgba(var(--cu-panel-rgb),0.95);color:#fca5a5;font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;',
                 'Dosya kartı otomatik açılamadı (UYAP sayfası değişmiş olabilir). Dosya: ' +
                 [kayit.dosya.birimAdi, kayit.dosya.dosyaNo].filter(Boolean).join(' ') + ' — üstteki aramadan açabilirsiniz.');
+            acmaUyarisi.id = 'uyap-acma-uyarisi';
             acmaUyarisi.addEventListener('click', function() { acmaUyarisi.remove(); acmaUyarisi = null; });
             document.body.appendChild(acmaUyarisi);
         }
@@ -3768,63 +3907,93 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const stil = document.createElement('style');
         stil.textContent =
             '#uyap-ispanel{position:fixed;top:0;right:0;bottom:0;width:min(380px,92vw);z-index:2147483644;display:flex;flex-direction:column;' +
-            'background:rgba(18,18,24,0.97);color:#f3f4f6;border-left:1px solid rgba(255,255,255,0.15);box-shadow:-10px 0 30px rgba(0,0,0,0.35);' +
+            'background:rgba(var(--cu-panel-rgb),0.97);color:#f3f4f6;border-left:1px solid rgba(255,255,255,0.15);box-shadow:-10px 0 30px rgba(0,0,0,0.35);' +
             'font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;transform:translateX(100%);transition:transform .2s ease;visibility:hidden}' +
             '#uyap-ispanel.acik{transform:none;visibility:visible}' +
             '#uyap-ispanel div,#uyap-ispanel span,#uyap-ispanel button{font-family:inherit;margin-bottom:0}' +
             '#uyap-ispanel .ip-cip{padding:4px 10px;border-radius:999px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:#cbd5e1;cursor:pointer;font-size:12px}' +
-            '#uyap-ispanel .ip-cip.sec{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
+            '#uyap-ispanel .ip-cip.sec{background:var(--cu-vurgu);border-color:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff)}' +
             '#uyap-ispanel .ip-is{padding:8px 10px;margin-top:6px;border-radius:9px;background:rgba(255,255,255,0.06);cursor:pointer;border-left:3px solid transparent}' +
             '#uyap-ispanel .ip-is:hover{background:rgba(255,255,255,0.11)}' +
             '#uyap-ispanel .ip-is.acil{border-left-color:#f87171}' +
-            '#uyap-ispanel .ip-dosya{margin-top:5px;padding:3px 8px;border-radius:6px;border:1px solid rgba(129,140,248,0.5);background:rgba(79,70,229,0.18);color:#c7d2fe;cursor:pointer;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}' +
-            '#uyap-ispanel .ip-dosya:hover{background:rgba(79,70,229,0.35)}' +
+            '#uyap-ispanel .ip-dosya{margin-top:5px;padding:3px 8px;border-radius:6px;border:1px solid rgba(var(--cu-vurgu-parlak-rgb),0.5);background:rgba(var(--cu-vurgu-rgb),0.18);color:var(--cu-vurgu-acik);cursor:pointer;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}' +
+            '#uyap-ispanel .ip-dosya:hover{background:rgba(var(--cu-vurgu-rgb),0.35)}' +
             '#uyap-ispanel .ip-onay{flex:none;margin-top:5px;padding:3px 10px;border:0;border-radius:6px;background:#16a34a;color:#fff;font-size:11px;font-weight:600;cursor:pointer}' +
             '#uyap-ispanel .ip-onay:hover{background:#15803d}' +
             '#uyap-ispanel .ip-aktar{flex:none;margin-top:5px;padding:3px 10px;border:1px solid rgba(255,255,255,0.25);border-radius:6px;background:transparent;color:#e5e7eb;font-size:11px;font-weight:600;cursor:pointer}' +
             '#uyap-ispanel .ip-aktar:hover{background:rgba(255,255,255,0.08)}' +
             '#uyap-ispanel .ip-red{flex:none;margin-top:5px;padding:3px 10px;border:1px solid rgba(248,113,113,0.6);border-radius:6px;background:transparent;color:#fca5a5;font-size:11px;font-weight:600;cursor:pointer}' +
             '#uyap-ispanel .ip-red:hover{background:rgba(220,38,38,0.2)}' +
-            '#uyap-ispanel .ip-link{background:none;border:0;padding:0;color:#a5b4fc;cursor:pointer;font-size:12px;text-decoration:underline}' +
-            '#uyap-issekme{position:fixed;right:0;top:45%;z-index:2147483644;padding:12px 7px;border:0;border-radius:10px 0 0 10px;cursor:pointer;' +
-            'background:#4f46e5;color:#fff;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;writing-mode:vertical-rl;' +
-            'box-shadow:-4px 4px 14px rgba(79,70,229,0.35);display:flex;align-items:center;gap:6px;transition:right .2s ease}' +
-            '#uyap-ispanel.acik ~ #uyap-issekme{right:min(380px,92vw)}' +
-            '#uyap-issekme:hover{background:#4338ca}' +
-            '#uyap-issekme .ip-rozet{writing-mode:horizontal-tb;min-width:18px;padding:0 5px;border-radius:999px;background:#fff;color:#4338ca;font-size:11px;line-height:18px;text-align:center}';
+            '#uyap-ispanel .ip-link{background:none;border:0;padding:0;color:var(--cu-vurgu-acik);cursor:pointer;font-size:12px;text-decoration:underline}' +
+            // Sağ kenar tutamacı: ekrandaki TEK sabit CokluUyap öğesi. İnce ve yarı saydam; üstüne
+            // gelince belirginleşir. Dikey yeri sekmeYerlestir() seçer (UYAP'ın kendi düğmelerini örtmez).
+            '#uyap-issekme{position:fixed;right:0;top:120px;z-index:2147483644;padding:9px 3px;border:0;border-radius:8px 0 0 8px;cursor:pointer;' +
+            'background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;writing-mode:vertical-rl;' +
+            'opacity:.72;box-shadow:-2px 2px 8px rgba(var(--cu-vurgu-rgb),0.25);display:flex;align-items:center;gap:5px;transition:right .2s ease,opacity .15s,padding .15s}' +
+            '#uyap-ispanel.acik ~ #uyap-issekme{right:min(380px,92vw);opacity:1}' +
+            '#uyap-issekme:hover{opacity:1;padding:9px 6px;background:var(--cu-vurgu-koyu)}' +
+            '#uyap-issekme .ip-rozet{writing-mode:horizontal-tb;min-width:16px;padding:0 4px;border-radius:999px;background:#fff;color:var(--cu-vurgu-koyu);font-size:10px;line-height:16px;text-align:center}' +
+            '#uyap-issekme .ip-nokta{writing-mode:horizontal-tb;width:7px;height:7px;border-radius:50%;background:#4ade80}' +
+            // Çekmece sekmeleri: İşler | Araçlar.
+            '#uyap-ispanel .ip-sekmeler{display:flex;gap:4px;padding:0 14px;border-bottom:1px solid rgba(255,255,255,0.1)}' +
+            '#uyap-ispanel .ip-sekme{padding:7px 12px;border:0;border-bottom:2px solid transparent;background:none;color:#9ca3af;cursor:pointer;font-size:13px;font-weight:600}' +
+            '#uyap-ispanel .ip-sekme.sec{color:#fff;border-bottom-color:var(--cu-vurgu-parlak)}' +
+            '#uyap-ispanel .ip-arac{display:block;width:100%;text-align:left;margin-top:8px;padding:10px 12px;border:1px solid rgba(255,255,255,0.1);border-radius:9px;background:rgba(255,255,255,0.05);color:#f3f4f6;cursor:pointer}' +
+            '#uyap-ispanel .ip-arac:hover{background:rgba(255,255,255,0.11)}' +
+            '#uyap-ispanel .ip-arac-ad{font-size:13px;font-weight:600}' +
+            '#uyap-ispanel .ip-arac-not{margin-top:2px;font-size:11px;color:#9ca3af}' +
+            '#uyap-ispanel .ip-arac-not.ok{color:#86efac}';
         document.head.appendChild(stil);
 
         const kok = el('div', '');
         kok.id = 'uyap-ispanel';
         const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 14px 6px;');
-        ust.appendChild(el('div', 'font-size:15px;font-weight:700;', 'İş Listesi'));
+        ust.appendChild(el('div', 'font-size:15px;font-weight:700;', 'Çoklu UYAP'));
         const sag = el('div', 'display:flex;align-items:center;gap:12px;');
         const yenile = el('button', null, 'Yenile'); yenile.className = 'ip-link'; yenile.type = 'button';
         yenile.addEventListener('click', function() { panelYenile(); });
-        const tam = el('button', null, 'Tam sayfa'); tam.className = 'ip-link'; tam.type = 'button';
-        tam.title = 'İş Listesi\'ni (takvim, raporlar) yeni sekmede aç';
-        tam.addEventListener('click', ac);
+        pnl.yenile = yenile;
         const x = el('span', 'font-size:20px;color:#9ca3af;cursor:pointer;padding:0 2px;line-height:1;', '×');
         x.title = 'Kapat (Esc)';
         x.addEventListener('click', panelKapat);
-        sag.appendChild(yenile); sag.appendChild(tam); sag.appendChild(x);
+        sag.appendChild(yenile); sag.appendChild(x);
         ust.appendChild(sag);
         kok.appendChild(ust);
-        pnl.cipler = el('div', 'display:flex;flex-wrap:wrap;gap:6px;padding:4px 14px 8px;border-bottom:1px solid rgba(255,255,255,0.1);');
-        kok.appendChild(pnl.cipler);
-        pnl.govde = el('div', 'flex:1;overflow:auto;padding:4px 14px 14px;');
-        kok.appendChild(pnl.govde);
+        // Sekmeler: İşler (kişinin işleri) | Araçlar (İş Listesi, Gerekçeli Kararlar, E-İmza …).
+        const sekmeler = el('div', '');
+        sekmeler.className = 'ip-sekmeler';
+        pnl.sekmeDugmeleri = {};
+        [['isler', 'İşler'], ['araclar', 'Araçlar']].forEach(function(s) {
+            const b = el('button', null, s[1]);
+            b.type = 'button';
+            b.className = 'ip-sekme';
+            b.addEventListener('click', function() { gorunumSec(s[0]); });
+            pnl.sekmeDugmeleri[s[0]] = b;
+            sekmeler.appendChild(b);
+        });
+        kok.appendChild(sekmeler);
+        pnl.islerKutu = el('div', 'flex:1;display:flex;flex-direction:column;min-height:0;');
+        pnl.cipler = el('div', 'display:flex;flex-wrap:wrap;gap:6px;padding:8px 14px 8px;border-bottom:1px solid rgba(255,255,255,0.1);');
+        pnl.islerKutu.appendChild(pnl.cipler);
+        pnl.govde = el('div', 'flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 14px 14px;');
+        pnl.islerKutu.appendChild(pnl.govde);
+        kok.appendChild(pnl.islerKutu);
+        pnl.araclarKutu = el('div', 'flex:1;overflow:auto;padding:6px 14px 14px;display:none;');
+        kok.appendChild(pnl.araclarKutu);
         document.body.appendChild(kok);
         pnl.kok = kok;
 
         const sekme = el('button', null);
         sekme.id = 'uyap-issekme';
         sekme.type = 'button';
-        sekme.title = 'İşlerim';
-        sekme.appendChild(el('span', null, 'İşler'));
+        sekme.title = 'Çoklu UYAP: işlerim ve araçlar';
         pnl.rozet = el('span', 'display:none;');
         pnl.rozet.className = 'ip-rozet';
         sekme.appendChild(pnl.rozet);
+        sekme.appendChild(el('span', null, 'Çoklu UYAP'));
+        pnl.nokta = el('span', 'display:none;');       // yeşil: imzalı belge yüklemeye hazır
+        pnl.nokta.className = 'ip-nokta';
+        sekme.appendChild(pnl.nokta);
         sekme.addEventListener('click', function() { pnl.acik ? panelKapat() : panelAc(); });
         document.body.appendChild(sekme);
         pnl.sekme = sekme;
@@ -3832,9 +4001,111 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         document.addEventListener('keydown', function(ev) {
             if (ev.key === 'Escape' && pnl.acik && !(ort && ort.style.display !== 'none')) panelKapat();
         });
+        gorunumSec('isler');
         cipleriCiz();
         panelYenile();
         setInterval(function() { if (!document.hidden) panelYenile(); }, 180000);
+        sekmeYerlestir();
+        window.addEventListener('resize', function() { sekmeYerlestir(true); });
+        setInterval(function() { if (!document.hidden) { sekmeYerlestir(); noktaGuncelle(); } }, 2000);
+    }
+
+    // ── Tutamacın yeri: UYAP'ın sağ kenardaki kendi düğmelerini (ör. "Loglamayı Başlat" ekranın
+    // ortasında, erişilebilirlik sağ altta — canlı, 2026-11-11) ÖRTMEYEN ilk boşluk. Tutamacın
+    // sütununda örnek noktalara elementsFromPoint ile bakılır; bizim olmayan, küçük, sabit konumlu
+    // bir öğe (ya da onun içi) çıkarsa o yükseklik doludur. UYAP düzenini değiştirse de çakışmaz.
+    function yabanciSabitOge(e) {
+        for (; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+            if (e.id && e.id.indexOf('uyap-') === 0) return false;           // bizim öğemiz
+            const cs = getComputedStyle(e);
+            if (cs.position === 'fixed') {
+                const r = e.getBoundingClientRect();
+                return r.width < innerWidth * 0.5 && r.height < innerHeight * 0.5;   // tam ekran örtüler değil
+            }
+        }
+        return false;
+    }
+    function yerBosMu(x1, x2, ust, yuk) {
+        for (let y = ust - 6; y <= ust + yuk + 6; y += 8) {
+            for (const x of [x1, x2]) {
+                if (document.elementsFromPoint(x, y).some(yabanciSabitOge)) return false;
+            }
+        }
+        return true;
+    }
+    let sekmeOlcu = '';
+    function sekmeYerlestir(zorla) {
+        const s = pnl.sekme;
+        if (!s || pnl.acik) return;
+        const r = s.getBoundingClientRect();
+        const yuk = Math.round(r.height) || 110;
+        const x1 = Math.round(r.right) - 3, x2 = Math.round(r.right) - 14;
+        const olcu = innerWidth + 'x' + innerHeight;
+        if (!zorla && olcu === sekmeOlcu && yerBosMu(x1, x2, Math.round(r.top), yuk)) return;
+        sekmeOlcu = olcu;
+        const enUst = 72, enAlt = innerHeight - yuk - 8;     // UYAP üst çubuğu ~60 px
+        const tercih = Math.max(enUst, Math.min(enAlt, Math.round(innerHeight * 0.18)));
+        const adaylar = [];
+        for (let y = tercih; y <= enAlt; y += 10) adaylar.push(y);
+        for (let y = tercih - 10; y >= enUst; y -= 10) adaylar.push(y);
+        const bos = adaylar.find(function(y) { return yerBosMu(x1, x2, y, yuk); });
+        s.style.top = (bos != null ? bos : tercih) + 'px';
+    }
+    function noktaGuncelle() {
+        const e = window.__uyapEimza && window.__uyapEimza.durum();
+        if (pnl.nokta) pnl.nokta.style.display = e && e.hazir ? '' : 'none';
+        if (pnl.gorunum === 'araclar' && pnl.acik) araclariCiz();
+    }
+
+    // ── Çekmece görünümü: İşler | Araçlar ──
+    function gorunumSec(g) {
+        pnl.gorunum = g;
+        Object.keys(pnl.sekmeDugmeleri).forEach(function(k) { pnl.sekmeDugmeleri[k].classList.toggle('sec', k === g); });
+        pnl.islerKutu.style.display = g === 'isler' ? 'flex' : 'none';
+        pnl.araclarKutu.style.display = g === 'araclar' ? 'block' : 'none';
+        pnl.yenile.style.display = g === 'isler' ? '' : 'none';
+        if (g === 'araclar') araclariCiz();
+    }
+    function araclariCiz() {
+        const k = pnl.araclarKutu;
+        k.innerHTML = '';
+        const arac = function(ad, not, fn, notOk) {
+            const b = el('button', null);
+            b.type = 'button';
+            b.className = 'ip-arac';
+            b.appendChild(el('div', null, ad)).className = 'ip-arac-ad';
+            if (not) b.appendChild(el('div', null, not)).className = 'ip-arac-not' + (notOk ? ' ok' : '');
+            b.addEventListener('click', fn);
+            k.appendChild(b);
+        };
+        arac('İş Listesi', 'Takvim, raporlar ve büronun tüm işleri (yeni sekmede)', ac);
+        const g = window.__uyapGerekceli;
+        if (g) {
+            const d = g.durum();
+            arac('Gerekçeli Kararlar', d || 'Hukuk dosyalarında gerekçeli kararları bul ve indir',
+                 function() { panelKapat(); g.ac(); }, !!d);
+        }
+        const e = window.__uyapEimza;
+        if (e) {
+            const d = e.durum();
+            arac('E-İmza', d.hazir ? 'İmzalı belge hazır: ' + d.ad + ' — UYAP\'ta "Dosya Ekle"ye tıklayınca eklenir'
+                                   : 'Belgeyi seçin ya da sayfaya sürükleyin (.udf · .doc · .docx · .pdf)',
+                 function() { panelKapat(); e.ac(); }, d.hazir);
+        }
+        // Ana sayfadan kaldırılan indirme kutusunun bağlantıları (enjekte/anasayfa.js).
+        if (window.__uyapIndirmeler) {
+            k.appendChild(el('div', 'margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--cu-vurgu-acik);',
+                             'Programlar ve indirmeler'));
+            const yer = el('div', 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;');
+            window.__uyapIndirmeler().forEach(function(x) {
+                const b = el('button', null, x.ad);
+                b.type = 'button';
+                b.className = 'ip-cip';
+                b.addEventListener('click', function() { panelKapat(); x.ac(); });
+                yer.appendChild(b);
+            });
+            k.appendChild(yer);
+        }
     }
 
     function cipleriCiz() {
@@ -3863,14 +4134,25 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             b.title = 'Dosya süzgecini kaldır';
             b.addEventListener('click', function() { pnl.dosya = null; cipleriCiz(); panelYenile(); });
             pnl.cipler.appendChild(b);
+            const yeni = el('button', null, '+ Bu dosyaya iş ata');
+            yeni.type = 'button';
+            yeni.className = 'ip-cip';
+            yeni.addEventListener('click', function() {
+                const ds = pnl.dosya;
+                if (!ds) return;
+                panelKapat();
+                pencereAc(ds.d, ds.kart && ds.kart.isConnected ? ds.kart : null);
+            });
+            pnl.cipler.appendChild(yeni);
         }
     }
 
     // Paneli bir dosyanın işleriyle açar (kart düğmesi / birden çok işli belge).
-    function panelDosyaAc(d) {
+    function panelDosyaAc(d, kart) {
         panelKur();
         if (!pnl.kok) return;
-        pnl.dosya = { id: dosyaAnahtari(d), d: d, ad: (window.__uyapDosyaAdi ? window.__uyapDosyaAdi(d) : '') || String(d.dosyaNo || d.dosyaId) };
+        pnl.dosya = { id: dosyaAnahtari(d), d: d, kart: kart || null, ad: (window.__uyapDosyaAdi ? window.__uyapDosyaAdi(d) : '') || String(d.dosyaNo || d.dosyaId) };
+        gorunumSec('isler');
         cipleriCiz();
         panelAc();
     }
@@ -3923,7 +4205,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         pnl.rozet.style.display = n ? '' : 'none';
         pnl.rozet.style.background = gecikmis ? '#dc2626' : '';
         pnl.rozet.style.color = gecikmis ? '#fff' : '';
-        pnl.sekme.title = gecikmis ? 'İşlerim — gecikmiş iş var' : 'İşlerim';
+        pnl.sekme.title = gecikmis ? 'Çoklu UYAP — gecikmiş iş var' : 'Çoklu UYAP: işlerim ve araçlar';
     }
 
     // Sıra: Acil önce, sonra son tarihi yakın olan; tarihsizler sonda.
@@ -3953,7 +4235,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             return 'sonra';
         };
         const GRUPLAR = [['gecikmis', 'Gecikmiş', '#fca5a5'], ['bugun', 'Bugün', '#fdba74'],
-                         ['sonra', 'Sonra', '#cbd5e1'], ['onayda', 'Onay bekliyor', '#a5b4fc']];
+                         ['sonra', 'Sonra', '#cbd5e1'], ['onayda', 'Onay bekliyor', 'var(--cu-vurgu-acik)']];
         const sayilar = {};
         aktif.forEach(function(t) { sayilar[grup(t)] = (sayilar[grup(t)] || 0) + 1; });
         const grupla = pnl.filtre !== 'onay' || pnl.dosya;
@@ -4002,7 +4284,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         }
         s.appendChild(meta);
         if (t.taraf_adi) s.appendChild(el('div', 'color:#cbd5e1;word-break:break-word;', 'Taraf: ' + t.taraf_adi));
-        if (t.evrak_id) s.appendChild(el('div', 'color:#c4b5fd;word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
+        if (t.evrak_id) s.appendChild(el('div', 'color:var(--cu-vurgu-acik);word-break:break-word;', 'Belge: ' + (t.evrak_adi || t.evrak_id)));
         if (t.barkod) s.appendChild(el('div', 'color:#cbd5e1;', 'Barkod: ' + t.barkod));
         const alt2 = el('div', 'display:flex;align-items:center;gap:6px;min-width:0;');
         const pb = pttDugmesi(t, 'ip-aktar');
@@ -4025,7 +4307,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         if (onayYetkili(t)) {
             ['is', 'ext'].forEach(function(tur) {
                 if (tur === 'is' ? t.status !== 'onayda' : !t.ext) return;
-                s.appendChild(el('div', 'margin-top:5px;color:#c7d2fe;word-break:break-word;', kararOzeti(t, tur)));
+                s.appendChild(el('div', 'margin-top:5px;color:var(--cu-vurgu-acik);word-break:break-word;', kararOzeti(t, tur)));
             });
             const kd = kararDugmeleri(t, 'ip-onay', 'ip-red');
             if (kd.length) {
@@ -4039,13 +4321,17 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
 
     // Kartı bu sayfada UYAP'ın kendi arama bileşeniyle açar; ana sayfada değilsek kaydı bırakıp
     // ana sayfaya geçer (bekleyenDosyaAc orada açar — İş Listesi'nden "UYAP'ta aç" ile aynı yol).
-    function dosyaKartiAc(t) {
+    function isKarti(t) {
         let kart = null;
         try { kart = t.dosya_uyap ? JSON.parse(t.dosya_uyap) : null; } catch (e) {}
         if (!kart || !kart.dosyaId) {
             kart = { dosyaId: t.dosya_id, dosyaNo: t.dosya_no || '', birimId: t.birim_id || '',
                      birimAdi: t.birim_adi || '', dosyaTurKodAciklama: t.dosya_tur || '' };
         }
+        return kart;
+    }
+    function dosyaKartiAc(t) {
+        const kart = isKarti(t);
         // Her durumda bekleyenDosyaAc yolundan: kimlik önce UYAP'tan tazelenir (bkz. tazeKart).
         try { sessionStorage.setItem('cokluuyapDosyaAc', JSON.stringify({ t: Date.now(), dosya: kart })); } catch (e) {}
         if (document.getElementById('searchId')) { panelKapat(); bekleyenDosyaAc(); }
@@ -4124,31 +4410,16 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         dosyaIsleriniGetir(d);
         const isler = acikIsler(d);
 
-        // Kart başlığı: "Yapılacak iş var (N)" — İş Ata'nın solunda, dolu mor.
-        let b = baslik.querySelector('[data-isvar]');
-        if (!b) {
-            const isata = baslik.querySelector('[data-isata]');
-            if (!isata) return;
-            b = document.createElement('div');
-            b.setAttribute('data-isvar', '1');
-            b.setAttribute('role', 'button');
-            b.setAttribute('tabindex', '0');
-            b.title = 'Bu dosyanın yapılacak işlerini göster';
-            b.className = 'dx-widget dx-button dx-button-mode-contained dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
-            b.style.cssText = 'margin-right:6px;background:#4f46e5;border-color:#4f46e5;color:#fff;';
-            b.innerHTML = '<div class="dx-button-content" style="color:#fff"><span class="dx-icon fe icon-alert-circle" style="color:#fff"></span> <span data-metin></span></div>';
-            b.addEventListener('click', function(ev) {
-                ev.stopPropagation();
-                const k = baslik.closest('.dosya-sorgula-popup');
-                const dd = k && window.__uyapKartVerisi(k);
-                if (dd) panelDosyaAc(dd);
-            });
-            isata.parentElement.insertBefore(b, isata);
+        // Kart başlığındaki "İşler" düğmesinin rozeti: bitmemiş iş sayısı (yoksa gizli).
+        const b = baslik.querySelector('[data-isata]');
+        const rz = b && b.querySelector('[data-rozet]');
+        if (rz) {
+            const yeni = isler.length ? String(isler.length) : '';
+            if (rz.textContent !== yeni) rz.textContent = yeni;
+            rz.style.display = isler.length ? '' : 'none';
+            b.title = isler.length ? 'Bu dosyanın ' + isler.length + ' bitmemiş işi — göster / yeni iş ata'
+                                   : 'Bu dosyaya iş ata (İş Listesi)';
         }
-        b.style.display = isler.length ? '' : 'none';
-        const metin = b.querySelector('[data-metin]');
-        const yeni = 'Yapılacak iş var (' + isler.length + ')';
-        if (metin.textContent !== yeni) metin.textContent = yeni;
 
         uyariBandi(kart, d, isler);
         belgeleriIsaretle(kart, d, isler);
@@ -4269,7 +4540,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 git.setAttribute('data-isler', isNolar);
                 git.setAttribute('data-evrak', evrakId);
                 git.classList.toggle('bos', !ilgili.length);
-                git.textContent = !ilgili.length ? '+ İş' : ilgili.length === 1 ? 'Yapılacak iş →' : 'Yapılacak ' + ilgili.length + ' iş →';
+                git.textContent = !ilgili.length ? '+ İş' : ilgili.length === 1 ? 'İş →' : ilgili.length + ' iş →';
                 git.title = !ilgili.length ? 'Bu belgeye iş ekle'
                     : ilgili.map(function(t) { return t.title; }).join('\n');
             }
@@ -4347,17 +4618,23 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             const d = kart && baslik.querySelector('[data-isata]') && window.__uyapKartVerisi(kart);
             if (d) kartIsleriniIsle(kart, baslik, d);
         });
-        if (document.body && !document.getElementById('uyap-islistesi-dugme')) {
-            kur();
-            const s = el('button', null, 'İş Listesi');
-            s.id = 'uyap-islistesi-dugme';
-            s.type = 'button';
-            s.title = 'Büronuzun iş listesini aç (cokluuyap.com)';
-            s.addEventListener('click', ac);
-            document.body.appendChild(s);
-        }
+        // 2026-11-11: sol alttaki sabit "İş Listesi" düğmesi kaldırıldı; İş Listesi çekmeceden
+        // ("Tam sayfa" ya da Araçlar → İş Listesi) açılır.
         panelKur();
         sagMenuKur();
+    }
+    // UYAP kartının kendi kapatma düğmesi (başlıktaki kırmızı "icon-x", canlı 2026-11-11). Yalnız kartın KENDİ
+    // başlığında aranır: bazı sekmeler (ör. Taraf Bilgileri, Safahat) açılınca kartın içine gizli bir iç pencere
+    // gelir; onun başlığındaki .dx-closebutton kartın düğmesi sanılıyor, tıklanınca hiçbir şey olmuyordu —
+    // küçült (–) ve görev çubuğundan kapatma sessizce çalışmıyordu (canlı, 2026-11-11).
+    function uyapKartiniKapat(kart) {
+        const bas = kart.querySelector(':scope > .dx-overlay-content > .dx-popup-title') || kart.querySelector('.dx-popup-title');
+        if (!bas) return false;
+        const aday = Array.from(bas.querySelectorAll('[role=button]')).find(function(b) {
+                return !b.textContent.trim() && b.querySelector('.icon-x, .dx-icon-close');
+            }) || bas.querySelector('.dx-closebutton');
+        if (aday) { aday.click(); return true; }
+        return false;
     }
     function isAtaDugmesi(baslik) {
         const yer = baslik.querySelector('[data-tumevrak]')
@@ -4370,7 +4647,10 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         b.title = 'Bu dosyaya iş ata (İş Listesi)';
         b.className = 'dx-widget dx-button dx-button-mode-outlined dx-button-normal dx-button-has-text dx-button-has-icon adalet-button';
         b.style.marginRight = '6px';
-        b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe icon-check-circle"></span> <span>İş Ata</span></div>';
+        // 2026-11-11: "Yapılacak iş var (N)" + "İş Ata" tek düğme: "İşler" (+ bitmemiş iş rozeti).
+        // Açık iş varsa çekmecede bu dosyanın işleri (oradan "Yeni iş"), yoksa doğrudan İş Ata.
+        b.innerHTML = '<div class="dx-button-content"><span class="dx-icon fe icon-check-circle"></span> <span>İşler</span>' +
+            '<span data-rozet style="display:none;margin-left:6px;min-width:18px;padding:0 6px;border-radius:999px;background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);font-size:11px;font-weight:700;line-height:18px;text-align:center;"></span></div>';
         b.addEventListener('click', function(ev) {
             ev.stopPropagation();
             const kart = baslik.closest('.dosya-sorgula-popup');
@@ -4382,7 +4662,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 ort.style.display = 'flex';
                 return;
             }
-            pencereAc(d, kart);
+            if (acikIsler(d).length) panelDosyaAc(d, kart); else pencereAc(d, kart);
         });
         yer.parentElement.insertBefore(b, yer);
     }
@@ -4400,7 +4680,8 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         try { return localStorage.getItem('cokluuyapSagMenu') === 'kapali'; } catch (e) { return false; }
     }
     function kisaBildirim(m) {
-        const b = el('div', 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:2147483647;padding:6px 14px;border-radius:8px;background:rgba(18,18,24,0.95);color:#e5e7eb;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;', m);
+        const b = el('div', 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:2147483647;padding:6px 14px;border-radius:8px;background:rgba(var(--cu-panel-rgb),0.95);color:#e5e7eb;font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;', m);
+        b.className = 'uyap-kisa-bildirim';
         document.body.appendChild(b);
         setTimeout(function() { b.remove(); }, 1200);
     }
@@ -4441,8 +4722,12 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     // UDF belgeleri UYAP'ın canvas'a çizen kendi editöründe gösteriliyor: seçim tarayıcının değil
     // editörün durumunda (zustand deposu; eylemi getSelectedText(), UYAP main.js 2026-11-10). Depoya
     // tıklanan yerin React ağacından ulaşılır: ata bileşenlerin props'u, kancaları ve context'i taranır.
+    // Görüntüleyicinin deposu bileşene useStore prop'u / context değeri olarak geçer ve zustand'ın
+    // create()'i bir İŞLEV döndürür (getState onun özelliği): işlevler de taranmalı. useMemo kancasının
+    // değeri [depo, bağımlılıklar] dizisidir.
     function secimOkuyucu(o) {
-        if (!o || typeof o !== 'object') return null;
+        if (Array.isArray(o)) o = o[0];
+        if (!o || (typeof o !== 'object' && typeof o !== 'function')) return null;
         try {
             if (typeof o.getSelectedText === 'function') return o.getSelectedText;
             if (typeof o.getState === 'function' && o.getState.length === 0) {
@@ -4631,7 +4916,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         kutu.appendChild(sayac);
         const durum = el('div', 'margin-top:8px;color:#cbd5e1;word-break:break-word;');
         kutu.appendChild(durum);
-        const gonder = dugme('E-imzala ve Gönder', '#4f46e5', async function(b) {
+        const gonder = dugme('E-imzala ve Gönder', 'var(--cu-vurgu)', async function(b) {
             const metin = ta.value.replace(/\s+/g, ' ').trim();
             if (!metin) { durum.style.color = '#fca5a5'; durum.textContent = 'Açıklama boş olamaz.'; return; }
             if (t121Mesgul) return;
@@ -4782,7 +5067,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const b = el('button', null, 'Kesinleştirme talebi gönder');
         b.type = 'button';
         b.className = sinif;
-        b.style.cssText = 'background:#4f46e5;color:#fff;border-color:#4f46e5;';
+        b.style.cssText = 'background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);border-color:var(--cu-vurgu);';
         b.title = 'Takibin Kesinleşmesi talebini hazırla, e-imzala ve gönder (önce borçlu onaylanır)';
         b.addEventListener('click', function(ev) { ev.stopPropagation(); kesinlestirmePenceresi(t, d); });
         return b;
@@ -4820,7 +5105,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             satir.appendChild(c);
             satir.appendChild(el('span', 'font-weight:600;color:#f3f4f6;', b.ad));
             if (b.kesinlesmis) satir.appendChild(el('span', 'font-size:11px;', '(kesinleşme bilgisi var)'));
-            else if (isinBorclusu(b)) satir.appendChild(el('span', 'font-size:11px;color:#c4b5fd;', '(işin borçlusu)'));
+            else if (isinBorclusu(b)) satir.appendChild(el('span', 'font-size:11px;color:var(--cu-vurgu-acik);', '(işin borçlusu)'));
             yer.appendChild(satir);
             if (!b.kesinlesmis) secenekler.push({ b: b, c: c });
         });
@@ -4829,7 +5114,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         const ilerleme = el('div', 'margin-top:8px;word-break:break-word;');
         yer.appendChild(ilerleme);
         const secili = function() { const x = secenekler.find(function(x) { return x.c.checked; }); return x ? x.b : null; };
-        const gonder = dugme('E-imzala ve Gönder', '#4f46e5', async function(b) {
+        const gonder = dugme('E-imzala ve Gönder', 'var(--cu-vurgu)', async function(b) {
             const borclu = secili();
             if (!borclu) { mesajEl.textContent = 'Talep gönderilecek borçluyu seçin.'; return; }
             if (kesMesgul) return;
@@ -4931,7 +5216,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (!j.ok) throw new Error(j.error || 'PTT sorgusu başarısız.');
         } catch (e) {
             govde.replaceChildren(el('div', 'color:#fca5a5;word-break:break-word;', e.message),
-                                  dugme('Yeniden dene', '#4f46e5', function() { pttSorgula(barkod); }),
+                                  dugme('Yeniden dene', 'var(--cu-vurgu)', function() { pttSorgula(barkod); }),
                                   dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
             return;
         }
@@ -4972,7 +5257,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
     }
     function sagMenuGoster(x, y, gruplar, altYaziYok) {
         if (!sagMenu) {
-            sagMenu = el('div', 'position:fixed;left:0;top:0;z-index:2147483646;min-width:200px;max-width:340px;padding:4px 0;border-radius:9px;background:rgba(18,18,24,0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);color:#e5e7eb;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
+            sagMenu = el('div', 'position:fixed;left:0;top:0;z-index:2147483646;min-width:200px;max-width:340px;padding:4px 0;border-radius:9px;background:rgba(var(--cu-panel-rgb),0.97);border:1px solid rgba(255,255,255,0.15);box-shadow:0 10px 30px rgba(0,0,0,0.45);color:#e5e7eb;font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:none;');
             sagMenu.id = 'uyap-sagmenu';
             sagMenu.addEventListener('contextmenu', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
             document.body.appendChild(sagMenu);
@@ -4982,7 +5267,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
             if (i) sagMenu.appendChild(el('div', 'height:1px;margin:4px 0;background:rgba(255,255,255,0.1);'));
             g.forEach(function(m) {
                 if (!m[1]) {               // grup başlığı (ör. "İcra dosyası · …"): tıklanmaz
-                    sagMenu.appendChild(el('div', 'padding:4px 14px 2px;color:#a5b4fc;font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;', m[0]));
+                    sagMenu.appendChild(el('div', 'padding:4px 14px 2px;color:var(--cu-vurgu-acik);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;', m[0]));
                     return;
                 }
                 const s = el('div', null, m[0]);
@@ -4993,7 +5278,7 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
                 sagMenu.appendChild(s);
             });
         });
-        if (!altYaziYok) sagMenu.appendChild(el('div', 'padding:5px 14px 2px;color:#6b7280;font-size:10.5px;', 'Tarayıcı menüsü: Shift + sağ tık'));
+        if (!altYaziYok) sagMenu.appendChild(el('div', 'padding:5px 14px 2px;color:#6b7280;font-size:10.5px;', 'Tarayıcı menüsü: Shift + sağ tık')).className = 'uyap-sagmenu-not';
         sagMenu.style.display = 'block';
         const r = sagMenu.getBoundingClientRect();
         sagMenu.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + 'px';
@@ -5061,13 +5346,25 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
         document.addEventListener('scroll', sagMenuKapat, true);
     }
 
+    // ── Görev çubuğu (enjekte/gorevcubugu.js) ve kart görev çubuğu (enjekte/kartlar.js) için kancalar ──
+    window.__uyapAnaCerceve = anaCerceve;
+    window.__uyapTazeKart = tazeKart;
+    window.__uyapKartAlanlari = kartAlanlari;
+    window.__uyapDosyaAnahtari = dosyaAnahtari;
+    window.__uyapKartiAcDogrudan = uyapKartiAc;        // yalnız ana sayfada (#searchId) çalışır
+    window.__uyapSeciliSekme = seciliSekme;
+    window.__uyapSekmeSec = sekmeSec;
+    window.__uyapUyapKartiniKapat = uyapKartiniKapat;
+
     setInterval(kartlariTara, 700);
 })();
 </script>"""
         # Betik UYAP'ın <meta charset>'ını ilk 1024 baytın dışına itiyor; UYAP da Content-Type'ta
         # charset vermiyor → tarayıcı sayfayı (ve betikteki Türkçe metni) yanlış kodlamayla okuyordu
         # ("OnaylandÄ±"). Gövde her zaman UTF-8'e yeniden kodlandığı için bildirimi en başa koy.
-        script = '<meta charset="utf-8">' + script
+        script = '<meta charset="utf-8">' + _tema_on_eki() + script + _ek_betikler()
+        # Sekme başlığı ilk andan itibaren bizim adımız (tema.js de React'in sonradan yazdığını değiştirir).
+        text = text.replace("<title>Uyap Avukat Bilgi Sistemi</title>", "<title>Çoklu UYAP</title>", 1)
         if "<head>" in text:
             text = text.replace("<head>", f"<head>{script}", 1)
         elif "<body>" in text:
@@ -5080,6 +5377,79 @@ def _rewrite_body(content_type: str, body: bytes, proxy_base: str, inject: bool 
 
 import inspect as _inspect
 import hashlib as _hashlib
+
+# Ana enjekte betiğin ardından satır içi eklenen ayrı JS dosyaları (uyap_core/enjekte/). Büyük yeni
+# özellikler Python dizesi yerine burada yazılır. Dosyalar açılışta bir kez okunur; içerikleri
+# INJECT_VERSION'a katılır. Sıra önemli: sonraki dosya öncekinin window.CU'sunu kullanabilir.
+# tema.js: üç tema arasında seçim (UYAP'ın tema düğmesi); mobil.js: dar ekran / telefon kipi (<html class="cu-dar
+# cu-mobil">) + Evrak sekmesinde tek bölme — gorevcubugu.js'ten ÖNCE gelmeli (kipi ondan sorar); gorevcubugu.js:
+# görev çubuğu + başlat düğmesi + genel düzen; kartlar.js: UYAP'ın KENDİ dosya kartları görev çubuğunda
+# (programın ayrı dosya ekranı 2026-11-11'de kaldırıldı: kullanıcı UYAP kartını ve ona bağlı eklentileri
+# korumak istiyor).
+_EK_BETIK_DOSYALARI = ("tema.js", "mobil.js", "gorevcubugu.js", "kartlar.js", "anasayfa.js")
+# Sayfanın en başındaki <style>'a bu sırayla eklenen stil dosyaları (enjekte/): temalar, sonra mobil görünüm.
+_STIL_DOSYALARI = ("tema.css", "mobil.css")
+_ek_betik_onbellek = None
+_tema_css_onbellek = None
+
+
+def _tema_css():
+    """enjekte/tema.css (bütün Çoklu UYAP renk değişkenleri ve temalar) + enjekte/mobil.css (dar ekran / telefon)."""
+    global _tema_css_onbellek
+    if _tema_css_onbellek is None:
+        klasor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enjekte")
+        parcalar = []
+        for ad in _STIL_DOSYALARI:
+            try:
+                with open(os.path.join(klasor, ad), "r", encoding="utf-8") as f:
+                    parcalar.append(f.read().replace("</style", ""))
+            except OSError as e:
+                print(f"[!] {ad} okunamadı: {e}")
+        _tema_css_onbellek = "\n".join(parcalar)
+    return _tema_css_onbellek
+
+
+def _tema_on_eki():
+    """Sayfanın en başı: renk değişkenleri + seçili temayı <html data-cu-tema>'ya (deri temalarında ayrıca
+    data-cu-deri) yazan küçük betik. Enjekte betiklerden ÖNCE gelir: renkler ilk çizimde doğru olur (sıçrama
+    yok). UYAP koyu moddaysa (localStorage.theme = dark) tema "koyu"; değilse kullanıcının seçimi. Tema listesi
+    burada TUTULMAZ (yalnız tema.css + tema.js): UYAP ve Koyu dışındaki her seçim "deri" teması sayılır."""
+    return ("<style>" + _tema_css() + "</style><script>(function(){try{var h=document.documentElement,"
+            "t=localStorage.getItem('cokluuyapTema');"
+            "t=localStorage.getItem('theme')==='dark'?'koyu':(t&&/^[a-z0-9]+$/.test(t)?t:'uyap');"
+            "h.setAttribute('data-cu-tema',t);if(t!=='uyap'&&t!=='koyu')h.setAttribute('data-cu-deri','');}catch(e){}})();</script>"
+            # Örtü (kullanıcı bulgusu 2026-11-11: açılışta bir an UYAP'ın orijinal arayüzü görünüyordu). UYAP'ın
+            # kabuğu boş; ekranı React çiziyor, bizim düzenlemeler ondan sonra geliyor. İçerik (#root) ilk düzenleme
+            # turu bitene kadar gizli: tema.js hazır olunca html.cu-ortu'yu kaldırır; 2.5 sn'de kendiliğinden açılır
+            # (betik hata verse de ekran boş kalmaz). Yalnız ana çerçevede / uzak kabuğun iframe#app'inde.
+            "<style>html.cu-ortu #root{visibility:hidden!important}</style>"
+            "<script>(function(){try{var a=window.top===window;try{a=a||(window.frameElement&&window.frameElement.id==='app')}catch(e){}"
+            "if(!a)return;var h=document.documentElement;h.classList.add('cu-ortu');"
+            "setTimeout(function(){h.classList.remove('cu-ortu')},2500);}catch(e){}})();</script>")
+
+
+def _ek_betik_metinleri():
+    global _ek_betik_onbellek
+    if _ek_betik_onbellek is None:
+        klasor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enjekte")
+        metinler = []
+        for ad in _EK_BETIK_DOSYALARI:
+            try:
+                with open(os.path.join(klasor, ad), "r", encoding="utf-8") as f:
+                    metin = f.read()
+            except OSError as e:
+                print(f"[!] Enjekte betik okunamadı ({ad}): {e}")
+                continue
+            if "</script" in metin.lower():
+                print(f"[!] Enjekte betik '</script' içeriyor, atlandı: {ad}")
+                continue
+            metinler.append(metin)
+        _ek_betik_onbellek = metinler
+    return _ek_betik_onbellek
+
+
+def _ek_betikler():
+    return "".join("<script>\n" + m + "\n</script>" for m in _ek_betik_metinleri())
 
 
 def _compute_inject_version():
@@ -5098,6 +5468,7 @@ def _compute_inject_version():
                 veri = f.read()
         except Exception:
             veri = b""
+    veri += ("".join(_ek_betik_metinleri()) + _tema_css()).encode("utf-8")   # enjekte/* değişince de sürüm değişsin
     return _hashlib.md5(veri, usedforsecurity=False).hexdigest()[:8]  # sürüm etiketi
 
 
@@ -5775,6 +6146,10 @@ async def proxy(full_path: str, request: Request, _user: str = Depends(require_a
         status, headers, out_body = await jobs.handle_control(
             request.method, full_path, request.url.query, body, kaynak=kaynak)
         return Response(content=out_body, status_code=status, headers=headers)
+
+    kesik = kesilen_uc_yaniti(full_path)
+    if kesik:
+        return Response(content=kesik[2], status_code=kesik[0], headers=kesik[1])
 
     gw.touch()
     target = f"{UYAP_BASE}/{full_path}"

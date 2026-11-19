@@ -138,6 +138,29 @@ class AyarlarEkrani:
                                         font=self.app.f_small)
         self.vekil_durum_lbl.pack(anchor="w", pady=(4, 0))
 
+        # ── Kesinleşme Süreleri kartı (2026-11-14) ──
+        kart3 = tk.Frame(wrap, bg=C.CARD, highlightbackground=C.CARD_EDGE,
+                         highlightthickness=1)
+        kart3.pack(fill="x", pady=(16, 0))
+        ic3 = tk.Frame(kart3, bg=C.CARD)
+        ic3.pack(fill="x", padx=20, pady=18)
+        tk.Label(ic3, text="İCRA", bg=C.SAGE_TINT, fg=C.SAGE_DK,
+                 font=self.app.f_small, padx=9, pady=2).pack(anchor="w")
+        tk.Label(ic3, text="Kesinleşme Süreleri", bg=C.CARD, fg=C.INK,
+                 font=self.app.f_card_t).pack(anchor="w", pady=(10, 2))
+        tk.Label(ic3, text="Takip türüne göre itiraz süresi (ilamsız, kambiyo …). Kural "
+                 "değişince kesinleşmeler yeniden hesaplanır.",
+                 bg=C.CARD, fg=C.INK_SOFT, font=self.app.f_body, wraplength=560,
+                 justify="left", anchor="w").pack(anchor="w", pady=(0, 10))
+        tk.Button(ic3, text="Süreleri Düzenle", command=self._kesinlesme_ac,
+                  font=self.app.f_nav_b, bg=C.SAGE, fg="white", relief="flat",
+                  cursor="hand2", padx=14, pady=4, activebackground=C.SAGE_DK,
+                  activeforeground="white").pack(anchor="w")
+
+    def _kesinlesme_ac(self):
+        from modules.kesinlesme_kurallari import KesinlesmeKurallariPenceresi
+        KesinlesmeKurallariPenceresi(self.app)
+
     # ─────────────────────────── kaydet ───────────────────────────
     def _kaydet(self):
         auth = self._auth()

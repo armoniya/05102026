@@ -1,0 +1,14 @@
+# YALNIZ TEST: bos /dev/sdb'yi sabit test parolasiyla LUKS2 kasa yapar ve yeniden baslatir. Claude, 2026-11-14.
+[Unit]
+Description=TEST kasa bicimlendirme
+ConditionVirtualization=microsoft
+ConditionKernelCommandLine=armonia.test_kasa=1
+ConditionPathExists=!/dev/disk/by-partlabel/armonia-kasa
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/armonia/bin/kasa_test_kur.sh
+
+[Install]
+WantedBy=multi-user.target

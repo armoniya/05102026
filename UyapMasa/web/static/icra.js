@@ -154,6 +154,8 @@
       // dosya_core._taraflar_kesinlesme_bilgisi_ekle.
       if (t.kesinlesmeDurumu) satir += " — Kesinleşme: " + t.kesinlesmeDurumu;
       if (t.tebligatDurumu) satir += " — Tebliğ: " + t.tebligatDurumu;
+      // 2026-11-14: UYAP'ın taraf listesinde artık yok (kayıt silinmedi).
+      if (t.uyaptaYok) satir = "⚠" + satir.slice(1) + " — UYAP'TA ARTIK GÖRÜNMÜYOR, kontrol edin";
       s.push(satir);
     });
     return s;

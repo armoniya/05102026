@@ -1,0 +1,23 @@
+- [UYAP tasarımından kopuş](uyap-tasarimindan-kopus.md) — TEMEL İLKE: UYAP'ın hiçbir tasarım/tema öğesi (gri fonlar dahil) kalmaz; "UYAP'ın teması" deme
+- [Mobil imza girişi](mobil-imza-girisi.md) — e-Devlet OAuth akışı incelendi, test kullanıcısı bekleniyor
+- [Kod imzalama / yayın akışı](kod-imzalama.md) — MSI imzasız; /indir = light; static_cache budama tuzağı
+- [Düzeltmeyi doğrula](duzeltmeyi-dogrula.md) — main.js'e karşı test et, kurulu exe'yi güncelle; 4 başarısız deneme dersi
+- [Arayüz sadeleştirme](uyap-arayuz-sadelestirme.md) — tek giriş sağ kenar tutamacı, UYAP düğmelerini örtme yasağı, aşamalar
+- [UYAP kartı (eskidi)](uyap-karti-korunur.md) — yerini kopuş ilkesi aldı; kendi ekran yazarken eklentileri ve hızı koru
+- [Tık/bekleme sevmiyor](tiklama-bekleme-sevmiyor.md) — UYAP klonunda seçimler anında (React setter), fare taklidi değil
+- [Kaynaktan çalışıyor](kaynaktan-calisiyor.md) — 8800'ü python uyap_app.py tutabilir; kurulumdan sonra port sahibini kontrol et
+- [Türkçe yanıt](turkce-yanit.md) — tüm yanıtlar, ara mesajlar ve planlar Türkçe
+- [Mobil arayüz](mobil-arayuz.md) — tam sayfa menüler, yuvarlak sekme düğmesi; küçült düğmesi sorunu açık
+- [Tek arayüz](tek-arayuz.md) — plan: yalnız UYAP + Çoklu UYAP eklentileri; webapp ara ekranı/geçit/UyapMasa yok
+- [Rust derleme / Türkçe yol](rust-derleme-turkce-yol.md) — ruyap portu var; Windows'ta İ'li ev klasörü GNU araç zincirini kırıyor, Linux'ta sorun yok
+- [ruyap port güncel](ruyap-port-guncel.md) — port bugünkü Python ile tam senkron; (enjekte notu eskidi → enjekte-kanonik-ruyap)
+- [Gemini agy ajanı + Linux yol haritası](gemini-agy-ajan.md) — `agy -p` ile Gemini ajan (test edildi); plan docs/ARMONIA_LINUX_YOL_HARITASI.md
+- [Armonia gece durumu](armonia-gece-durum.md) — "devam et / yol haritası" denince: docs/ARMONIA_LINUX_YOL_HARITASI.md ▶ DEVAM NOKTASI (D.0 yarım iş: e-imzalı ISO)
+- [E-imza 5975 teşhisi](eimza-5975-teshis.md) — PIN girişi düşerse önce 5975; 14 Kasım eksik ArkSignerService, yeni Adalet E-imza
+- [Enjekte asıl kopya ruyap'ta](enjekte-kanonik-ruyap.md) — Python rafta; yalnız ruyap/uyap_core/enjekte düzenle, exe yeniden başlat
+- [Armonia logo](armonia-logo.md) — yeni logo varlıkları ruyap/assets; ad hâlâ Çoklu UYAP
+- [UyapMasa veri modeli](uyapmasa-veri-modeli.md) — Aşama 2 temeli: models/icra_models (PostgreSQL), barkod_sorgu türleri, kesinleşme
+- [Şifreli günlük + tepsi](sifreli-gunluk-tepsi.md) — GİZLİ ANAHTAR C:\Users\WİN10\CokluUyap-Gizli; tepsi gizleme ekran dışı; canlı sunucu Python
+- [UyapMasa yalnız örnek](uyapmasa-yalniz-ornek.md) — özellikler ikinci program olmadan ruyap'ta çalışmalı; büyük işte önce plan
+- [Büro veritabanı planı](buro-veritabani-plani.md) — ofiste gömülü PostgreSQL, İş Listesi büroya, buluta veri yok; aşama durumu
+- [Tepsi sade panel](tepsi-sade-panel.md) — programı şişirme; ayarlar web'e; tepsi: giriş → sade panel, PIN tepside

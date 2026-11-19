@@ -1,0 +1,9 @@
+// Armonia: pcscd (karta erisim) YALNIZ e-imza istemcisine (armonia-eimza.service, kullanici 'eimza').
+// Debian varsayilani "aktif oturum = izin" oldugundan kiosk oturumu (uyap_app, labwc) da karta APDU
+// gonderebilirdi -> digerleri ACIKCA reddedilir (guvenlik-denetci E-K1). Claude, 2026-11-14.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.debian.pcsc-lite.access_pcsc" ||
+        action.id == "org.debian.pcsc-lite.access_card") {
+        return subject.user == "eimza" ? polkit.Result.YES : polkit.Result.NO;
+    }
+});

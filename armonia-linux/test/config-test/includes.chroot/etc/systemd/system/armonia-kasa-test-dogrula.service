@@ -1,0 +1,14 @@
+# YALNIZ TEST: 2. acilista test parolasini klavyeden bagimsiz dogrular (cryptsetup --test-passphrase). Claude, 2026-11-14.
+[Unit]
+Description=TEST kasa parola dogrulama
+ConditionVirtualization=microsoft
+ConditionKernelCommandLine=armonia.test_kasa=1
+ConditionPathExists=/dev/disk/by-partlabel/armonia-kasa
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/armonia/bin/kasa_test_dogrula.sh
+
+[Install]
+WantedBy=multi-user.target

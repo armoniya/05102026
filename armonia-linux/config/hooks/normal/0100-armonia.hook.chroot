@@ -1,0 +1,94 @@
+#!/bin/sh
+# Armonia Faz 1 chroot ayarlari: kiosk kullanicisi, servisler, gereksiz zamanlayicilar. Claude, 2026-11-13.
+set -e
+# Kiosk kullanicisi: parolasiz (kilitli), etkilesimli kabuk yok, sudo yok.
+useradd --system --home-dir /var/lib/armonia --create-home --shell /usr/sbin/nologin \
+        --groups video,render,input kiosk
+# Ev dizini includes.chroot'tan (labwc ayarlari) once olusmus olabilir: dizini kiosk'a ver,
+# .config ise root'ta kalsin (kiosk kendi kabuk ayarini degistiremez).
+chown kiosk:kiosk /var/lib/armonia; chmod 0700 /var/lib/armonia
+chown -R root:root /var/lib/armonia/.config; chmod -R u=rwX,go=rX /var/lib/armonia/.config
+install -d -o kiosk -g kiosk -m 0700 /var/lib/armonia/cokluuyap
+# XDG_CONFIG_HOME + evrak klasoru (kasa yoksa RAM'de; kasa baglaninca kasadakiler ustune gelir)
+install -d -o kiosk -g kiosk -m 0700 /var/lib/armonia/CokluUyap /var/lib/armonia/CokluUyap/config /var/lib/armonia/CokluUyap/Evrak /var/lib/armonia/CokluUyap/chromium
+ln -sfn /opt/armonia/cokluuyap/webapp /var/lib/armonia/cokluuyap/webapp
+chmod 0755 /opt/armonia/bin/*.sh
+chown -R root:root /opt/armonia
+chmod -R go-w /opt/armonia /etc/systemd/system/armonia-*.service /etc/systemd/network
+# Denetim: kok dosya sisteminde herkese-yazilabilir dosya kalmasin (sticky /tmp haric)
+if find / -xdev -type f -perm -0002 2>/dev/null | grep -q .; then
+  echo "UYARI: herkese-yazilabilir dosyalar:"; find / -xdev -type f -perm -0002 2>/dev/null | head
+fi
+ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime
+printf '127.0.0.1 localhost\n127.0.1.1 armonia\n' > /etc/hosts
+systemctl set-default graphical.target
+systemctl enable armonia-kiosk.service armonia-olcum.service systemd-networkd.service systemd-resolved.service nftables.service
+# Tarayici istek soketi (Chromium kiosk biriminin disinda, kendi kum havuzunda) ve USB aygit politikasi
+systemctl enable armonia-tarayici.socket usbguard.service
+# trixie'de usbguard-dbus ayni pakette ve kendini etkinlestiriyor: D-Bus/Polkit uzerinden kural degistirme yuzeyi
+# (Gemini taslagi da kurulmamasini istiyordu). Kiosk'ta yonetim yalniz root CLI ile.
+systemctl mask usbguard-dbus.service
+# guvenlik-denetci Y2: tarayici birimi kiosk'un systemd --user / D-Bus soketlerine erisemesin
+# (StartTransientUnit ile kum havuzu disinda komut). %U system biriminde 0'a cozulur -> UID burada yazilir.
+U=$(id -u kiosk); install -d -m 0755 /etc/systemd/system/armonia-tarayici@.service.d
+printf '# Hook uretti (kiosk UID=%s). guvenlik-denetci Y2/EK-Y1: /run/user tmpfs icine yalniz bu soketler.\n[Service]\nBindPaths=/run/user/%s/wayland-0 -/run/user/%s/pulse/native -/run/user/%s/pipewire-0\n' \
+  "$U" "$U" "$U" "$U" > /etc/systemd/system/armonia-tarayici@.service.d/20-calisma.conf
+# E-imza (Adalet E-imza, config/packages.chroot/adalet-eimza-tray_*.deb): ayri sistem kullanicisi, gruplarsiz
+if [ -x /usr/lib/adalet-eimza-tray/bin/adalet-eimza-tray ]; then
+  useradd --system --no-create-home --home-dir /var/lib/armonia-eimza --shell /usr/sbin/nologin eimza
+  # Paketin kendi --user birimi (tepsi, X11) ve apt deposu kullanilmaz; guncelleme yeni ISO ile gelir
+  rm -f /usr/lib/systemd/user/adalet-eimza-tray.service /etc/apt/sources.list.d/adalet-eimza-tray.sources \
+        /etc/apt/trusted.gpg.d/adalet-eimza-tray.asc /usr/share/applications/tr.gov.adalet.eimza-tray.desktop
+  chmod 0644 /etc/polkit-1/rules.d/50-armonia-eimza.rules
+  systemctl enable armonia-eimza.service pcscd.socket
+  # E-O4: paketin apt deposu / --user birimi imajda kalmamali
+  if ls /etc/apt/sources.list.d/ /usr/lib/systemd/user/ | grep -qi eimza; then echo "HATA: e-imza deposu/birimi kaldi"; exit 1; fi
+else
+  echo "HATA: adalet-eimza-tray kurulmamis"; exit 1
+fi
+# Ses: PipeWire kiosk'un kullanici oturumunda (paket on ayari zaten acar; acikca garanti edilir)
+systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service
+# USBGuard: kurallar ve ayar yalniz root'a (paket postinst'in urettigi kural dosyasi imajdakiyle degisir)
+if [ -d /etc/usbguard ]; then
+  chown -R root:root /etc/usbguard; chmod 0700 /etc/usbguard
+  chmod 0600 /etc/usbguard/usbguard-daemon.conf /etc/usbguard/rules.conf
+  install -d -m 0700 /etc/usbguard/IPCAccessControl.d /var/log/usbguard
+  grep -q '^reject$' /etc/usbguard/rules.conf && grep -q '^# Armonia USBGuard servis ayari' /etc/usbguard/usbguard-daemon.conf \
+    || { echo "HATA: usbguard ayarlari Armonia surumu degil (paket uzerine yazmis olabilir)"; exit 1; }
+fi
+# live-config gerekmiyor; fail-safe girdisiyle varsayilan "user"/sudo olusturabiliyordu (guvenlik-denetci Y1)
+apt-get purge -y live-config live-config-systemd || true
+# Acilisi yavaslatan / kiosk icin gereksiz birimler
+systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer \
+  e2scrub_reap.service fstrim.timer dpkg-db-backup.timer systemd-networkd-wait-online.service \
+  getty@tty1.service live-config.service networking.service
+# Faz 2 kasa: wall ajani ExecStartPre'de Plymouth parola ajanini durduruyor; crypttab 'nofail' oldugundan
+# acilis kasayi beklemeden ilerleyince yanlis paroladan sonra parola bir daha sorulmuyordu (Hyper-V 3. deneme).
+systemctl mask systemd-ask-password-wall.path systemd-ask-password-wall.service
+# Faz 3 AppArmor: uyap_app profili derlemede sozdizimi denetiminden gecmeli (hata -> derleme durur)
+if [ -f /etc/apparmor.d/opt.armonia.cokluuyap.uyap_app ]; then
+  apparmor_parser -Q -K /etc/apparmor.d/opt.armonia.cokluuyap.uyap_app
+  ls /etc/apparmor.d/abstractions/ | grep -E '^(wayland|dri-common|dri-enumerate|mesa)$' | tr '\n' ' '; echo "<- mevcut soyutlamalar"
+  # Imajda olmayan programlarin ~100 profili (firefox, chrome, lxc, sbuild...) acilista bosuna derlenmesin:
+  # yalniz dosyalar silinir (abstractions/, tunables/, abi/ dizinleri kalir)
+  find /etc/apparmor.d -maxdepth 1 -type f ! -name opt.armonia.cokluuyap.uyap_app -delete
+fi
+# Faz 2 PostgreSQL: Debian'in imaja kurdugu varsayilan kume (RAM'de, kalici degil) kaldirilir; Debian servisleri
+# maskelenir. Sunucu kasada armonia-postgresql.service ile calisir (kiosk Wants= ile ceker).
+if command -v pg_lsclusters >/dev/null; then
+  pg_lsclusters -h | while read -r surum ad _; do pg_dropcluster --stop "$surum" "$ad" || true; done
+  # guvenlik-denetci O2: silme dogrulanir, artik dizinler temizlenir
+  [ -z "$(pg_lsclusters -h)" ] || { echo "HATA: Debian PostgreSQL kumesi silinemedi"; exit 1; }
+  rm -rf /etc/postgresql/*/ /var/lib/postgresql/*/
+  systemctl mask postgresql.service 'postgresql@.service'
+  # O3: ssl-cert'in derlemede bir kez urettigi (her cihazda AYNI) snakeoil anahtari kaldirilir
+  rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem
+  gpasswd -d postgres ssl-cert 2>/dev/null || true
+  # D1: soket postgres grubunda 0770; kiosk bu grubun uyesi. (unix_socket_group=kiosk chown gerektiriyordu ve
+  # seccomp ~@privileged chown'u engelledi - Hyper-V 04:23.) PG veri dizini 0700 -> grup uyeligi veriye erisim vermez.
+  usermod -aG postgres kiosk
+fi
+# Faz 2: Armonia Plymouth temasi (kasa parolasi ekrani); initramfs yeniden uretilir
+if [ -f /usr/share/plymouth/themes/armonia/armonia.plymouth ] && command -v plymouth-set-default-theme >/dev/null; then
+  plymouth-set-default-theme -R armonia
+fi

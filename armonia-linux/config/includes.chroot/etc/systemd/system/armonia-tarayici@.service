@@ -1,0 +1,74 @@
+# Armonia: Chromium (Debian paketi + /etc/chromium/policies/managed/armonia.json), kiosk kullanicisinin
+# Wayland oturumunda. Kiosk servisinden AYRI kum havuzu: Chromium kendi namespace + seccomp-bpf kum havuzunu
+# kurabilsin diye 'user pid net' ad alanlarina ve chroot/capset'e izin verilir; geri kalan systemd kisitlari
+# kiosk birimiyle ayni cizgide. Ilk istek tarayiciyi baslatir (bu ornek tarayici kapanana kadar yasar);
+# sonraki istekler Chromium'un tekil-ornek (singleton) soketiyle acik pencereye iletilir ve hemen biter
+# (singleton soketi PrivateTmp disinda, TMPDIR=profil/tmp — guvenlik-denetci O1).
+# Claude, 2026-11-14.
+[Unit]
+Description=Armonia tarayici (Chromium)
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+User=kiosk
+Group=kiosk
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+# guvenlik-denetci E-Y1: kendi dilimi + baslarken 5975/8843 ret kurali (slice ancak simdi var, cgroup yolu cozulur)
+Slice=armonia-tarayici.slice
+ExecStartPre=+/usr/sbin/nft -f /opt/armonia/nft/tarayici_yerel.nft
+ExecStart=/opt/armonia/bin/tarayici.sh
+# Tarayici kapaninca kalintilari temizle
+KillMode=control-group
+TimeoutStopSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Profil/onbellek kasada (kasa yoksa RAM); Wayland soketi /run/user/<uid>; indirmeler Evrak klasorune
+ReadWritePaths=-/var/lib/armonia/CokluUyap/chromium -/var/lib/armonia/CokluUyap/Evrak
+# guvenlik-denetci EK-Y1: /run/user bos bir tmpfs; icine yalniz wayland-0, pulse/native, pipewire-0 soketleri
+# baglanir (hook'un UID'yi yazdigi 20-calisma.conf). Kiosk'un D-Bus oturum veriyolu ve systemd --user
+# soketleri bu birimde YOK (StartTransientUnit ile kum havuzundan kacis kapali).
+TemporaryFileSystem=/run/user:mode=0755
+PrivateTmp=yes
+InaccessiblePaths=-/home -/root -/srv/kasa -/var/lib/armonia/cokluuyap -/var/lib/armonia/CokluUyap/config
+# guvenlik-denetci Y1: User=kiosk ek gruplari (postgres, input) da getirir; bu birimde AppArmor yok ->
+# PostgreSQL soketi ve klavye olaylari (PIN!) kapatilir. /run/user/<uid>/bus: hook'un 20-bus.conf'u (Y2).
+InaccessiblePaths=-/run/postgresql -/run/armonia -/dev/input -/run/pcscd
+# guvenlik-denetci O1: resolved stub/varlink soketi tarayicidan gorunmesin (DNS gerekmiyor; nft 53 reddi ile birlikte)
+InaccessiblePaths=-/run/systemd/resolve
+DevicePolicy=closed
+# GPU (DRM) ve E-Durusma kamera (V4L2). Ses /dev/snd ile DEGIL, PipeWire soketiyle (EK-O1).
+DeviceAllow=char-drm rw
+DeviceAllow=char-video4linux rw
+# guvenlik-denetci Y3: tarayici yalniz yerel vekile (127.0.0.1:8800) baglanir; UYAP'a dogrudan cikis vekili ve
+# kill-switch'i atlatirdi. E-Durusma goruntusu dis bir medya/TURN sunucusuna gidiyorsa gercek testte
+# o adresler IPAddressAllow= ile acilacak (DOGRULANMADI).
+IPAddressAllow=localhost
+IPAddressDeny=any
+LimitCORE=0
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+KeyringMode=private
+UMask=0077
+SystemCallArchitectures=native
+# Bos sinir kumesi: yeni kullanici ad alaninda cekirdek yetenekleri zaten yeniden verir (Chromium kum havuzu
+# bunu kullanir); ana ad alaninda hicbir yetenek yok.
+CapabilityBoundingSet=
+# Chromium namespace kum havuzu: CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET
+RestrictNamespaces=user pid net
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# V8 JIT -> MemoryDenyWriteExecute KAPALI. @privileged/@mount yasaklanmaz: kum havuzu chroot + capset kullanir;
+# Chromium'un kendi seccomp-bpf filtresi oluk sureclerde (renderer) daha dar bir liste uygular.
+SystemCallFilter=~@obsolete @swap @reboot @module @raw-io @cpu-emulation @debug @clock
+SystemCallErrorNumber=EPERM

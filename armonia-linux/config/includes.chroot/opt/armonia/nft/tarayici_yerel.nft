@@ -1,0 +1,11 @@
+# armonia-tarayici@.service ExecStartPre (root) ile yuklenir. Tarayici (Chromium) e-imza istemcisine (5975,
+# kimlik dogrulamasiz; kart kilitleme/sertifika okuma) ve LAN TLS'e (8843) baglanamaz. guvenlik-denetci E-Y1.
+# Claude, 2026-11-14.
+flush chain inet filter tarayici_yerel
+# systemd'de "-" hiyerarsi demek: armonia-tarayici.slice, armonia.slice'in COCUGU -> cgroup yolu
+# armonia.slice/armonia-tarayici.slice (seviye 2). "level 1 armonia-tarayici.slice" Hyper-V'de (14 Kasim 11:40)
+# "cgroupv2 path fails" verdi ve tarayici birimi hic baslamadi.
+add rule inet filter tarayici_yerel socket cgroupv2 level 2 "armonia.slice/armonia-tarayici.slice" tcp dport { 5975, 8843 } reject with tcp reset
+# guvenlik-denetci O1 (2026-11-14): resolv.conf artik resolved'a (127.0.0.53) bagli; tarayicinin DNS'e ihtiyaci
+# yok (yalniz 127.0.0.1:8800) -> DNS tuneliyle veri sizdirma kanali kapatilir
+add rule inet filter tarayici_yerel socket cgroupv2 level 2 "armonia.slice/armonia-tarayici.slice" meta l4proto { tcp, udp } th dport 53 reject

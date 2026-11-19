@@ -8,7 +8,9 @@ olmaz." Barkod turu, sabit kategorilere uymayan tebligatta zarftaki "BU ZARFTA
 sıra cetveli ve derece kararı", "4-5 ÖRNEK İCRA EMRİ VE İLAM SURETİ"). Bu modül:
   • ham yazılışları tarih/yazım farkından bağımsız GRUPLAR (`anahtar`),
   • kullanıcının "Tür Eşleştir" penceresinde (barkod_sorgu_ekrani) her grup için
-    seçtiği türü `%LOCALAPPDATA%\\UyapMasa\\tur_eslestirme.json`'a kaydeder,
+    seçtiği türü veritabanına (TebligatTurEslesmesi — 2026-11-14'ten beri, bürodaki
+    tüm bilgisayarlar ortak) ve yedek olarak `%LOCALAPPDATA%\\UyapMasa\\
+    tur_eslestirme.json`'a kaydeder,
   • mevcut kayıtlara uygular (yedekli) ve barkod_sorgu sonraki turlarda aynı
     yazılışı otomatik olarak o türe çevirir (`eslestir`).
 "Belirsiz"/boş kayıtlarda ham ad, kaydın KENDİ mazbata açıklamasındaki belge
@@ -56,11 +58,12 @@ def anahtar(ham):
 
 
 _ONBELLEK = {"mtime": None, "veri": None}
+_DB_ONBELLEK = {"zaman": 0.0, "veri": None}
+_DB_ONBELLEK_SN = 60   # başka bilgisayarın kararı en geç bu kadar sonra görülür
 
 
-def oku():
-    """Eşleştirme dosyası — barkod turu her tebligatta çağırdığı için dosya
-    değişmedikçe bellekten döner."""
+def _json_oku():
+    """Yerel JSON (veritabanı yoksa ya da eski kurulumda) — dosya değişmedikçe bellekten."""
     try:
         mtime = os.path.getmtime(_yol())
     except OSError:
@@ -78,11 +81,82 @@ def oku():
     return {"eslesmeler": dict(v["eslesmeler"]), "kategoriler": list(v["kategoriler"])}
 
 
-def _yaz(d):
+def _json_yaz(d):
     gecici = _yol() + ".tmp"
     with open(gecici, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=1, sort_keys=True)
     os.replace(gecici, _yol())
+
+
+def _json_bir_kez_aktar(Eslesme, Kategori):
+    """2026-11-14: kararlar artık veritabanında (bürodaki tüm bilgisayarlar
+    ortak görür). Bu bilgisayardaki eski JSON'da olup veritabanında OLMAYAN
+    kararlar bir kez eklenir (veritabanındaki karar ezilmez); sonra işaret
+    dosyası yazılır. JSON yedek olarak yerinde kalır."""
+    isaret = _yol() + ".veritabanina_aktarildi"
+    if os.path.exists(isaret) or not os.path.exists(_yol()):
+        return
+    d = _json_oku()
+    for a, tur in d["eslesmeler"].items():
+        if a and tur:
+            Eslesme.objects.get_or_create(anahtar=a, defaults={"tur": tur})
+    for k in d["kategoriler"]:
+        if k and k not in TEMEL_TURLER:
+            Kategori.objects.get_or_create(ad=k)
+    with open(isaret, "w", encoding="utf-8") as f:
+        f.write(datetime.datetime.now().isoformat())
+
+
+def _db_modelleri():
+    try:
+        dosya_core._django_hazirla()
+        from icra_models.models import TebligatTurEslesmesi, TebligatTurKategorisi
+        return TebligatTurEslesmesi, TebligatTurKategorisi
+    except Exception:
+        return None
+
+
+def oku():
+    """Eşleştirmeler: veritabanından (60 sn önbellekli — barkod turu her
+    tebligatta çağırıyor); veritabanı yoksa yerel JSON."""
+    import time
+    v = _DB_ONBELLEK["veri"]
+    if v is not None and time.monotonic() - _DB_ONBELLEK["zaman"] < _DB_ONBELLEK_SN:
+        return {"eslesmeler": dict(v["eslesmeler"]), "kategoriler": list(v["kategoriler"])}
+    modeller = _db_modelleri()
+    if modeller is None:
+        return _json_oku()
+    Eslesme, Kategori = modeller
+    try:
+        _json_bir_kez_aktar(Eslesme, Kategori)
+        v = {"eslesmeler": dict(Eslesme.objects.values_list("anahtar", "tur")),
+             "kategoriler": list(Kategori.objects.values_list("ad", flat=True))}
+    except Exception:
+        return _json_oku()
+    _DB_ONBELLEK.update(zaman=time.monotonic(), veri=v)
+    return {"eslesmeler": dict(v["eslesmeler"]), "kategoriler": list(v["kategoriler"])}
+
+
+def _yaz(d, yeniler=None):
+    """Kararları veritabanına yazar (yoksa yalnız JSON); JSON her durumda yerel yedek.
+    `yeniler` verilirse veritabanına yalnız onlar yazılır — önbellekteki eski bir
+    değer başka bilgisayarın yeni kararını ezmesin."""
+    modeller = _db_modelleri()
+    if modeller is not None:
+        Eslesme, Kategori = modeller
+        try:
+            for a, tur in (yeniler if yeniler is not None else d["eslesmeler"]).items():
+                Eslesme.objects.update_or_create(anahtar=a, defaults={"tur": tur})
+            for k in d["kategoriler"]:
+                if k not in TEMEL_TURLER:
+                    Kategori.objects.get_or_create(ad=k)
+        except Exception:
+            pass
+        _DB_ONBELLEK.update(zaman=0.0, veri=None)
+    try:
+        _json_yaz(d)
+    except OSError:
+        pass
 
 
 def kategoriler():
@@ -165,7 +239,7 @@ def uygula(yeni_eslesmeler=None, log_fn=None):
         if tur not in TEMEL_TURLER and tur not in d["kategoriler"]:
             d["kategoriler"].append(tur)
     if yeni_eslesmeler:
-        _yaz(d)
+        _yaz(d, {a: d["eslesmeler"][a] for a in yeni_eslesmeler if a in d["eslesmeler"]})
     if not d["eslesmeler"]:
         return 0
     dosya_core._django_hazirla()

@@ -86,3 +86,6 @@ zs_files/
 **/zs_files/
 zs_vapid.key
 **/zs_vapid.key
+
+# ── Armonia: üçüncü parti büyük ikili paket (70 MB; resmî kaynaktan indirilir, bkz. docs/GUNCEL_DURUM_2026-11-19.md) ──
+armonia-linux/config/packages.chroot/*.deb

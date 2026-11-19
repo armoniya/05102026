@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Armonia
+Description=Armonia acilis ve kasa (LUKS2) parola ekrani
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/armonia
+ScriptFile=/usr/share/plymouth/themes/armonia/armonia.script

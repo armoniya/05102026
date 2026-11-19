@@ -1,0 +1,8 @@
+# YALNIZ TEST: canli sistemde lynis taramasi; sonucu olcum betigi seri porta yazar. Claude, 2026-11-14.
+[Unit]
+Description=TEST lynis taramasi
+After=armonia-kiosk.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/armonia/bin/lynis_test.sh

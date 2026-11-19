@@ -59,6 +59,21 @@ pub static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
 });
 
 static REFRESHING: Lazy<SyncMutex<HashSet<String>>> = Lazy::new(|| SyncMutex::new(HashSet::new()));
+// İçeriksiz bildirim sinyali (is_isaret.rs): yalnız sunucu gerçek kimlik doğrulaması bildirdiğinde (joined +
+// ticket_key) dolu; bağlantı kopunca boşalır.
+static ISARET_KANALI: Lazy<SyncMutex<Option<mpsc::UnboundedSender<WsMessage>>>> = Lazy::new(|| SyncMutex::new(None));
+
+pub fn isaret_bagli() -> bool {
+    ISARET_KANALI.lock().is_some()
+}
+
+/// `{"type":"isaret","hesap":…,"tur":…}` — içerik yok; bulut hesabın bu ofise ait olduğunu denetler.
+pub fn isaret_gonder(hesap: &str, tur: &str) -> bool {
+    match ISARET_KANALI.lock().as_ref() {
+        Some(tx) => tx.send(WsMessage::Text(json!({"type": "isaret", "hesap": hesap, "tur": tur}).to_string())).is_ok(),
+        None => false,
+    }
+}
 static ACTIVE_DOWNLOADS: Lazy<AsyncMutex<HashMap<String, Arc<Notify>>>> =
     Lazy::new(|| AsyncMutex::new(HashMap::new()));
 
@@ -862,6 +877,7 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                     .and_then(|s| hex::decode(s).ok());
                                 if room_ticket_key.is_some() {
                                     println!("[*] Bulgu #6 savunma-derinliği: bilet doğrulaması AKTİF (signaling gerçek kimlik doğrulaması bildirdi).");
+                                    *ISARET_KANALI.lock() = Some(ws_tx.clone());
                                 }
                             } else if matches!(mtype, "offer" | "relay_hello" | "relay")
                                 && !_ticket_ok(room_ticket_key.as_deref(), &msg)
@@ -952,6 +968,7 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                 for (_, s) in relay_senders.drain() {
                     s.close();
                 }
+                *ISARET_KANALI.lock() = None;
                 writer_task.abort();
 
                 if fatal_error {
@@ -998,6 +1015,8 @@ pub async fn run_office(mut args: OfficeArgs) -> Result<(), String> {
     // İş Listesi: bu bilgisayardaki isteklerin sahibi (paylaşımı başlatan hesap) + büro üyeleri (ad, rol).
     crate::kimlik::ofis_hesabi_ayarla(&crate::kimlik::hesap_adi(&user, &args.office_code));
     tokio::spawn(crate::is_api::uyeleri_esitle());
+    // Telegram / telefon için içeriksiz bildirim sinyali (plan L6).
+    crate::is_isaret::baslat();
     // UYAP oturumunu ilk istekte değil hemen aç (durum satırı "kuruldu"yu ya da hatayı göstersin).
     tokio::spawn(uyap_proxy::oturumu_hemen_ac());
 

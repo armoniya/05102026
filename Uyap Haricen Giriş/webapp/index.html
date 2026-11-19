@@ -394,7 +394,9 @@
       });
 
       // Menü, bağlantı kurulup UYAP açıldığında görünür olur.
-      window.__uyapShowFab = function () { fab.classList.add("ready"); };
+      // 2026-11-11 kullanıcı kararı: hızlı menü (yeşil "+") gösterilmez; kısayolları yer tutucuydu, mobilde
+      // içeriği örtüyordu. Ana sayfa / görev çubuğu ve çekmece aynı işleri görüyor.
+      window.__uyapShowFab = function () {};
     })();
   </script>
 
@@ -622,15 +624,10 @@
         if (tunnelReady) {
           setDot("ok");
           dashMsg.textContent = "Paylaşılan bağlantı aktif.";
-          dashNote.textContent = "Güvenli tünel kuruldu; UYAP kullanıma hazır.";
-          dashPrimary.textContent = "UYAP'ı Aç";
-          dashPrimary.style.display = "";
-          // İleride bu menüden otomasyon modülleri (takip açılış, sorgular) çalışacak —
-          // bkz uyap_gecit/web/gecit/templates/gecit/dashboard.html.
-          dashGecit.textContent = "Geçidi Aç";
-          dashGecit.style.display = "";
-          dashGecit.onclick = function (e) { e.preventDefault(); openGecit(); };
-          dashPrimary.onclick = openApp;
+          // 2026-11-11 kullanıcı kararı: tek arayüz (UYAP + Çoklu UYAP eklentileri). "UYAP'ı Aç / Geçidi Aç"
+          // ara ekranı gösterilmez; tünel hazır olunca UYAP kendiliğinden açılır.
+          dashNote.textContent = "UYAP açılıyor…";
+          openApp();
           return;
         }
         if (officeOnline) {

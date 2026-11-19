@@ -30,7 +30,6 @@ use sha2::Sha256;
 use tokio::sync::Mutex as AsyncMutex;
 use zip::ZipArchive;
 
-use crate::is_listesi;
 use crate::jobs;
 use crate::runtime::{interactive_write, is_write_method, uyap_istek_izi};
 use crate::uyap_giris_disaridan as uyap_login;
@@ -59,6 +58,13 @@ static GECIT_STATIC_ROOT: Lazy<PathBuf> = Lazy::new(|| {
     }
     base.join("uyap_gecit").join("web").join("gecit").join("static")
 });
+
+/// Kaldırılan eski İş Listesi yolları (`/__uyap_kisi__/is-listesi…`, `dosya-ac`, `ptt`).
+fn _eski_is_listesi_yolu(path: &str) -> bool {
+    let p = format!("/{}", path.trim_start_matches('/'));
+    p == "/__uyap_kisi__/is-listesi" || p.starts_with("/__uyap_kisi__/is-listesi/")
+        || p == "/__uyap_kisi__/dosya-ac" || p == "/__uyap_kisi__/ptt"
+}
 
 pub fn is_gecit_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
@@ -2214,7 +2220,12 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
 
     // ── Sunucu ──
     async function api(yol, opts) {
-        const r = await window.fetch(EP + yol, Object.assign({ cache: 'no-store' }, opts || {}));
+        // Zaman sınırı: telefon ↔ bulut tünelinde yanıtsız kalan tek istek ilerlemeyi kalıcı donduruyordu (5/164).
+        const ks = typeof AbortController === 'function' ? new AbortController() : null;
+        const zs = ks ? setTimeout(function() { ks.abort(); }, 15000) : 0;
+        let r;
+        try { r = await window.fetch(EP + yol, Object.assign({ cache: 'no-store' }, ks ? { signal: ks.signal } : {}, opts || {})); }
+        finally { clearTimeout(zs); }
         let j = null;
         try { j = await r.json(); } catch (e) {}
         if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
@@ -2917,13 +2928,11 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
 })();
 
 // ── İŞ LİSTESİ ───────────────────────────────────────────────────────────────────────
-// Dosya kartına "İş Ata": o dosyanın işleri + yeni iş formu (iş UYAP dosyasına bağlanır).
-// Sol altta "İş Listesi": uzak tarayıcıda doğrudan siteyi açar; yerel kurulumda SSO köprüsünü
-// kullanır. İş atama istekleri yerel köprüye (/__uyap_kisi__/is-listesi) gider.
+// Dosya kartına "İş Ata": o dosyanın işleri + yeni iş formu (iş UYAP dosyasına bağlanır). Veri büro
+// veritabanında (/__cu__/veri/is/, enjekte/isler.js); buluttaki eski İş Listesi'ne bağlantı 17.11.2026'da kaldırıldı.
 (function() {
     // Dışarıdan (cokluuyap.com, tarayıcıdan) girişte UYAP, sitenin kabuğundaki #app çerçevesinde açılır ve
-    // istekler ofise tünellenir. Orada yerel köprü (/__uyap_kisi__) yok: işler sitenin kendi İş Listesi
-    // API'sine kişinin site oturumuyla (sol alttaki "İş Listesi" girişi) gider; /is-listesi/ tünele girmez (sw.js).
+    // istekler (iş uçları dahil) ofise tünellenir.
     function kabukCercevesi() {
         try { return window.top !== window && window.parent === window.top && !!window.frameElement && window.frameElement.id === 'app'; }
         catch (e) { return false; }
@@ -2931,17 +2940,15 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     const UZAK = kabukCercevesi();
     // Panel / sağ menü yalnız ana çerçevede kurulur (UYAP'ın iç çerçevelerinde ikincisi olmasın).
     function anaCerceve() { return window.top === window || UZAK; }
-    const EP = UZAK ? '/is-listesi/api' : '/__uyap_kisi__/is-listesi';
     const DURUM = { acik: 'Açık', devam: 'Devam ediyor', onayda: 'Onayda', onaylandi: 'Onaylandı', tamamlandi: 'Tamamlandı' };
     let ben = null;            // {me, people, office} — ilk açılışta alınır
 
-    // 2026-11-16: İş Listesi büro veritabanına taşındı (enjekte/isler.js, /__cu__/veri/is/). Yeni sayfa yüklüyse
-    // bu bloğun bulut bağlantıları kullanılmaz: dosyanın işleri yeni uçlardan okunur (kart rozeti, mor bant,
+    // 2026-11-16: İş Listesi büro veritabanına taşındı (enjekte/isler.js, /__cu__/veri/is/): dosyanın işleri
+    // bu uçlardan okunur (kart rozeti, mor bant,
     // belge işaretleri). "İş ata" kartın üstündeki pencerede kalır (yeni uçlara kaydeder; "Geniş formda aç" ile
     // sayfaya geçilir), "İşleri göster" yan çekmecede açılır ("Geniş ekranda" ile sayfaya). Banttaki hızlı düğmeler
     // (onaya gönder / tamamla, ertesi güne aktar, onayla / reddet) yeni uçlara bağlıdır (yeni* pencereler);
     // yetkiyi sunucu denetler. Aktarma talebine karar yeni sayfadaki iş panelinde verilir.
-    function YENI() { return !!window.__cuIsAta; }
     async function yeniIstek(uc) {
         const r = await window.fetch('/__cu__/veri/is/' + uc, { cache: 'no-store', credentials: 'same-origin' });
         let j = null;
@@ -2971,7 +2978,9 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const k = g.uyap_karti || {};
         const p = String(g.son_tarih || '').split('-').map(Number);
         const due = p.length === 3 ? Math.floor(new Date(p[0], p[1] - 1, p[2], 17, 0).getTime() / 1000) : null;
-        return { _yeni: true, id: g.id, title: g.baslik, status: g.durum, priority: g.oncelik, due_at: due,
+        const hm = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(g.hatirlatma || '');
+        const hatirlatma = hm ? Math.floor(new Date(+hm[1], hm[2] - 1, +hm[3], +hm[4], +hm[5]).getTime() / 1000) : null;
+        return { _yeni: true, id: g.id, reminder_at: hatirlatma, title: g.baslik, status: g.durum, priority: g.oncelik, due_at: due,
                  evrak_id: k._evrak || null, evrak_adi: g.evrak_adi || null, taraf_adi: g.taraf_adi || null, barkod: g.barkod || null,
                  ext_pending: !!g.erteleme_bekliyor, assignee_id: g.sorumlu_id, assignee_name: g.sorumlu_adi,
                  parent_id: g.ust_gorev_id || null, is_private: !!g.gizli, created_by: g.olusturan_id, onay_gerekir: !!g.onay_gerekir,
@@ -2996,41 +3005,10 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
 
     // UYAP'ın dosyaId'si oturuma bağlı (her girişte değişir): iş ↔ dosya eşleşmesi birim + dosya no ile.
     function dosyaAnahtari(d) { return String(d.birimId || '') + '|' + String(d.dosyaNo || '').trim(); }
-    function ayniDosya(t, d) {
-        if (t.birim_id && t.dosya_no) {
-            return String(t.birim_id) === String(d.birimId || '') && String(t.dosya_no).trim() === String(d.dosyaNo || '').trim();
-        }
-        return String(t.dosya_id) === String(d.dosyaId);
-    }
     async function dosyaninIsleri(d) {
-        if (YENI()) {
-            const q = new URLSearchParams({ gorunum: 'tum', durum: 'acik,devam,onayda', dosya_no: String(d.dosyaNo || '').trim(),
-                                            birim_adi: d.birimAdi || '', sinir: '100' });
-            return (await yeniIstek('liste?' + q.toString())).map(eskiBicim);
-        }
-        // birim + dosya no varsa yalnız onlar gider: bunları tanımayan eski sunucu süzmeden büronun
-        // (yöneticide tüm, üyede kendi) işlerini döndürür ve aşağıdaki süzgeç dosyayı ayırır.
-        const p = d.birimId && d.dosyaNo
-            ? new URLSearchParams({ birim_id: String(d.birimId), dosya_no: String(d.dosyaNo).trim() })
-            : new URLSearchParams({ dosya_id: String(d.dosyaId || '') });
-        const j = await api('/tasks?' + p.toString());
-        return (j.tasks || []).filter(function(t) { return ayniDosya(t, d); });
-    }
-
-    async function api(yol, opts) {
-        const o = Object.assign({ cache: 'no-store' }, opts || {});
-        if (UZAK) {
-            // Site API'si: oturum çerezi + X-ZS başlığı. Dosyanın işleri köprüdeki gibi "tümü" süzgeciyle.
-            o.credentials = 'same-origin';
-            o.headers = Object.assign({ 'X-ZS': '1' }, o.headers || {});
-            if (/^\/tasks\?/.test(yol) && /(^|[?&])(birim_id|dosya_id)=/.test(yol) && !/[?&]filtre=/.test(yol)) yol += '&filtre=tumu';
-        }
-        const r = await window.fetch(EP + yol, o);
-        let j = null;
-        try { j = await r.json(); } catch (e) {}
-        if (UZAK && r.status === 401) throw new Error('İş Listesi oturumu yok: sol alttaki "İş Listesi" düğmesinden giriş yapın.');
-        if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || ('HTTP ' + r.status));
-        return j;
+        const q = new URLSearchParams({ gorunum: 'tum', durum: 'acik,devam,onayda', dosya_no: String(d.dosyaNo || '').trim(),
+                                        birim_adi: d.birimAdi || '', sinir: '100' });
+        return (await yeniIstek('liste?' + q.toString())).map(eskiBicim);
     }
     function el(tag, css, metin) {
         const e = document.createElement(tag);
@@ -3051,69 +3029,36 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     // İş Listesi'ni yeni sekmede açar; işNo verilirse doğrudan o iş.
     function isAc(isNo) {
-        if (YENI()) {
-            if (typeof isNo === 'number' && window.__cuIsGoster) window.__cuIsGoster(isNo);
-            else if (window.__cuIslerAc) window.__cuIslerAc();
-            return;
-        }
-        const host = location.hostname;
-        const yerel = host === '127.0.0.1' || host === 'localhost' || host === '::1';
-        const no = typeof isNo === 'number' ? isNo : null;
-        window.open(yerel ? EP + '/ac' + (no ? '?is=' + no : '') : '/is-listesi/' + (no ? '#is-' + no : ''),
-                    '_blank', 'noopener');
+        if (typeof isNo === 'number' && window.__cuIsGoster) window.__cuIsGoster(isNo);
+        else if (window.__cuIslerAc) window.__cuIslerAc();
     }
     function ac() { isAc(null); }
 
-    // Kişinin kendisi + büro kişileri (/me): bant ve paneldeki "Onaya gönder" için; 5 dk saklanır.
+    // Kişinin kendisi + büro kişileri: bant ve paneldeki "Onaya gönder" için; 5 dk saklanır.
     let benZamani = 0;
     async function beniGetir(zorla) {
-        if (YENI()) {
-            if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await yeniBen(); benZamani = Date.now(); }
-            return ben;
-        }
-        if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await api('/me'); benZamani = Date.now(); }
+        if (zorla || !ben || Date.now() - benZamani > 300000) { ben = await yeniBen(); benZamani = Date.now(); }
         return ben;
     }
 
     // ── UYAP'tan çıkmadan işi bitirme: "Onaya gönder" (özel işte "Tamamla") ──
-    // Yalnız işe atanan kişi, açık / devam eden ana işi onaya gönderir (sunucu da denetler).
-    function isAtanan(t) {
-        const kim = t.assignees && t.assignees.length ? t.assignees : [t.assignee_id];
-        return !!ben && kim.indexOf(ben.me.id) >= 0;
-    }
-    function kapanisEylemi(t) {
-        if (!ben || t.parent_id || (t.status !== 'acik' && t.status !== 'devam')) return null;
-        if (t.is_private) return t.created_by === ben.me.id ? 'tamamla' : null;
-        return isAtanan(t) ? 'gonder' : null;
-    }
-    // Yeni iş: sorumlu, işi açan ya da yönetici kapatabilir / aktarabilir (sunucu ayrıca denetler).
+    // Sorumlu, işi açan ya da yönetici kapatabilir / aktarabilir (sunucu ayrıca denetler).
     function yeniCalisabilir(t) {
         if (!ben || t.parent_id || (t.status !== 'acik' && t.status !== 'devam')) return false;
         return t.assignee_id === ben.me.id || t.created_by === ben.me.id || ben.me.role === 'admin';
     }
     function kapanisDugmesi(t, sinif) {
-        if (t._yeni) {
-            if (!yeniCalisabilir(t)) return null;
-            const b = el('button', null, t.onay_gerekir ? 'Onaya gönder' : 'Tamamla');
-            b.type = 'button';
-            b.className = sinif;
-            b.title = t.onay_gerekir ? 'İşi yaptım: onaylanmak üzere gönder' : 'İşi tamamla';
-            b.addEventListener('click', function(ev) { ev.stopPropagation(); yeniKapanisPenceresi(t); });
-            return b;
-        }
-        const ey = kapanisEylemi(t);
-        if (!ey) return null;
-        const b = el('button', null, ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder');
+        if (!yeniCalisabilir(t)) return null;
+        const b = el('button', null, t.onay_gerekir ? 'Onaya gönder' : 'Tamamla');
         b.type = 'button';
         b.className = sinif;
-        b.title = ey === 'tamamla' ? 'Özel işi tamamla' : 'İşi yaptım: onaylanmak üzere gönder';
-        b.addEventListener('click', function(ev) { ev.stopPropagation(); kapanisPenceresi(t, ey); });
+        b.title = t.onay_gerekir ? 'İşi yaptım: onaylanmak üzere gönder' : 'İşi tamamla';
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); yeniKapanisPenceresi(t); });
         return b;
     }
-    // "Ertesi güne aktar": son tarihi bir iş günü ileri alma talebi. Not zorunlu; yönetici / onay
-    // yetkilisi İş Listesi'nde kabul edince tarih değişir (sunucudaki ek süre talebi akışı).
+    // "Ertesi güne aktar": son tarihi ileri alma (not zorunlu). Onaylı işte talep yöneticiye / onaylayana gider.
     function aktarDugmesi(t, sinif) {
-        if (t._yeni ? !yeniCalisabilir(t) : kapanisEylemi(t) !== 'gonder') return null;
+        if (!yeniCalisabilir(t)) return null;
         if (t.ext_pending) {
             const s = el('span', 'font-size:11px;opacity:.85;', 'aktarım onayda');
             s.title = 'Ertesi güne aktarma / ek süre talebi yöneticinin kararını bekliyor';
@@ -3123,93 +3068,38 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         b.type = 'button';
         b.className = sinif;
         b.title = 'Son tarihi bir iş günü ileri almak için yöneticiden onay iste (not zorunlu)';
-        b.addEventListener('click', function(ev) { ev.stopPropagation(); if (t._yeni) yeniAktarPenceresi(t); else aktarPenceresi(t); });
+        b.addEventListener('click', function(ev) { ev.stopPropagation(); yeniAktarPenceresi(t); });
         return b;
     }
-    // ── Yan panelden karar: yönetici / onay yetkilisi, onaya gönderilen işi onaylar ya da reddeder;
-    // "Ertesi güne aktar" (ek süre) talebini kabul eder ya da reddeder. Ret gerekçesi zorunlu, yetkiyi
-    // sunucu da denetler. Yeniden açma, devir vb. İş Listesi'nde kalır.
+    // ── Yan panelden karar: yönetici / işi açan, onaya gönderilen işi onaylar ya da reddeder (ret gerekçesi
+    // zorunlu, yetkiyi sunucu da denetler). Aktarma talebine karar İş Listesi'ndeki iş panelinde verilir.
     function onayYetkili(t) {
-        return !!ben && !t.parent_id && (ben.me.role === 'admin' || (t.approvers || []).indexOf(ben.me.id) >= 0);
+        return !!ben && !t.parent_id && ben.me.role === 'admin';
     }
     function kararDugmeleri(t, kabulSinif, retSinif) {
         const out = [];
-        if (t._yeni) {
-            // Onaylayan: yönetici ya da işi açan (kendi işini onaylayamaz; sunucu onaylayıcı listesini de bilir).
-            if (!ben || t.parent_id || t.assignee_id === ben.me.id || (ben.me.role !== 'admin' && t.created_by !== ben.me.id)) return out;
-            const ekle = function(metin, baslik, sinif, fn) {
-                const b = el('button', null, metin);
-                b.type = 'button';
-                b.className = sinif;
-                b.title = baslik;
-                b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(); });
-                out.push(b);
-            };
-            if (t.status === 'onayda') {
-                ekle('Onayla', 'İşi onayla (isteğe bağlı not)', kabulSinif, function() { yeniKararPenceresi(t, true); });
-                ekle('Reddet', 'Geri gönder: iş "devam"a döner (gerekçe zorunlu)', retSinif, function() { yeniKararPenceresi(t, false); });
-            }
-            if (t.ext_pending && window.__cuIsGoster) {
-                ekle('Aktarma talebi', 'Ertesi güne aktarma talebini İş Listesi\'nde gör ve karar ver', kabulSinif, function() { window.__cuIsGoster(t.id); });
-            }
-            return out;
-        }
-        if (!onayYetkili(t)) return out;
-        const ekle = function(metin, baslik, sinif, tur, kabul) {
+        // Onaylayan: yönetici ya da işi açan (kendi işini onaylayamaz; sunucu onaylayıcı listesini de bilir).
+        if (!ben || t.parent_id || t.assignee_id === ben.me.id || (ben.me.role !== 'admin' && t.created_by !== ben.me.id)) return out;
+        const ekle = function(metin, baslik, sinif, fn) {
             const b = el('button', null, metin);
             b.type = 'button';
             b.className = sinif;
             b.title = baslik;
-            b.addEventListener('click', function(ev) { ev.stopPropagation(); kararPenceresi(t, tur, kabul); });
+            b.addEventListener('click', function(ev) { ev.stopPropagation(); fn(); });
             out.push(b);
         };
         if (t.status === 'onayda') {
-            ekle('Onayla', 'İşi onayla (isteğe bağlı not)', kabulSinif, 'is', true);
-            ekle('Reddet', 'Geri gönder: iş "devam"a döner (gerekçe zorunlu)', retSinif, 'is', false);
+            ekle('Onayla', 'İşi onayla (isteğe bağlı not)', kabulSinif, function() { yeniKararPenceresi(t, true); });
+            ekle('Reddet', 'Geri gönder: iş "devam"a döner (gerekçe zorunlu)', retSinif, function() { yeniKararPenceresi(t, false); });
         }
-        if (t.ext) {
-            ekle('Aktarımı kabul et', 'Son tarih ' + tarih(t.ext.new_due) + ' olur', kabulSinif, 'ext', true);
-            ekle('Aktarımı reddet', 'Son tarih değişmez (gerekçe zorunlu)', retSinif, 'ext', false);
+        if (t.ext_pending && window.__cuIsGoster) {
+            ekle('Aktarma talebi', 'Ertesi güne aktarma talebini İş Listesi\'nde gör ve karar ver', kabulSinif, function() { window.__cuIsGoster(t.id); });
         }
         return out;
     }
-    // Karar bekleyen şeyin özeti: kim, ne yazdı (panel satırında ve karar penceresinde).
-    function kararOzeti(t, tur) {
-        if (tur === 'ext') {
-            const x = t.ext;
-            return 'Aktarma talebi' + (x.requester_id ? ' (' + kisiAdi(x.requester_id) + ')' : '') + ': ' +
-                   (x.old_due ? tarih(x.old_due) : 'tarih yok') + ' → ' + tarih(x.new_due) + (x.reason ? ' — ' + x.reason : '');
-        }
+    // Onaya gönderilen işin özeti (panel satırında).
+    function kararOzeti(t) {
         return 'Onaya gönderildi' + (t.submit_note ? ': ' + t.submit_note : ' (not yok)');
-    }
-    function kararPenceresi(t, tur, kabul) {
-        pencereBasi(tur === 'ext' ? (kabul ? 'Aktarımı kabul et' : 'Aktarımı reddet') : (kabul ? 'İşi onayla' : 'İşi reddet'), t);
-        kutu.appendChild(el('div', 'margin-top:6px;padding:6px 8px;border-radius:7px;background:rgba(255,255,255,0.06);color:#e5e7eb;word-break:break-word;',
-                            kararOzeti(t, tur)));
-        const not = el('textarea'); not.rows = 3; not.maxLength = 2000;
-        not.placeholder = kabul ? 'Not (isteğe bağlı)' : (tur === 'ext' ? 'Neden kabul edilmiyor? (zorunlu)' : 'Ne eksik? İş "devam"a döner (zorunlu)');
-        kutu.appendChild(alan(kabul ? 'Not' : 'Ret gerekçesi', not));
-        kutu.appendChild(dugme(kabul ? (tur === 'ext' ? 'Kabul et' : 'Onayla') : 'Reddet', kabul ? 'var(--cu-vurgu)' : '#dc2626', async function(b) {
-            if (!kabul && !not.value.trim()) { mesajEl.textContent = 'Ret gerekçesini yazın.'; not.focus(); return; }
-            b.disabled = true;
-            mesajEl.textContent = '';
-            try {
-                const yol = tur === 'ext' ? '/ek-sure/' + t.ext.id + '/karar' : '/tasks/' + t.id + '/durum';
-                const veri = tur === 'ext' ? { approve: kabul, note: not.value }
-                                           : { action: kabul ? 'onayla' : 'reddet', reason: not.value };
-                await api(yol, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(veri) });
-                mesajEl.style.color = '#86efac';
-                mesajEl.textContent = kabul ? (tur === 'ext' ? 'Aktarım kabul edildi.' : 'İş onaylandı.') : 'Reddedildi.';
-                isleriTazele();
-                setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 900);
-            } catch (e) {
-                mesajEl.style.color = '#fca5a5';
-                mesajEl.textContent = 'Kaydedilemedi: ' + e.message;
-                b.disabled = false;
-            }
-        }));
-        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
-        setTimeout(function() { not.focus(); }, 0);
     }
     function tarihGirdisi(d) {
         const p = function(x) { return String(x).padStart(2, '0'); };
@@ -3367,43 +3257,10 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
         setTimeout(function() { not.focus(); }, 0);
     }
-    function aktarPenceresi(t) {
-        pencereBasi('Ertesi güne aktar', t);
-        kutu.appendChild(el('div', 'margin-top:6px;color:#cbd5e1;', 'Şu anki son tarih: ' + (t.due_at ? tarih(t.due_at) : 'yok')));
-        const yeni = el('input'); yeni.type = 'datetime-local';
-        yeni.value = tarihGirdisi(ertesiIsGunu(t.due_at));
-        kutu.appendChild(alan('Yeni son tarih', yeni));
-        const not = el('textarea'); not.rows = 3; not.maxLength = 2000;
-        not.placeholder = 'Neden aktarılıyor? (zorunlu — ör. tebligat sonucu henüz düşmedi)';
-        kutu.appendChild(alan('Not', not));
-        kutu.appendChild(el('div', 'margin-top:6px;color:#9ca3af;font-size:11px;',
-            'Talep yöneticiye / onay yetkilisine gider; kabul edilince son tarih değişir.'));
-        kutu.appendChild(dugme('Onaya gönder', 'var(--cu-vurgu)', async function(b) {
-            if (!not.value.trim()) { mesajEl.textContent = 'Aktarma nedenini yazın.'; not.focus(); return; }
-            if (!yeni.value) { mesajEl.textContent = 'Yeni tarihi seçin.'; yeni.focus(); return; }
-            b.disabled = true;
-            mesajEl.textContent = '';
-            try {
-                await api('/tasks/' + t.id + '/ek-sure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ new_due: Math.floor(new Date(yeni.value).getTime() / 1000), reason: not.value }) });
-                mesajEl.style.color = '#86efac';
-                mesajEl.textContent = 'Aktarma talebi onaya gönderildi.';
-                isleriTazele();
-                setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 1100);
-            } catch (e) {
-                mesajEl.style.color = '#fca5a5';
-                mesajEl.textContent = 'Gönderilemedi: ' + e.message;
-                b.disabled = false;
-            }
-        }));
-        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
-        setTimeout(function() { not.focus(); }, 0);
-    }
-
     // ── Hatırlatıcı: kullanıcı kendine kurar (başkasına kurma ve liste İş Listesi'nde) ──
-    function bitmis(t) { return t.status === 'onaylandi' || t.status === 'tamamlandi' || t.status === 'tamam'; }
+    function bitmis(t) { return t.status === 'onaylandi' || t.status === 'tamamlandi' || t.status === 'tamam' || t.status === 'iptal'; }
     function hatirlaticiDugmesi(t, sinif) {
-        if (t._yeni || !ben || t.parent_id || bitmis(t)) return null;
+        if (!ben || t.parent_id || bitmis(t)) return null;
         const b = el('button', null, t.reminder_at ? '🔔 ' + tarih(t.reminder_at) : '🔔 Hatırlatıcı');
         b.type = 'button';
         b.className = sinif;
@@ -3441,8 +3298,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     async function hatirlaticiKur(taskId, ts, not) {
         if (ts < Date.now() / 1000 - 60) throw new Error('Geçmiş bir zamana hatırlatıcı kurulamaz.');
-        await api('/tasks/' + taskId + '/hatirlatici', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ remind_at: ts, note: not || '' }) });
+        await yeniGonder('hatirlatici', { gorev_id: taskId, zaman: tarihGirdisi(new Date(ts * 1000)), notu: not || '' });
     }
     function hatirlaticiPenceresi(t) {
         pencereBasi('Hatırlatıcı', t);
@@ -3453,7 +3309,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         not.placeholder = 'Not (isteğe bağlı) — ör. “Müvekkili ara”';
         kutu.appendChild(alan('Not', not));
         kutu.appendChild(el('div', 'margin-top:6px;color:#9ca3af;font-size:11px;',
-            'Bildirim, İş Listesi\'nde “Bildirimler”den açtığınız cihazlara ve bağladıysanız Telegram\'a gider.'));
+            'Zamanı gelince Çoklu UYAP\'ta yalnız size uyarı çıkar; iş panelinden silebilirsiniz.'));
         kutu.appendChild(dugme('Kur', 'var(--cu-vurgu)', async function(b) {
             const ts = secim.deger();
             if (!ts) { mesajEl.textContent = 'Tarih ve saat seçin.'; secim.girdi.focus(); return; }
@@ -3476,186 +3332,6 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
 
     // ── Kontrol sonucu → sonraki iş (model: "yapılacak iş.md" §3) ──
     const SONUC = [['olumlu', 'Olumlu'], ['olumsuz', 'Olumsuz'], ['bekliyor', 'Bekliyor']];
-    // İşin şablonu: başlık "Taraf Adı – Tebligat kontrol" ya da yalnız "Tebligat kontrol".
-    function isAdi(t) {
-        const i = t.title.lastIndexOf(' – ');
-        return i >= 0 ? t.title.slice(i + 3) : t.title;
-    }
-    function sablonBul(ad) {
-        if (!sablonlar || !ad) return null;
-        const k = kucukHarf(ad);
-        return sablonlar.hazir.concat(sablonlar.buro).find(function(s) { return kucukHarf(s.title) === k; }) || null;
-    }
-    // İşin kaydedilmiş şablon bağı (sunucu: "h-tebligat" | "b-12"); yoksa başlıktan tahmin.
-    function isinSablonu(t) {
-        if (sablonlar && t.sablon) {
-            const s = sablonlar.hazir.concat(sablonlar.buro).find(function(x) {
-                return String(x.id) === t.sablon || 'b-' + x.id === t.sablon;
-            });
-            if (s) return s;
-        }
-        return sablonBul(isAdi(t));
-    }
-    // on: ön seçim {sonuc, not} — ör. kesinleştirme talebi gönderilince "Gönderildi".
-    function kapanisPenceresi(t, ey, on) {
-        pencereBasi(ey === 'tamamla' ? 'İşi tamamla' : 'Onaya gönder', t);
-        const sonucYeri = el('div', '');
-        const sonrakiYeri = el('div', 'display:none;margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
-        // Kesinleşme günü: şablonun kesinleşme dalı seçilince (Tebliğ kontrol → Tebliğ edildi) sorulur;
-        // girilirse sunucu o güne "Kesinleşme tarihi kontrol" işini de açar. Gün elle girilir.
-        const kesYeri = el('div', 'display:none;margin-top:8px;padding:8px;border-radius:8px;background:rgba(255,255,255,0.06);');
-        const kesGun = el('input'); kesGun.type = 'date';
-        kesYeri.appendChild(alan('Kesinleşme günü (isteğe bağlı)', kesGun));
-        kesYeri.appendChild(el('div', 'margin-top:3px;font-size:11px;color:#9ca3af;',
-            'Bu güne “Kesinleşme tarihi kontrol” işi açılır; o güne kadar itiraz yoksa kesinleştirme talebi gönderilir.'));
-        kutu.appendChild(sonucYeri);
-        kutu.appendChild(sonrakiYeri);
-        kutu.appendChild(kesYeri);
-        const not = el('textarea'); not.rows = 3; not.maxLength = 1800;
-        not.placeholder = 'Ne görüldü / ne yapıldı? (isteğe bağlı — ör. tebligat iade, adres yetersiz)';
-        kutu.appendChild(alan('Not', not));
-
-        let sablon = null, sonuc = null;
-        // Sonraki iş: aynı dosya / taraf / belgeyle, işi atanan kişiye; özel işte önerilmez.
-        const ac_ = el('input'); ac_.type = 'checkbox'; ac_.style.cssText = 'width:auto;margin:0 6px 0 0;vertical-align:middle;';
-        const sAd = el('input'); sAd.maxLength = 200; sAd.placeholder = 'Sonraki iş (ör. Kesinleşme kontrol)';
-        // Sonraki işin günü tarih seçiciyle (istek B-8: yalnız gün sayısı yanlıştı); şablondaki gün sayısı
-        // yalnız varsayılanı hesaplar. Sunucuya hem tarih hem bugünden gün farkı gider (eski sunucu uyumu).
-        const sGun = el('input'); sGun.type = 'date'; sGun.min = gunSonra(0).slice(0, 10);
-        sGun.title = 'Sonraki işin son günü (17:00)';
-        const sGunAdi = el('div', 'font-size:11px;color:#9ca3af;margin-top:2px;');
-        const GUNLER = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
-        function sGunCiz() { sGunAdi.textContent = sGun.value ? GUNLER[new Date(sGun.value + 'T12:00').getDay()] : ''; }
-        function sGunAyarla(n) { sGun.value = n === '' || n == null ? '' : gunSonra(Number(n)).slice(0, 10); sGunCiz(); }
-        sGun.addEventListener('input', sGunCiz);
-        sAd.addEventListener('input', function() { ac_.checked = !!sAd.value.trim(); });
-        if (!t.is_private) {
-            const satir = el('label', 'display:flex;align-items:center;font-weight:600;cursor:pointer;');
-            satir.appendChild(ac_);
-            satir.appendChild(document.createTextNode('Sonraki işi aç'));
-            sonrakiYeri.appendChild(satir);
-            const ikili = el('div', 'display:flex;gap:6px;align-items:flex-end;');
-            const a1 = el('div', 'flex:1;min-width:0;'); a1.appendChild(sAd);
-            const a2 = el('div', 'flex:0 0 138px;'); a2.appendChild(sGun); a2.appendChild(sGunAdi);
-            ikili.appendChild(a1); ikili.appendChild(a2);
-            sonrakiYeri.appendChild(ikili);
-            sonrakiYeri.appendChild(el('div', 'margin-top:3px;font-size:11px;color:#9ca3af;',
-                'Aynı dosya' + (t.taraf_adi ? ', taraf (' + t.taraf_adi + ')' : '') + (t.evrak_adi ? ', belge' : '') +
-                ' ile açılır; son günü seçin (17:00), boşsa tarihsiz açılır.'));
-            sonrakiYeri.style.display = '';
-        }
-        function sonucSec(k) {
-            sonuc = sonuc === k ? null : k;
-            Array.prototype.forEach.call(sonucYeri.querySelectorAll('.ia-cip'), function(b) {
-                b.classList.toggle('sec', b.getAttribute('data-k') === sonuc);
-            });
-            const kesSor = !!(sonuc && sablon && sablon.kesinlesme === sonuc && !t.is_private);
-            kesYeri.style.display = kesSor ? '' : 'none';
-            if (!kesSor) kesGun.value = '';
-            const dal = sonuc && sablon && sablon.sonuclar ? sablon.sonuclar[sonuc] : null;
-            if (dal) {
-                const ad = dal.baslik || (sablon ? sablon.title : isAdi(t));
-                const hedef = sablonBul(ad);
-                sAd.value = ad;
-                sGunAyarla(dal.gun != null ? dal.gun : hedef && hedef.due_days != null ? hedef.due_days : '');
-                ac_.checked = true;
-            } else if (sonuc && !sablon) {
-                // Şablonsuz işte öneri yok; "bekliyor" aynı işi 3 gün sonraya önerir.
-                if (sonuc === 'bekliyor' && !sAd.value) { sAd.value = isAdi(t); sGunAyarla(3); ac_.checked = true; }
-            } else {
-                sAd.value = ''; sGunAyarla(''); ac_.checked = false;
-            }
-        }
-        function sonucCiz() {
-            sonucYeri.innerHTML = '';
-            const soru = sablon && sablon.kontrol;
-            sonucYeri.appendChild(el('div', 'margin-top:8px;font-weight:600;', soru ? soru : 'Kontrol sonucu (isteğe bağlı)'));
-            SONUC.forEach(function(x) {
-                const dal = sablon && sablon.sonuclar && sablon.sonuclar[x[0]];
-                const b = el('button', null, (dal && dal.ad) || x[1]);
-                b.type = 'button';
-                b.className = 'ia-cip';
-                b.setAttribute('data-k', x[0]);
-                if (dal) b.title = 'Sonraki iş: ' + (dal.baslik || 'aynı iş') + (dal.gun != null ? ' (+' + dal.gun + ' gün)' : '');
-                b.addEventListener('click', function(ev) { ev.stopPropagation(); sonucSec(x[0]); });
-                sonucYeri.appendChild(b);
-            });
-        }
-        sonucCiz();
-        if (on && on.not) not.value = on.not;
-        sablonlariGetir().then(function() {
-            sablon = isinSablonu(t);
-            sonucCiz();
-        }).catch(function() {}).then(function() { if (on && on.sonuc) sonucSec(on.sonuc); });
-
-        kutu.appendChild(dugme(ey === 'tamamla' ? 'Tamamla' : 'Onaya gönder', 'var(--cu-vurgu)', async function(b) {
-            if (sablon && sablon.kontrol && !sonuc) { mesajEl.textContent = 'Kontrol sonucunu seçin: olumlu, olumsuz ya da bekliyor.'; return; }
-            const sonraki = ac_.checked && sAd.value.trim() && !t.is_private;
-            b.disabled = true;
-            mesajEl.textContent = '';
-            const sDal = sonuc && sablon && sablon.sonuclar ? sablon.sonuclar[sonuc] : null;
-            const etiket = sonuc ? ((sDal && sDal.ad) || SONUC.find(function(x) { return x[0] === sonuc; })[1]).toLocaleLowerCase('tr-TR') : '';
-            const kes = kesYeri.style.display !== 'none' && /^\d{4}-\d{2}-\d{2}$/.test(kesGun.value) ? kesGun.value : '';
-            const neden = [sonuc ? 'Kontrol: ' + etiket + (sablon && sablon.kontrol ? ' (' + sablon.kontrol + ')' : '') : '',
-                           not.value.trim(), sonraki ? 'Sonraki iş: ' + sAd.value.trim() : '',
-                           kes ? 'Kesinleşme günü: ' + kes.split('-').reverse().join('.') : ''].filter(Boolean).join(' — ');
-            // Sonuç seçildiyse sonraki işi sunucu açar (süreçte sıradaki aşama); eski sunucu "sonraki"
-            // döndürmezse pencere kendisi açar.
-            const govde = { action: ey, reason: neden };
-            if (sonuc) {
-                govde.sonuc = sonuc;
-                govde.sonraki = sonraki ? { baslik: sAd.value.trim(), tarih: sGun.value || undefined,
-                                            gun: kacGunSonra(sGun.value) } : false;
-                if (kes) govde.kesinlesme = kes;
-            }
-            let yanit;
-            try {
-                yanit = await api('/tasks/' + t.id + '/durum', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(govde) });
-            } catch (e) {
-                mesajEl.style.color = '#fca5a5';
-                mesajEl.textContent = 'Gönderilemedi: ' + e.message;
-                b.disabled = false;
-                return;
-            }
-            let ek = '';
-            const oneriMetni = function(ad, n) {
-                if (!n) return '';
-                if (n.hata) return ' ' + ad + ' açılamadı: ' + n.hata;
-                if (n.var) return ' ' + ad + ' zaten açık: ' + n.title;
-                return ' ' + ad + ' açıldı: ' + n.title + (n.due_at ? ' (' + tarih(n.due_at) + ')' : '');
-            };
-            if (yanit && 'sonraki' in yanit) {
-                ek = oneriMetni('Sonraki iş', yanit.sonraki) + oneriMetni('Kesinleşme işi', yanit.kesinlesme);
-            } else if (sonraki) {
-                try { ek = ' Sonraki iş açıldı: ' + (await sonrakiIsiAc(t, sAd.value.trim(), sGun.value ? kacGunSonra(sGun.value) : '')); }
-                catch (e) { ek = ' Sonraki iş açılamadı: ' + e.message; }
-            }
-            mesajEl.style.color = ek.indexOf('açılamadı') >= 0 ? '#fcd34d' : '#86efac';
-            mesajEl.textContent = (ey === 'tamamla' ? 'İş tamamlandı.' : 'İş onaya gönderildi.') + ek;
-            isleriTazele();
-            if (ek.indexOf('açılamadı') < 0) setTimeout(function() { kapat(); mesajEl.style.color = '#fca5a5'; }, 1300);
-        }));
-        kutu.appendChild(dugme('Vazgeç', 'rgba(255,255,255,0.15)', kapat));
-    }
-    // Biten işin dosya / taraf / belge bağıyla yeni iş; şablonu varsa açıklama, öncelik ondan.
-    async function sonrakiIsiAc(t, ad, gun) {
-        const s = sablonBul(ad);
-        const n = gun === '' || gun == null ? (s && s.due_days != null ? s.due_days : null) : Number(gun);
-        let uyap = null;
-        try { uyap = t.dosya_uyap ? JSON.parse(t.dosya_uyap) : null; } catch (e) {}
-        const baslik = t.taraf_adi ? t.taraf_adi + ' – ' + ad : ad;
-        await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-            title: baslik, description: s ? s.description || '' : '', sablon: s ? s.id : null,
-            assignee_id: ben && ben.me.role === 'admin' ? (t.assignee_id || null) : null,
-            due_at: n == null ? null : Math.floor(new Date(gunSonra(n)).getTime() / 1000),
-            priority: s && s.priority != null ? s.priority : (t.priority == null ? 1 : t.priority),
-            dosya: t.dosya_id ? { dosya_id: String(t.dosya_id), birim_id: t.birim_id || '', birim_adi: t.birim_adi || '',
-                                  dosya_no: t.dosya_no || '', dosya_tur: t.dosya_tur || '', evrak_id: t.evrak_id || null,
-                                  evrak_adi: t.evrak_adi || null, taraf_adi: t.taraf_adi || null,
-                                  barkod: t.barkod || null, uyap: uyap } : null }) });
-        return baslik + (n == null ? '' : ' (' + gunSonra(n).slice(8, 10) + '.' + gunSonra(n).slice(5, 7) + ')');
-    }
     // İş açılınca / durumu değişince: kart bandı, belge işaretleri ve panel yeniden çekilir.
     function isleriTazele() {
         Object.keys(dosyaIsleri).forEach(function(k) { delete dosyaIsleri[k]; });
@@ -3717,7 +3393,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         document.body.appendChild(ort);
         document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape' && ort.style.display !== 'none') kapat(); });
     }
-    function kapat() { if (ort && !kesMesgul) ort.style.display = 'none'; }   // talep gönderilirken açık kalır
+    function kapat() { if (ort) ort.style.display = 'none'; }
 
     // kart: dosya kartı (evrak ağacından belge seçimi için); evrakId: belge satırından açıldıysa seçili gelir.
     // on: formun ön doldurması {sablon (adı), baslik, aciklama} — ör. bildirimden açılınca.
@@ -3790,7 +3466,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // ── İş şablonları: hazır (sunucu kodunda) + büronun eklediği; 5 dk saklanır ──
     let sablonlar = null, sablonZamani = 0;
     async function sablonlariGetir(zorla) {
-        if (YENI() && (zorla || !sablonlar || Date.now() - sablonZamani > 300000)) {
+        if (zorla || !sablonlar || Date.now() - sablonZamani > 300000) {
             const l = await yeniIstek('sablonlar');
             sablonlar = { hazir: [], buro: l.filter(function(x) { return x.aktif !== false; }).map(function(x) {
                 return { id: x.id, title: x.baslik, description: x.aciklama || '', priority: x.oncelik, taraf: x.taraf || null,
@@ -3798,22 +3474,14 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                          etiketler: x.etiketler || [], due_days: x.sure_turu === 'takvim_gunu' ? x.sure_deger : null };
             }) };
             sablonZamani = Date.now();
-            return sablonlar;
-        }
-        if (zorla || !sablonlar || Date.now() - sablonZamani > 300000) {
-            const j = await api('/sablonlar');
-            sablonlar = { hazir: j.hazir || [], buro: j.buro || [] };
-            sablonZamani = Date.now();
         }
         return sablonlar;
     }
     // Şablon yönetimi İş Listesi'nde (Şablonlar sekmesi); dönünce liste tazelensin diye saklanan silinir.
     function sablonlariYonet() {
-        if (YENI() && window.__cuIslerAc) { sablonZamani = 0; kapat(); window.__cuIslerAc(); return; }
-        const host = location.hostname;
-        const yerel = host === '127.0.0.1' || host === 'localhost' || host === '::1';
         sablonZamani = 0;
-        window.open(yerel ? EP + '/ac?sekme=sablonlar' : '/is-listesi/#sablonlar', '_blank', 'noopener');
+        kapat();
+        if (window.__cuIslerAc) window.__cuIslerAc();
     }
     // Hangi şablonu ne sık kullandığınız (bu bilgisayarda): pencerede en çok kullanılanlar önde gelir.
     const SAYAC_ANAHTARI = 'cokluuyapIsSablonSayac';
@@ -4047,19 +3715,17 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         sonAlani.appendChild(sureYeri);
         f.appendChild(sonAlani);
         f.appendChild(alan('Öncelik', oncelik));
-        // Yeni sistem: etiket ve "onay gerekir" (hatırlatıcı bu sürümde yok).
-        const etiketSec = YENI() ? etiketSecici() : null;
+        // Etiket ve "onay gerekir".
+        const etiketSec = etiketSecici();
         const onayK = el('input'); onayK.type = 'checkbox'; onayK.style.cssText = 'width:auto;margin:0 6px 0 0;vertical-align:middle;';
-        if (YENI()) {
-            f.insertBefore(alan('Etiket', etiketSec.el), f.querySelector('textarea').parentNode);
-            const ol = el('label', 'display:flex;align-items:center;margin-top:8px;font-weight:600;color:#cbd5e1;cursor:pointer;');
-            ol.appendChild(onayK);
-            ol.appendChild(document.createTextNode('Onay gerekir (tamamlanınca onaya gider)'));
-            f.appendChild(ol);
-        }
+        f.insertBefore(alan('Etiket', etiketSec.el), f.querySelector('textarea').parentNode);
+        const onayEtiketi = el('label', 'display:flex;align-items:center;margin-top:8px;font-weight:600;color:#cbd5e1;cursor:pointer;');
+        onayEtiketi.appendChild(onayK);
+        onayEtiketi.appendChild(document.createTextNode('Onay gerekir (tamamlanınca onaya gider)'));
+        f.appendChild(onayEtiketi);
         // Hatırlatıcı (isteğe bağlı): iş açılınca işi açana kurulur.
         const hatirlat = hatirlaticiSecimi(null);
-        if (!YENI()) f.appendChild(alan('Bana hatırlat (isteğe bağlı)', hatirlat.el));
+        f.appendChild(alan('Bana hatırlat (isteğe bağlı)', hatirlat.el));
 
         if (on.baslik) baslik.value = on.baslik;
         if (on.aciklama) aciklama.value = on.aciklama;
@@ -4076,11 +3742,9 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             sonSablonAciklamasi = s.description || '';
             if (s.due_days != null) sureSec(Number(s.due_days));
             oncelik.value = String(s.priority == null ? 1 : s.priority);
-            if (YENI()) {
-                onayK.checked = !!s.onay_gerekir;
-                if ((s.etiketler || []).length && !etiketSec.deger().length) etiketSec.ayarla(s.etiketler);
-                sablonNot.title = s.sure_metni ? 'Son tarih boşsa şablona göre: ' + s.sure_metni : '';
-            }
+            onayK.checked = !!s.onay_gerekir;
+            if ((s.etiketler || []).length && !etiketSec.deger().length) etiketSec.ayarla(s.etiketler);
+            sablonNot.title = s.sure_metni ? 'Son tarih boşsa şablona göre: ' + s.sure_metni : '';
             if (s.taraf === 'borclu' && taraf.value === '') {
                 const i = taraflar.findIndex(function(x) { return rolSirasi(x.rol) === 0; });
                 if (i >= 0) taraf.value = String(i);
@@ -4202,7 +3866,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                 mesajEl.textContent = 'Hatırlatma zamanı geçmişte olamaz.'; hatirlat.girdi.focus(); b.disabled = false; return;
             }
             const tamBaslikDegeri = tamBaslik();
-            if (YENI()) {
+            {
                 if (!sonGun.value && !(seciliSablon && baslik.value.trim() === seciliSablon.title)) {
                     mesajEl.textContent = 'Son tarihi seçin (ya da bir şablon seçin: süre şablondan hesaplanır).'; sonGun.focus(); b.disabled = false; return;
                 }
@@ -4210,7 +3874,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                 if (!kartV.dosyaTurKodAciklama && (d.dosyaTur || d.dosyaTurKodAciklama)) kartV.dosyaTurKodAciklama = d.dosyaTur || d.dosyaTurKodAciklama;
                 if (belge.value) kartV._evrak = belge.value;
                 try {
-                    await yeniGonder('ac', {
+                    const acilan = await yeniGonder('ac', {
                         baslik: tamBaslikDegeri, aciklama: aciklama.value,
                         sablon_id: seciliSablon && baslik.value.trim() === seciliSablon.title ? seciliSablon.id : null,
                         sorumlu_id: Number(kisi.value) || null, son_tarih: sonGun.value, son_saat: sonSaat.value,
@@ -4220,11 +3884,15 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                         evrak_adi: belge.value ? belge.options[belge.selectedIndex].textContent : '',
                         barkod: bk, uyap_karti: kartV, birim_uyap_id: d.birimId != null ? String(d.birimId) : '' });
                     if (seciliSablon) sablonKullanildi(seciliSablon.id);
+                    // Hatırlatıcı ayrı istekte kurulur; kurulamazsa iş yine açılmış kalır.
+                    let hHata = '';
+                    if (hts && acilan && acilan.id) { try { await hatirlaticiKur(acilan.id, hts, ''); } catch (e) { hHata = e.message; } }
                     isleriTazele();
                     kutu.innerHTML = '';
                     kutu.appendChild(el('div', 'font-size:14px;font-weight:700;', 'İş Ata'));
-                    kutu.appendChild(el('div', 'margin-top:10px;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.06);color:#86efac;font-weight:600;',
-                        onayK.checked ? 'İş açıldı; tamamlanınca onaya gidecek.' : 'İş açıldı.'));
+                    kutu.appendChild(el('div', 'margin-top:10px;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.06);font-weight:600;word-break:break-word;color:' + (hHata ? '#fca5a5' : '#86efac') + ';',
+                        (onayK.checked ? 'İş açıldı; tamamlanınca onaya gidecek.' : 'İş açıldı.')
+                        + (hHata ? ' Hatırlatıcı kurulamadı: ' + hHata : hts ? ' Hatırlatıcı kuruldu: ' + tarih(hts) : '')));
                     kutu.appendChild(el('div', 'margin-top:6px;color:#e5e7eb;word-break:break-word;', tamBaslikDegeri));
                     const tamam = dugme('Tamam', 'var(--cu-vurgu)', kapat);
                     kutu.appendChild(tamam);
@@ -4234,50 +3902,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                     mesajEl.style.color = '#fca5a5';
                     mesajEl.textContent = 'İş açılamadı: ' + e.message;
                 } finally { b.disabled = false; }
-                return;
             }
-            try {
-                const yeni = await api('/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                    title: tamBaslik(), description: aciklama.value,
-                    // Şablon seçilip adı değiştirilmediyse bağ gider; değiştiyse sunucu başlıktan arar.
-                    sablon: seciliSablon && baslik.value.trim() === seciliSablon.title ? seciliSablon.id : null,
-                    assignee_id: admin ? Number(kisi.value) : null,
-                    due_at: son.value ? Math.floor(new Date(son.value).getTime() / 1000) : null,
-                    priority: Number(oncelik.value),
-                    dosya: { dosya_id: String(d.dosyaId), birim_id: String(d.birimId || d.birimID || ''),
-                             birim_adi: d.birimAdi || '', dosya_no: d.dosyaNo || '', dosya_tur: d.dosyaTurKodAciklama || '',
-                             evrak_id: belge.value || null,
-                             evrak_adi: belge.value ? belge.options[belge.selectedIndex].textContent : null,
-                             taraf_adi: tarafSecili ? adDuzelt(tarafSecili.adi) : null,
-                             barkod: bk || null,
-                             uyap: kartAlanlari(d) } }) });
-                if (seciliSablon) sablonKullanildi(seciliSablon.id);
-                // İş açıldıktan sonra hatırlatıcı ayrı istekte kurulur; kurulamazsa iş kalır.
-                let hHata = '';
-                if (hts && yeni && yeni.task) {
-                    try { await hatirlaticiKur(yeni.task.id, hts, ''); } catch (e) { hHata = e.message; }
-                }
-                isleriTazele();
-                // Kayıttan sonra boşaltılmış form açık kalıyordu (kullanıcı bildirimi 2026-11-14): onay kartı
-                // gösterilir; "Tamam" pencereyi kapatır, istenirse aynı dosyaya yeni iş için form baştan açılır.
-                const ozet = hHata ? 'İş açıldı ama hatırlatıcı kurulamadı: ' + hHata
-                    : hts ? 'İş açıldı; hatırlatıcı kuruldu: ' + tarih(hts) : 'İş açıldı.';
-                kutu.innerHTML = '';
-                kutu.appendChild(el('div', 'font-size:14px;font-weight:700;', 'İş Ata'));
-                kutu.appendChild(el('div', 'margin-top:10px;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.06);color:' +
-                    (hHata ? '#fca5a5' : '#86efac') + ';font-weight:600;word-break:break-word;', ozet));
-                kutu.appendChild(el('div', 'margin-top:6px;color:#e5e7eb;word-break:break-word;', tamBaslikDegeri));
-                const tamam = dugme('Tamam', 'var(--cu-vurgu)', kapat);
-                kutu.appendChild(tamam);
-                kutu.appendChild(dugme('Bu dosyaya bir iş daha ata', 'rgba(255,255,255,0.15)', function() {
-                    pencereAc(d, kart, evrakId);
-                }));
-                setTimeout(function() { tamam.focus(); }, 0);
-                return;
-            } catch (e) {
-                mesajEl.style.color = '#fca5a5';
-                mesajEl.textContent = 'İş açılamadı: ' + e.message;
-            } finally { b.disabled = false; }
         }));
         // Formdaki iş adı / açıklama / süre / öncelik büroya yeni şablon olur (taraf adı şablona girmez).
         // Büyük düğme değil, "İş" alanının altında küçük bağlantı: yalnız şablonu olmayan bir iş yazılınca görünür.
@@ -4302,16 +3927,10 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             b.disabled = true;
             const ts = taraf.value !== '' ? taraflar[Number(taraf.value)] : null;
             try {
-                if (YENI()) {
-                    const g0 = secilenGun != null ? secilenGun : kacGunSonra(son.value);
-                    await yeniGonder('sablon', { baslik: ad, aciklama: aciklama.value, oncelik: Number(oncelik.value),
-                        sure_turu: 'takvim_gunu', sure_deger: g0 == null ? 1 : g0, onay_gerekir: onayK.checked, etiketler: etiketSec.deger(),
-                        taraf: ts ? (rolSirasi(ts.rol) === 0 ? 'borclu' : rolSirasi(ts.rol) === 2 ? 'alacakli' : 'herhangi') : '' });
-                } else await api('/sablonlar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                    title: ad, description: aciklama.value,
-                    due_days: secilenGun != null ? secilenGun : kacGunSonra(son.value),
-                    priority: Number(oncelik.value),
-                    taraf: ts ? (rolSirasi(ts.rol) === 0 ? 'borclu' : rolSirasi(ts.rol) === 2 ? 'alacakli' : 'herhangi') : null }) });
+                const g0 = secilenGun != null ? secilenGun : kacGunSonra(son.value);
+                await yeniGonder('sablon', { baslik: ad, aciklama: aciklama.value, oncelik: Number(oncelik.value),
+                    sure_turu: 'takvim_gunu', sure_deger: g0 == null ? 1 : g0, onay_gerekir: onayK.checked, etiketler: etiketSec.deger(),
+                    taraf: ts ? (rolSirasi(ts.rol) === 0 ? 'borclu' : rolSirasi(ts.rol) === 2 ? 'alacakli' : 'herhangi') : '' });
                 await sablonlariGetir(true);
                 seciliSablon = sablonlar.buro.find(function(x) { return kucukHarf(x.title) === kucukHarf(ad); }) || null;
                 sablonlariCiz();
@@ -4323,7 +3942,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                 mesajEl.textContent = 'Şablon kaydedilemedi: ' + e.message;
             } finally { b.disabled = false; }
         });
-        if (YENI()) f.appendChild(dugme('Geniş formda aç', 'rgba(255,255,255,0.15)', function() {
+        f.appendChild(dugme('Geniş formda aç', 'rgba(255,255,255,0.15)', function() {
             const ad0 = baslik.value.trim();
             kapat();
             yeniIsAta(d, belge.value || evrakId, { baslik: tamBaslik(), aciklama: aciklama.value,
@@ -4447,7 +4066,6 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     let acmaUyarisi = null, acmaSuruyor = false;
     async function bekleyenDosyaAc() {
         if (acmaSuruyor) return;
-        uzaktanBekleyen();
         let kayit = null;
         try { kayit = JSON.parse(sessionStorage.getItem('cokluuyapDosyaAc') || 'null'); } catch (e) {}
         if (!kayit) return;
@@ -4457,7 +4075,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             // Ana sayfa henüz çizilmedi (ya da UYAP girişi bekleniyor) — sonraki turda tekrar.
             return;
         }
-        // dosya-ac sayfası yetkisiz açılabildiği için kayda güvenilmez: yalnız kart alanlarının düz değerleri.
+        // Kayda körü körüne güvenilmez: yalnız kart alanlarının düz değerleri.
         let dosya = {};
         KART_ALANLARI.forEach(function(k) {
             const v = kayit.dosya[k];
@@ -4662,8 +4280,8 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             b.addEventListener('click', fn);
             k.appendChild(b);
         };
-        arac('İş Listesi', YENI() ? 'Bugün, takvim, onay bekleyenler ve büronun tüm işleri' : 'Takvim, raporlar ve büronun tüm işleri (yeni sekmede)',
-             function() { if (YENI()) panelKapat(); ac(); });
+        arac('İş Listesi', 'Bugün, takvim, onay bekleyenler ve büronun tüm işleri',
+             function() { panelKapat(); ac(); });
         const g = window.__uyapGerekceli;
         if (g) {
             const d = g.durum();
@@ -4729,7 +4347,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                 pencereAc(ds.d, ds.kart && ds.kart.isConnected ? ds.kart : null);
             });
             pnl.cipler.appendChild(yeni);
-            if (YENI() && window.__cuIsDosya) {
+            if (window.__cuIsDosya) {
                 const genis = el('button', null, 'Geniş ekranda');
                 genis.type = 'button';
                 genis.className = 'ip-cip';
@@ -4775,15 +4393,15 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const filtre = anahtar();
         let tekrar = false;
         try {
-            if (!ben) { ben = YENI() ? await yeniBen() : await api('/me'); cipleriCiz(); }
+            if (!ben) { ben = await yeniBen(); cipleriCiz(); }
             let isler;
             if (dosya) isler = await dosyaninIsleri(dosya.d);
-            else if (YENI()) {
-                // Çekmecedeki "işlerim": yeni veritabanından (benim → sorumlusu olduğum açık işler)
+            else {
+                // Çekmecedeki "işlerim" (benim → sorumlusu olduğum açık işler)
                 const q = filtre === 'onay' ? 'liste?gorunum=onay'
                     : 'liste?' + new URLSearchParams({ gorunum: 'tum', durum: 'acik,devam,onayda', sorumlu: filtre === 'benim' ? String(ben.me.id) : '' }).toString();
                 isler = (await yeniIstek(q)).map(eskiBicim);
-            } else isler = (await api('/tasks?filtre=' + filtre)).tasks || [];
+            }
             if (dosya) dosyaIsleri[dosya.id] = { t: Date.now(), isler: isler };
             if (filtre !== anahtar()) { tekrar = true; return; }   // bu arada süzgeç değişti → yeniden
             pnl.isler = isler;
@@ -4911,10 +4529,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         if (hb) alt2.appendChild(hb);
         if (alt2.children.length) s.appendChild(alt2);
         if (onayYetkili(t)) {
-            ['is', 'ext'].forEach(function(tur) {
-                if (tur === 'is' ? t.status !== 'onayda' : !t.ext) return;
-                s.appendChild(el('div', 'margin-top:5px;color:var(--cu-vurgu-acik);word-break:break-word;', kararOzeti(t, tur)));
-            });
+            if (t.status === 'onayda') s.appendChild(el('div', 'margin-top:5px;color:var(--cu-vurgu-acik);word-break:break-word;', kararOzeti(t)));
             const kd = kararDugmeleri(t, 'ip-onay', 'ip-red');
             if (kd.length) {
                 const yer = el('div', 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;');
@@ -4945,50 +4560,6 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     // UYAP ana sayfası: dışarıdan girişte "/" sitenin kabuğudur (tünele girmez), UYAP'a /giris ile dönülür.
     function anaSayfayaGit() { location.assign(UZAK ? '/giris' : '/'); }
-
-    // ── Dışarıdan girişte İş Listesi'nden "UYAP'ta aç" (webapp/is_listesi/zs.js → uyaptaAc) ──
-    // Aynı tarayıcıda açık UYAP çerçevesi BroadcastChannel ile kartı alır ve "alındı" der. Açık UYAP
-    // yoksa İş Listesi kartı localStorage'a bırakıp siteyi yeni sekmede açar; UYAP ana sayfası
-    // çizilince kart alınır (10 dk içinde). Kanal / depo yalnız aynı kökene açıktır.
-    const UZAK_DOSYA = 'cokluuyapDosyaAc';
-    if (UZAK) {
-        try {
-            const kanal = new BroadcastChannel('cokluuyap-dosya-ac');
-            kanal.onmessage = function(ev) {
-                const m = ev.data || {};
-                // İş Listesi'nden "PTT sorgula": sorgu ofisteki CokluUyap'ta (tünelden) yapılır.
-                if (m.tur === 'ptt' && /^\d{13}$/.test(String(m.barkod || ''))) {
-                    kanal.postMessage({ tur: 'alindi', id: m.id });
-                    pttSorgula(String(m.barkod));
-                    return;
-                }
-                if (m.tur !== 'ac' || !m.dosya || typeof m.dosya !== 'object') return;
-                kanal.postMessage({ tur: 'alindi', id: m.id });
-                try { sessionStorage.setItem(UZAK_DOSYA, JSON.stringify({ t: Date.now(), dosya: m.dosya })); } catch (e) {}
-                if (document.getElementById('searchId')) { panelKapat(); bekleyenDosyaAc(); } else anaSayfayaGit();
-            };
-        } catch (e) {}
-        // Açık UYAP yokken İş Listesi'nin bıraktığı PTT sorgusu (10 dk geçerli).
-        setTimeout(function() {
-            try {
-                const l = JSON.parse(localStorage.getItem('cokluuyapPtt') || 'null');
-                if (!l) return;
-                localStorage.removeItem('cokluuyapPtt');
-                if (/^\d{13}$/.test(String(l.barkod || '')) && Date.now() - (l.t || 0) < 600000) pttSorgula(String(l.barkod));
-            } catch (e) {}
-        }, 1500);
-    }
-    function uzaktanBekleyen() {
-        if (!UZAK || !document.getElementById('searchId')) return;
-        try {
-            const l = JSON.parse(localStorage.getItem(UZAK_DOSYA) || 'null');
-            if (!l) return;
-            localStorage.removeItem(UZAK_DOSYA);
-            if (l.dosya && Date.now() - (l.t || 0) < 600000) {
-                sessionStorage.setItem(UZAK_DOSYA, JSON.stringify({ t: Date.now(), dosya: l.dosya }));
-            }
-        } catch (e) {}
-    }
 
     // ── Dosya kartında işler: "Yapılacak iş var (N)" düğmesi + işli belgeler mor ──
     // Açık kartın dosyasının işleri köprüden alınır ve DOSYA_TAZE ms saklanır; iş açılınca / panel
@@ -5063,8 +4634,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const goster = isler.length > 0 && !!UYARI_SEKMELERI[seciliSekme(kart)];
         band.style.display = goster ? '' : 'none';
         if (!goster) return;
-        const imza = (ben ? ben.me.id : '') + '#' + isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title + ':' + (t.ext_pending ? 1 : 0); }).join('|')
-            + kesImza(d, isler);
+        const imza = (ben ? ben.me.id : '') + '#' + isler.map(function(t) { return t.id + ':' + t.status + ':' + t.title + ':' + (t.ext_pending ? 1 : 0); }).join('|');
         if (band.getAttribute('data-imza') === imza) return;
         band.setAttribute('data-imza', imza);
         band.innerHTML = '';
@@ -5082,8 +4652,6 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             if (t.status === 'onayda') satir.appendChild(el('span', 'font-size:11px;opacity:.8;', 'onayda'));
             const pb = pttDugmesi(t, 'uyap-is-uyari-kucuk');
             if (pb) satir.appendChild(pb);
-            const kt = kesinlestirmeDugmesi(t, d, 'uyap-is-uyari-kucuk');
-            if (kt) satir.appendChild(kt);
             const kb = kapanisDugmesi(t, 'uyap-is-uyari-kucuk');
             if (kb) satir.appendChild(kb);
             const ab = aktarDugmesi(t, 'uyap-is-uyari-kucuk');
@@ -5220,7 +4788,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // ── Kart düğmesi + sabit "İş Listesi" düğmesi ──
     function kartlariTara() {
         bekleyenDosyaAc();
-        if (document.body) { kur(); bildirimDugmeleri(); }
+        if (document.body) { kur(); bildirimDugmeleri(); sagMenuKur(); }   // sağ tık / çoklu pano: kart olmayan sayfalarda da
         if (!window.__uyapKartVerisi) return;
         kur();
         document.querySelectorAll('.dosya-sorgula-popup .dx-popup-title').forEach(function(baslik) {
@@ -5297,7 +4865,9 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         setTimeout(function() { b.remove(); }, 1200);
     }
     let kendiKopyam = false;   // panoya()'nın execCommand yedeği: UYAP'ın copy engeline takılmasın
+    let sonKopya = '';         // çoklu pano: seçim yokken Ctrl+Shift+N / sağ tık bunu kaydeder
     async function panoya(metin, sessiz) {
+        sonKopya = String(metin || '').slice(0, 20000);
         try {
             await navigator.clipboard.writeText(metin);
         } catch (e) {
@@ -5405,6 +4975,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         if (!secimKartta()) return;
         const m = seciliMetin();
         if (!m || !ev.clipboardData) return;
+        sonKopya = m.slice(0, 20000);
         ev.stopImmediatePropagation();
         ev.clipboardData.setData('text/plain', m);
         ev.preventDefault();
@@ -5412,8 +4983,8 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // ── Dosya türleri: her türün kendi sağ tık menüsü ──
     // Tür, kartın dosya türü açıklamasından (dosyaTurKodAciklama), yoksa birim adından bulunur; sıra
     // önemlidir (ilk eşleşen). menu(c) türün menüsünü verir: [[ [metin, fn], … ], …] (gruplar arasına
-    // çizgi; fn'siz satır başlıktır). c = {d: kart verisi, kart}. menu'süz türde tarayıcı menüsü açılır.
-    // Şimdilik yalnız icra; diğer türler kendi maddeleri belirlenince eklenir.
+    // çizgi; fn'siz satır başlıktır). c = {d: kart verisi, kart}. menu'süz türde ortak kart menüsü (kartMenusu:
+    // dosya bilgisi / dosya numarası kopyala) açılır; icra buna 121'i ekler.
     const DOSYA_TURLERI = [
         { anahtar: 'arabuluculuk', eslesir: /arabulucu/, menu: null },
         { anahtar: 'icra', eslesir: /icra dosya|icra dairesi|icra müdürlüğü|^icra/, menu: icraMenusu },
@@ -5437,11 +5008,17 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     function dosyaBilgisi(d) {
         return [d.birimAdi, d.dosyaNo].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     }
-    function icraMenusu(c) {
+    function kartMenusu(c) {
         const bilgi = dosyaBilgisi(c.d);
         if (!bilgi) return null;
-        const gruplar = [[[bilgi, null], ['Dosya bilgilerini kopyala', function() { panoya(bilgi); }]]];
-        if (c.d.dosyaId) gruplar.push([['121 Gönder', function() { talep121(c.d); }]]);
+        const no = String(c.d.dosyaNo || '').replace(/\s+/g, ' ').trim();
+        const g = [[bilgi, null], ['Dosya bilgilerini kopyala', function() { panoya(bilgi); }]];
+        if (no) g.push(['Dosya numarasını kopyala', function() { panoya(no); }]);
+        return [g];
+    }
+    function icraMenusu(c) {
+        const gruplar = kartMenusu(c);
+        if (gruplar && c.d.dosyaId) gruplar.push([['121 Gönder', function() { talep121(c.d); }]]);
         return gruplar;
     }
 
@@ -5626,161 +5203,6 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         return sonuc;
     }
 
-    // ── Kesinleştirme talebi: "Kesinleştirme" işinde dosya kartı bandından tek tıkla ──
-    // UYAP'ta elle: Borçlu > (borçlu) > Talep Gönder > Genel Talepler > Takibin Kesinleşmesi > Talep Ekle >
-    // Talep Evrakı Oluştur > E-imzala > Genel Talebi > Dosya Seç > Evrak Ekle > Evrak Gönder. Aynısı
-    // tarayıcısız (UYAP main.js, 2026-10-30): talep kodu 31; "Talep Ekle" önce dosya_icra_kesinlesme.ajx
-    // {dosyaId, kisiKurumId} sorar, basarilimi ise borçlunun kesinleşme bilgisi vardır ve talep eklenmez.
-    // Uygun borçlu = talep türü dosyada açık + kesinleşme bilgisi yok. Her gönderim tek borçlu içindir;
-    // göndermeden önce borçlu onay penceresinde seçilir.
-    const KES_TALEP_KODU = '31';
-    const kesDurum = {};          // dosyaAnahtari -> {t, yukleniyor, tur, borclular: [{kisiKurumId, ad, kesinlesmis}]}
-    let kesMesgul = false;
-    function kesinlestirmeIsi(t) {
-        if (t.parent_id || (t.status !== 'acik' && t.status !== 'devam')) return false;
-        if (t.sablon === 'h-kes-gonder') return true;
-        const ad = kucukHarf(isAdi(t));
-        return /^kesinleştirme/.test(ad) && !/kontrol|kabul/.test(ad);
-    }
-    async function kesDurumOku(d) {
-        const turler = await uyapTaze('getPortalAvukatTalepList.ajx', { dosyaId: d.dosyaId, islemTuru: 'genel' });
-        const tur = (Array.isArray(turler) ? turler : []).find(function(x) { return x && String(x.talepKodu) === KES_TALEP_KODU; }) || null;
-        const borclular = tur ? await borcluListesi(d) : [];
-        for (const b of borclular) {
-            const j = await uyapTaze('dosya_icra_kesinlesme.ajx', { dosyaId: d.dosyaId, kisiKurumId: b.kisiKurumId });
-            b.kesinlesmis = !!(j && j.basarilimi);
-        }
-        return { tur: tur, borclular: borclular };
-    }
-    // Bant için önbellekli (DOSYA_TAZE); yüklenirken eski sonuç döner, bant imzası değişince yeniden çizilir.
-    function kesDurumGetir(d) {
-        const a = dosyaAnahtari(d);
-        const k = kesDurum[a];
-        if (k && (k.yukleniyor || Date.now() - k.t < DOSYA_TAZE)) return k;
-        const yeni = { t: k ? k.t : 0, yukleniyor: true, tur: k ? k.tur : null, borclular: k ? k.borclular : [] };
-        kesDurum[a] = yeni;
-        kesDurumOku(d)
-            .then(function(r) { kesDurum[a] = { t: Date.now(), tur: r.tur, borclular: r.borclular }; })
-            .catch(function() { kesDurum[a] = { t: Date.now(), tur: null, borclular: [] }; });   // UYAP yanıt vermedi: düğme yok
-        return yeni;
-    }
-    function kesUygunlar(d) {
-        const k = kesDurumGetir(d);
-        return k.tur ? k.borclular.filter(function(b) { return !b.kesinlesmis; }) : [];
-    }
-    // Bandın yeniden çizilmesi için: kesinleştirme işi varsa uygun borçluların imzası.
-    function kesImza(d, isler) {
-        if (!d.dosyaId || !isler.some(kesinlestirmeIsi)) return '';
-        return 'K' + kesUygunlar(d).map(function(b) { return b.kisiKurumId; }).join(',');
-    }
-    function kesinlestirmeDugmesi(t, d, sinif) {
-        if (t._yeni) return null;
-        if (!d.dosyaId || !kesinlestirmeIsi(t) || !kesUygunlar(d).length) return null;
-        const b = el('button', null, 'Kesinleştirme talebi gönder');
-        b.type = 'button';
-        b.className = sinif;
-        b.style.cssText = 'background:var(--cu-vurgu);color:var(--cu-vurgu-uzeri,#fff);border-color:var(--cu-vurgu);';
-        b.title = 'Takibin Kesinleşmesi talebini hazırla, e-imzala ve gönder (önce borçlu onaylanır)';
-        b.addEventListener('click', function(ev) { ev.stopPropagation(); kesinlestirmePenceresi(t, d); });
-        return b;
-    }
-    async function kesinlestirmePenceresi(t, d) {
-        if (kesMesgul) { kur(); ort.style.display = 'flex'; return; }   // süren gönderimin penceresi
-        pencereBasi('Kesinleştirme talebi gönder', t);
-        kutu.appendChild(el('div', 'margin-top:4px;color:#9ca3af;font-size:11px;',
-            'Genel Talepler → Takibin Kesinleşmesi. Talep evrakı hazırlanır, e-imzalanır ve “Genel Talebi” olarak UYAP\'a gönderilir.'));
-        const yer = el('div', 'margin-top:8px;color:#cbd5e1;', 'Borçlular UYAP\'tan denetleniyor…');
-        kutu.appendChild(yer);
-        let durum;
-        try { durum = await kesDurumOku(d); } catch (e) { yer.textContent = ''; mesajEl.textContent = 'UYAP\'tan okunamadı: ' + e.message; return; }
-        kesDurum[dosyaAnahtari(d)] = { t: Date.now(), tur: durum.tur, borclular: durum.borclular };
-        yer.innerHTML = '';
-        if (!durum.tur) { mesajEl.textContent = 'Bu dosyanın genel talep listesinde “Takibin Kesinleşmesi” yok; dosya durumu bu talebe izin vermiyor.'; return; }
-        const masraf = Number(durum.tur.talepMasrafi) || 0;
-        if (masraf > 0) { mesajEl.textContent = 'Bu talep ' + masraf + ' TL masraflı görünüyor; ödeme bilgisi gerektiği için buradan gönderilmez. UYAP\'ın Talep Gönder ekranını kullanın.'; return; }
-        const uygun = durum.borclular.filter(function(b) { return !b.kesinlesmis; });
-        if (!uygun.length) { mesajEl.textContent = 'Kesinleştirmeye uygun borçlu yok: tüm borçluların kesinleşme bilgisi var.'; return; }
-
-        // Talep tek borçlu için gönderilir (UYAP'ta da öyle); işin borçlusu seçili gelir, işte taraf
-        // yoksa ve tek uygun borçlu varsa o. Başka borçlu için düğmeye yeniden basılır.
-        const taraf = kucukHarf(t.taraf_adi || '');
-        const isinBorclusu = function(b) { return !!taraf && kucukHarf(b.ad) === taraf; };
-        const tekBorclu = !taraf && uygun.length === 1;
-        yer.appendChild(el('div', 'font-weight:600;', 'Talep gönderilecek borçlu'));
-        const grup = 'kes-borclu-' + Date.now();
-        const secenekler = [];
-        durum.borclular.forEach(function(b) {
-            const satir = el('label', 'display:flex;align-items:center;gap:6px;margin-top:4px;cursor:' + (b.kesinlesmis ? 'default' : 'pointer') + ';' + (b.kesinlesmis ? 'opacity:.55;' : ''));
-            const c = el('input'); c.type = 'radio'; c.name = grup; c.style.cssText = 'width:auto;margin:0;';
-            c.disabled = b.kesinlesmis;
-            c.checked = !b.kesinlesmis && (isinBorclusu(b) || tekBorclu);
-            satir.appendChild(c);
-            satir.appendChild(el('span', 'font-weight:600;color:#f3f4f6;', b.ad));
-            if (b.kesinlesmis) satir.appendChild(el('span', 'font-size:11px;', '(kesinleşme bilgisi var)'));
-            else if (isinBorclusu(b)) satir.appendChild(el('span', 'font-size:11px;color:var(--cu-vurgu-acik);', '(işin borçlusu)'));
-            yer.appendChild(satir);
-            if (!b.kesinlesmis) secenekler.push({ b: b, c: c });
-        });
-        const uyari = el('div', 'margin-top:8px;padding:6px 8px;border-radius:7px;background:rgba(251,191,36,0.12);color:#fcd34d;display:none;');
-        yer.appendChild(uyari);
-        const ilerleme = el('div', 'margin-top:8px;word-break:break-word;');
-        yer.appendChild(ilerleme);
-        const secili = function() { const x = secenekler.find(function(x) { return x.c.checked; }); return x ? x.b : null; };
-        const gonder = dugme('E-imzala ve Gönder', 'var(--cu-vurgu)', async function(b) {
-            const borclu = secili();
-            if (!borclu) { mesajEl.textContent = 'Talep gönderilecek borçluyu seçin.'; return; }
-            if (kesMesgul) return;
-            kesMesgul = true;
-            mesajEl.textContent = '';
-            b.disabled = vazgec.disabled = true;
-            b.style.opacity = '0.6';
-            secenekler.forEach(function(x) { x.c.disabled = true; });
-            let r = null;
-            try {
-                const talepBilgileri = JSON.stringify([Object.assign({}, durum.tur, {
-                    masraf: masraf, fields: [{ id: '', title: '' }], id: 0 })]);
-                r = await talepEvrakiGonder(d, borclu, talepBilgileri, '_Kesinlestirme_Talebi',
-                    function(m) { ilerleme.style.color = '#cbd5e1'; ilerleme.textContent = borclu.ad + ': ' + m; });
-            } catch (e) {
-                ilerleme.style.color = '#fca5a5';
-                ilerleme.textContent = borclu.ad + ': ' + e.message;
-            } finally {
-                kesMesgul = false;
-                vazgec.disabled = false;
-            }
-            if (!r) {
-                b.disabled = false;
-                b.style.opacity = '';
-                secenekler.forEach(function(x) { x.c.disabled = false; });
-                return;
-            }
-            ilerleme.style.color = '#86efac';
-            ilerleme.textContent = '✓ ' + borclu.ad + ' için gönderildi. ' + String(r.message || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-            delete kesDurum[dosyaAnahtari(d)];
-            b.remove();
-            vazgec.textContent = 'Kapat';
-            isleriTazele();
-            // Talep gitti: iş "Gönderildi" sonucuyla onaya gönderilebilir (sonraki aşama: talep kabul kontrol).
-            const ey = kapanisEylemi(t);
-            if (ey) {
-                kutu.insertBefore(dugme(ey === 'tamamla' ? 'İşi tamamla' : 'İşi onaya gönder', 'var(--cu-vurgu)', function() {
-                    kapanisPenceresi(t, ey, { sonuc: 'olumlu', not: 'Kesinleştirme talebi UYAP\'tan gönderildi: ' + borclu.ad });
-                }), vazgec);
-            }
-        });
-        const ciz = function() {
-            const borclu = secili();
-            const yabanci = !!(borclu && taraf && !isinBorclusu(borclu));
-            uyari.style.display = yabanci ? '' : 'none';
-            uyari.textContent = yabanci ? 'Dikkat: ' + borclu.ad + ' bu işin borçlusu değil (iş: ' + t.taraf_adi + ').' : '';
-        };
-        secenekler.forEach(function(x) { x.c.addEventListener('change', ciz); });
-        const vazgec = dugme('Vazgeç', 'rgba(255,255,255,0.15)', function() { if (!kesMesgul) kapat(); });
-        kutu.appendChild(gonder);
-        kutu.appendChild(vazgec);
-        ciz();
-    }
-
     // ── PTT barkodu: "Kapalı Tebligat" belgesinde seçili 13 haneli barkod ──
     // Belgede barkod Code-39 yazısıyla "*4007770084489*" diye durur; seçim yıldızlı / boşluklu gelebilir.
     // Belgenin adı görüntüleyici başlığından (.documentViewerHeader h6), yoksa evrak ağacında seçili
@@ -5864,7 +5286,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const kart = h.closest('.dosya-sorgula-popup');
         const d = kart && window.__uyapKartVerisi ? window.__uyapKartVerisi(kart) : null;
         const tur = d ? dosyaTuru(d) : null;
-        const gruplar = tur && tur.menu ? tur.menu({ d: d, kart: kart }) : null;
+        const gruplar = tur ? (tur.menu || kartMenusu)({ d: d, kart: kart }) : null;
         return gruplar && gruplar.length ? gruplar : null;
     }
     function sagMenuGoster(x, y, gruplar, altYaziYok) {
@@ -5878,6 +5300,21 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         gruplar.forEach(function(g, i) {
             if (i) sagMenu.appendChild(el('div', 'height:1px;margin:4px 0;background:rgba(255,255,255,0.1);'));
             g.forEach(function(m) {
+                if (m && m.sira) {         // düğme sırası (çoklu pano gözleri): [etiket, fn|null, ipucu, dolu]
+                    const r = el('div', 'display:flex;gap:3px;padding:3px 12px 6px;');
+                    m.sira.forEach(function(b) {
+                        const x = el('button', 'flex:1;min-width:22px;padding:3px 0;border-radius:5px;cursor:pointer;font-family:inherit;font-size:11.5px;font-weight:700;color:inherit;border:1px solid rgba(255,255,255,' +
+                            (b[3] ? '0.35' : '0.12') + ');background:' + (b[3] ? 'rgba(var(--cu-vurgu-rgb),0.35)' : 'transparent') + ';', b[0]);
+                        x.type = 'button';
+                        x.title = b[2] || '';
+                        if (!b[1]) { x.disabled = true; x.style.opacity = '0.35'; x.style.cursor = 'default'; }
+                        x.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+                        x.addEventListener('click', function(ev) { ev.stopPropagation(); sagMenuKapat(); b[1](); });
+                        r.appendChild(x);
+                    });
+                    sagMenu.appendChild(r);
+                    return;
+                }
                 if (!m[1]) {               // grup başlığı (ör. "İcra dosyası · …"): tıklanmaz
                     sagMenu.appendChild(el('div', 'padding:4px 14px 2px;color:var(--cu-vurgu-acik);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;', m[0]));
                     return;
@@ -5916,8 +5353,102 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     // Başka bölümler (ör. Dosya Sorgulama'daki "2026/1234" kutusu) aynı menüyü ve panoyu kullanır.
     window.__uyapSagMenuAc = function(x, y, gruplar) { kur(); sagMenuGoster(x, y, gruplar, true); };
+    window.__uyapSagMenuEkDestek = true;   // sağ tık menüsü __uyapSagMenuEkleri satırlarını da gösterir
     window.__uyapPanoya = panoya;
     window.__uyapBildirim = kisaBildirim;
+
+    // ── Çoklu pano (16.11.2026): 10 göz (1–9, 0), arayüzün her yerinde ──
+    // Ctrl+Shift+N: seçili metni (seçim yoksa son kopyalananı) N. göze kaydeder. Yazı alanında Ctrl+N: N. gözü
+    // yapıştırır (Ctrl+V olağan panodur, dokunulmaz). Sağ tıkta "kaydet" ve "yapıştır" düğme sıraları.
+    // Gözler yalnız bu tarayıcıda kalır (localStorage); hiçbir yere gönderilmez.
+    const PANO_ANAHTAR = 'cuCokluPano', PANO_SIRA = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    function panoOku() {
+        try {
+            const v = JSON.parse(localStorage.getItem(PANO_ANAHTAR) || '[]');
+            if (Array.isArray(v)) return PANO_SIRA.map(function(_, i) { return typeof v[i] === 'string' ? v[i] : ''; });
+        } catch (e) {}
+        return PANO_SIRA.map(function() { return ''; });
+    }
+    function panoYaz(l) { try { localStorage.setItem(PANO_ANAHTAR, JSON.stringify(l)); } catch (e) {} }
+    function panoOnizleme(m) { m = String(m).replace(/\s+/g, ' ').trim(); return m.length > 60 ? m.slice(0, 57) + '…' : m; }
+    function panoKaydet(i, metin) {
+        metin = String(metin || '').slice(0, 20000);
+        if (!metin.trim()) { kisaBildirim('Kaydedilecek metin yok: önce bir yeri seçin ya da kopyalayın.'); return; }
+        const l = panoOku();
+        l[i] = metin;
+        panoYaz(l);
+        kisaBildirim('Pano ' + PANO_SIRA[i] + ': ' + panoOnizleme(metin) + ' — yapıştırmak için Ctrl+' + PANO_SIRA[i]);
+    }
+    // Yazılabilir alan: metin kutusu, textarea, contenteditable (select / onay kutusu / sayı kutusu değil).
+    function yaziAlani(e) {
+        const a = e && e.closest ? e.closest('input, textarea, [contenteditable=""], [contenteditable="true"]') : null;
+        if (!a || a.disabled || a.readOnly) return null;
+        if (a.tagName === 'INPUT' && !/^(text|search|tel|url|email|password)?$/i.test(a.getAttribute('type') || '')) return null;
+        return a;
+    }
+    function alanSecimi(a) {
+        try {
+            if (a && a.value != null && a.selectionStart != null && a.selectionStart !== a.selectionEnd) return a.value.slice(a.selectionStart, a.selectionEnd);
+        } catch (e) {}
+        return '';
+    }
+    // execCommand('insertText'): imleç yerine yazar, geri al (Ctrl+Z) çalışır, UYAP'ın / React'in input olayları tetiklenir.
+    function alanaYaz(a, metin) {
+        a.focus();
+        let oldu = false;
+        try { oldu = document.execCommand('insertText', false, metin); } catch (e) {}
+        if (!oldu && a.value != null && a.setRangeText) {
+            const bas = a.selectionStart != null ? a.selectionStart : a.value.length;
+            a.setRangeText(metin, bas, a.selectionEnd != null ? a.selectionEnd : bas, 'end');
+            a.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
+    function panoYapistir(i, a) {
+        const m = panoOku()[i];
+        if (!m) { kisaBildirim('Pano ' + PANO_SIRA[i] + ' boş (kaydetmek için metni seçip Ctrl+Shift+' + PANO_SIRA[i] + ').'); return; }
+        alanaYaz(a, m);
+    }
+    function panoGruplari(alan, kaydedilecek, kaydetBasligi) {
+        const l = panoOku(), g = [];
+        if (kaydedilecek) {
+            g.push([kaydetBasligi || 'Çoklu panoya kaydet · Ctrl+Shift+1…0', null]);
+            g.push({ sira: PANO_SIRA.map(function(n, i) {
+                return [n, function() { panoKaydet(i, kaydedilecek); }, n + ': ' + (l[i] ? panoOnizleme(l[i]) + ' (üzerine yazılır)' : 'boş'), !!l[i]];
+            }) });
+        }
+        if (alan && l.some(Boolean)) {
+            g.push(['Çoklu panodan yapıştır · Ctrl+1…0', null]);
+            g.push({ sira: PANO_SIRA.map(function(n, i) {
+                return [n, l[i] ? function() { panoYapistir(i, alan); } : null, n + ': ' + (l[i] ? panoOnizleme(l[i]) : 'boş'), !!l[i]];
+            }) });
+        }
+        if (g.length && l.some(Boolean)) g.push(['Çoklu panoyu temizle', function() { panoYaz([]); kisaBildirim('Çoklu pano temizlendi.'); }]);
+        return g.length ? [g] : [];
+    }
+    window.addEventListener('keydown', function(ev) {
+        if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+        const m = /^(?:Digit|Numpad)([0-9])$/.exec(ev.code || '');
+        if (!m) return;
+        const i = PANO_SIRA.indexOf(m[1]);
+        const ae = document.activeElement;
+        if (ev.shiftKey) {
+            const belge = sonBelgeHedefi && sonBelgeHedefi.isConnected ? belgeSecimi(sonBelgeHedefi) : '';
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            panoKaydet(i, alanSecimi(ae) || seciliMetin() || belge || sonKopya);
+            return;
+        }
+        const a = yaziAlani(ae);
+        if (!a) return;                        // yazı alanı dışında: tarayıcıya bırak
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        panoYapistir(i, a);
+    }, true);
+    document.addEventListener('copy', function() {   // tarayıcının kendi kopyalaması (UYAP'ın engellemediği yerler)
+        const m = alanSecimi(document.activeElement) || seciliMetin();
+        if (m) sonKopya = m.slice(0, 20000);
+    }, true);
+
     function sagMenuKur() {
         if (!anaCerceve() || window.__uyapSagMenu || !document.body) return;
         window.__uyapSagMenu = true;
@@ -5925,31 +5456,37 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             sagMenuKapat();
             const h = ev.target && ev.target.closest ? ev.target : null;
             if (ev.shiftKey || ev.ctrlKey || !h || sagMenuKapali()) return;
-            const secili = seciliMetin() || sagTikSecimi || belgeSecimi(h);
+            const alan = yaziAlani(h);
+            const secili = (alan ? alanSecimi(alan) : '') || seciliMetin() || sagTikSecimi || belgeSecimi(h);
             sagTikSecimi = '';
-            if (secili && !h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')
-                && !(ort && ort.contains(h))) {
-                // Kartta seçim varken: en üstte "Seçili metni kopyala", altında PTT barkodu menüsü ya da
-                // dosya türünün menüsü. Kart dışındaki seçimde tarayıcının menüsü (Kopyala, Çevir …) kalsın.
-                let g = null;
-                try { g = barkodMenusu(h, secili); } catch (e) {}
-                if (!g) { try { g = sagMenuMaddeleri(h); } catch (e) {} }
-                if (!g) return;
+            const goster = function(gruplar) {
                 ev.preventDefault();
                 kur();
-                t121Konum = { x: ev.clientX, y: ev.clientY };
-                sagMenuGoster(ev.clientX, ev.clientY, [[['Seçili metni kopyala', function() { panoya(secili); }]]].concat(g));
+                t121Konum = { x: ev.clientX, y: ev.clientY };   // borçlu seçim menüsü aynı yerde açılsın
+                sagMenuGoster(ev.clientX, ev.clientY, gruplar);
+            };
+            const kopyala = secili ? [[['Seçili metni kopyala', function() { panoya(secili); }]]] : [];
+            if (alan) {
+                // Yazı alanı: seçim ya da dolu çoklu pano varsa bizim menü (Kes / Yapıştır için Shift + sağ tık).
+                const g = panoGruplari(alan, secili);
+                if (g.length) goster(kopyala.concat(g));
                 return;
             }
-            if (h.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], #uyap-ispanel')) return;
-            if (ort && ort.contains(h)) return;
-            let gruplar;
-            try { gruplar = sagMenuMaddeleri(h); } catch (e) { return; }   // beklenmeyen sayfa yapısı: tarayıcı menüsü
-            if (!gruplar) return;
-            ev.preventDefault();
-            kur();
-            t121Konum = { x: ev.clientX, y: ev.clientY };   // borçlu seçim menüsü aynı yerde açılsın
-            sagMenuGoster(ev.clientX, ev.clientY, gruplar);
+            if (h.closest('select, #uyap-ispanel') || (ort && ort.contains(h))) return;
+            // Seçim varken en üstte "Seçili metni kopyala", altında PTT barkodu ya da dosya türünün menüsü, en altta
+            // çoklu pano. Kartta seçimsiz sağ tıkta pano sırası son kopyalananı kaydeder.
+            let kartG = null;
+            if (secili) { try { kartG = barkodMenusu(h, secili); } catch (e) {} }
+            if (!kartG) { try { kartG = sagMenuMaddeleri(h); } catch (e) {} }   // beklenmeyen sayfa yapısı: menüsüz
+            // Ek betiklerin satırları (ör. paylas.js: belge üzerinde "Belgeyi paylaş")
+            let ekG = [];
+            (window.__uyapSagMenuEkleri || []).forEach(function(f) {
+                try { const x = f(h); if (x && x.length) ekG = ekG.concat(x); } catch (e) {}
+            });
+            const pano = secili ? panoGruplari(null, secili)
+                : (kartG || ekG.length) && sonKopya ? panoGruplari(null, sonKopya, 'Son kopyalananı kaydet: ' + panoOnizleme(sonKopya)) : [];
+            const g = kopyala.concat(kartG || [], ekG, pano);
+            if (g.length) goster(g);
         }, true);
         document.addEventListener('mousedown', function(ev) { if (sagMenu && !sagMenu.contains(ev.target)) sagMenuKapat(); }, true);
         window.addEventListener('keydown', sagMenuTus, true);
@@ -5981,6 +5518,7 @@ const _EK_BETIK_DOSYALARI: &[&str] = &[
     "anasayfa.js",
     "icra.js",
     "isler.js",
+    "paylas.js",
 ];
 // armonia-renk.css: UYAP stilindeki lacivert/gri renkleri tema değişkenlerimize bağlayan, araclar/renk_uret.py ile
 // üretilen katman (2026-11-14). tema.css'ten önce gelir: elle ince ayarlar eşit özgüllükte kazanır.
@@ -6903,6 +6441,115 @@ async fn yerel_giris_kodu(
         .unwrap()
 }
 
+/// Sayfadaki "Paylaş" düğmesi için: gövdedeki UDF baytlarını bu bilgisayarda PDF'e çevirip döner.
+/// Hiçbir yere gönderilmez, saklanmaz; yalnız oturumu açık sayfa çağırabilir.
+async fn udf_pdf_cevir(
+    axum::extract::State(state): axum::extract::State<AppRuntimeState>,
+    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    req: AxumRequest,
+) -> Response {
+    let client_host = resolve_client_host(&state, connect_info.as_ref());
+    let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+    if let Err(rej) = require_auth(req.headers(), &Method::POST, &pq, &client_host) {
+        return rej.into_response();
+    }
+    let hata = |kod: StatusCode, m: &str| {
+        Response::builder()
+            .status(kod)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Cache-Control", "no-store")
+            .body(Body::from(m.to_string()))
+            .unwrap()
+    };
+    let govde = match axum::body::to_bytes(req.into_body(), 40 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return hata(StatusCode::PAYLOAD_TOO_LARGE, "Belge çok büyük."),
+    };
+    if !crate::udf_pdf::udf_zip_mi(&govde) {
+        return hata(StatusCode::UNSUPPORTED_MEDIA_TYPE, "UDF değil.");
+    }
+    match tokio::task::spawn_blocking(move || crate::udf_pdf::udf_pdf_uret(&govde)).await {
+        Ok(Ok(pdf)) => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/pdf")
+            .header("Cache-Control", "no-store")
+            .body(Body::from(pdf))
+            .unwrap(),
+        Ok(Err(e)) => hata(StatusCode::UNPROCESSABLE_ENTITY, &e),
+        Err(_) => hata(StatusCode::INTERNAL_SERVER_ERROR, "Çevirme yarıda kaldı."),
+    }
+}
+
+#[derive(Deserialize)]
+struct PaylasQuery {
+    #[serde(default)]
+    ad: String,
+    #[serde(default)]
+    aciklama: String,
+    /// "pano": pencere açmadan belgeyi dosya olarak panoya koy (tek tık paylaşım, 17.11.2026).
+    #[serde(default)]
+    kip: String,
+}
+
+/// Sayfadaki "Paylaş": tarayıcının paylaştırmadığı türler (UDF …) için belgeyi geçici klasöre yazıp
+/// Windows'un paylaşım penceresini açar. Yalnız bu bilgisayardaki tarayıcı çağırabilir (pencere burada açılır).
+async fn yerel_paylas(
+    axum::extract::State(state): axum::extract::State<AppRuntimeState>,
+    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    Query(q): Query<PaylasQuery>,
+    req: AxumRequest,
+) -> Response {
+    let client_host = resolve_client_host(&state, connect_info.as_ref());
+    let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+    if let Err(rej) = require_auth(req.headers(), &Method::POST, &pq, &client_host) {
+        return rej.into_response();
+    }
+    let yanit = |kod: StatusCode, m: &str| {
+        Response::builder()
+            .status(kod)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Cache-Control", "no-store")
+            .body(Body::from(m.to_string()))
+            .unwrap()
+    };
+    if !_yerel_istemci_mi(&client_host, req.headers()) {
+        return yanit(StatusCode::FORBIDDEN, "Paylaşım penceresi yalnız bu bilgisayarda açılabilir.");
+    }
+    // Ad / açıklama Base64 (UTF-8) başlıkta: adres satırından geçen Türkçe harfler bozuluyordu
+    // (canlı 17.11.2026: "Reddiyat Beyanı.pdf" → "Reddiyat Beyan\u{FFFD}.pdf"). Yoksa eski sorgu parametresi.
+    let q = {
+        let h = req.headers();
+        let b64 = |ad: &str| -> Option<String> {
+            let v = h.get(ad)?.to_str().ok()?;
+            let b = base64::engine::general_purpose::STANDARD.decode(v.trim()).ok()?;
+            String::from_utf8(b).ok().filter(|s| !s.trim().is_empty())
+        };
+        PaylasQuery {
+            ad: b64("x-cu-ad").unwrap_or(q.ad),
+            aciklama: b64("x-cu-aciklama").unwrap_or(q.aciklama),
+            kip: q.kip,
+        }
+    };
+    let govde = match axum::body::to_bytes(req.into_body(), 60 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return yanit(StatusCode::PAYLOAD_TOO_LARGE, "Belge çok büyük."),
+    };
+    if govde.is_empty() {
+        return yanit(StatusCode::BAD_REQUEST, "Belge boş.");
+    }
+    let ad = crate::paylas_win::guvenli_ad(&q.ad);
+    if q.kip == "pano" {
+        let sonuc = tokio::task::spawn_blocking(move || crate::paylas_win::panoya_kopyala(&ad, &govde)).await;
+        return match sonuc {
+            Ok(Ok(_)) => yanit(StatusCode::OK, "pano"),
+            Ok(Err(e)) => yanit(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            Err(_) => yanit(StatusCode::INTERNAL_SERVER_ERROR, "Kopyalama yarıda kaldı."),
+        };
+    }
+    // Windows paylaşım penceresi yolu kaldırıldı (17.11.2026): yalnız panoya kopyalama.
+    yanit(StatusCode::BAD_REQUEST, "Desteklenmeyen paylaşım kipi.")
+}
+
 #[derive(Deserialize)]
 struct YerelGirisQuery {
     #[serde(default)]
@@ -6972,70 +6619,6 @@ fn _lan_istegi_reddi(headers: &HeaderMap) -> Option<&'static str> {
         return Some("Çapraz-site istek reddedildi.");
     }
     None
-}
-
-async fn is_listesi_dosya_ac(
-    axum::extract::State(state): axum::extract::State<AppRuntimeState>,
-    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
-    req: AxumRequest,
-) -> Response {
-    let client_host = resolve_client_host(&state, connect_info.as_ref());
-    let headers_map: HashMap<String, String> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).to_string(),
-            )
-        })
-        .collect();
-    if !_LOCAL_HOSTS.contains(&client_host.as_str())
-        || yerel_kapi::tarayici_reddi(&headers_map, req.method().as_str(), None).is_some()
-    {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("Bulunamadi."))
-            .unwrap();
-    }
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("Cache-Control", "no-store")
-        .body(Body::from(is_listesi::DOSYA_AC_SAYFASI))
-        .unwrap()
-}
-
-async fn is_listesi_ptt(
-    axum::extract::State(state): axum::extract::State<AppRuntimeState>,
-    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
-    req: AxumRequest,
-) -> Response {
-    let client_host = resolve_client_host(&state, connect_info.as_ref());
-    let headers_map: HashMap<String, String> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                String::from_utf8_lossy(v.as_bytes()).to_string(),
-            )
-        })
-        .collect();
-    if !_LOCAL_HOSTS.contains(&client_host.as_str())
-        || yerel_kapi::tarayici_reddi(&headers_map, req.method().as_str(), None).is_some()
-    {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("Bulunamadi."))
-            .unwrap();
-    }
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("Cache-Control", "no-store")
-        .body(Body::from(is_listesi::PTT_SAYFASI))
-        .unwrap()
 }
 
 #[derive(Deserialize)]
@@ -7261,16 +6844,13 @@ async fn proxy_handler(
         return tuple_to_axum_response(status, out_headers, out_body);
     }
 
-    if is_listesi::is_path(&full_path) {
-        if !_LOCAL_HOSTS.contains(&client_host.as_str()) {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("Bulunamadi."))
-                .unwrap();
-        }
-        let (status, out_headers, out_body) =
-            is_listesi::handle(method.as_str(), &full_path, &query, &body).await;
-        return tuple_to_axum_response(status, out_headers, out_body);
+    // Buluttaki eski İş Listesi köprüsü ve sayfaları 17.11.2026'da kaldırıldı: bu yollar UYAP'a iletilmez.
+    if _eski_is_listesi_yolu(&full_path) {
+        return Response::builder()
+            .status(StatusCode::GONE)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(Body::from("İş Listesi artık Çoklu UYAP'ta sol menüde."))
+            .unwrap();
     }
 
     if is_gecit_path(&full_path) {
@@ -7476,8 +7056,8 @@ pub fn build_app(state: AppRuntimeState) -> Router {
         .route("/__agent__/ping", options(agent_ping_preflight).get(agent_ping))
         .route("/__uyap_yerel__/kod", post(yerel_giris_kodu))
         .route("/__uyap_yerel__/giris", get(yerel_giris))
-        .route(is_listesi::DOSYA_AC_PATH, get(is_listesi_dosya_ac))
-        .route(is_listesi::PTT_PATH, get(is_listesi_ptt))
+        .route("/__uyap_yerel__/udf_pdf", post(udf_pdf_cevir))
+        .route("/__uyap_yerel__/paylas", post(yerel_paylas))
         .route("/__uyap_lan__/giris", get(lan_giris_formu).post(lan_giris))
         .route("/", any(proxy_handler))
         .route("/*full_path", any(proxy_handler))

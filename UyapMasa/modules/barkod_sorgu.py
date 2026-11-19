@@ -1121,12 +1121,20 @@ def _barkodu_veritabanina_kaydet(db, dosya_obj, evrak, log, **degerler):
     elif isinstance(ham, dict):
         degerler["teslim_sekli"] = ptt_teslim_sekli(ham)
     try:
-        db["TebligatBarkod"].objects.update_or_create(
+        tb, _ = db["TebligatBarkod"].objects.update_or_create(
             dosya=dosya_obj, birim_evrak_no=int(birim_evrak_no),
             defaults=degerler,
         )
     except Exception as e:
         log(f"  ⚠️ DB'ye kaydedilemedi: {e}")
+        return
+    # PTT hareketleri ayrı tabloda, gerçek tarihleriyle (2026-11-14).
+    if isinstance(degerler.get("ham_yanit"), dict):
+        try:
+            from icra_models.models import ptt_hareketlerini_yaz
+            ptt_hareketlerini_yaz(tb, degerler["ham_yanit"])
+        except Exception as e:
+            log(f"  ⚠️ PTT hareketleri kaydedilemedi: {e}")
 
 
 def _bilinen_barkod_kaydini_al(db, dosya_obj, birim_evrak_no):
@@ -1149,11 +1157,10 @@ def _taraflari_tazele(dosya_obj, dosya_id, log):
     DosyaTaraf'a yazar — borçlu listesi kesinleşme/tebligat eşleşmesinden ÖNCE
     tazelenir. Hata turu durdurmaz."""
     try:
-        ham = dosya_core.dosya_taraf_getir(dosya_id, log_fn=log, timeout=30, denemeler=2,
-                                           istek_sarici=dosya_core._arka_plan_istek)
+        ham = dosya_core.taraflari_tazele(dosya_obj, dosya_id, log, dosya_core._arka_plan_istek,
+                                          timeout=30, denemeler=2)
         if ham:
-            n = dosya_core.dosya_taraf_kaydet(dosya_obj, ham, log)
-            log(f"  👥 Taraflar güncellendi ({n}).")
+            log(f"  👥 Taraflar güncellendi ({len(ham)}).")
     except Exception as e:
         log(f"  ⚠️ Taraflar güncellenemedi: {e}")
 

@@ -493,6 +493,19 @@ fn vekilleri_kaydet<C: GenericClient>(c: &mut C, vekil_ham: &str) -> Result<Vec<
 /// `dosya_taraf_bilgileri_brd` yanıtını (adi, rol, kisiKurum, vekil) bağlara yazar. Liste tam
 /// sayılır: listede olmayan bağlar işaretlenir. Döner: kaydedilen taraf sayısı.
 pub fn dosya_taraf_kaydet<C: GenericClient>(c: &mut C, dosya: i64, ham_liste: &[Value], log: Gunluk) -> Result<usize, String> {
+    dosya_taraf_kaydet_roller(c, dosya, ham_liste, None, log)
+}
+
+/// [`dosya_taraf_kaydet`]; `roller` verilirse liste yalnız o roller için tam sayılır (listede olmayan
+/// bağ yalnız bu rollerde işaretlenir). Borçlu dışı roller yazılırken borçlular işaretlenmesin diye
+/// (Python `haric_roller=["borclu"]`).
+pub fn dosya_taraf_kaydet_roller<C: GenericClient>(
+    c: &mut C,
+    dosya: i64,
+    ham_liste: &[Value],
+    roller: Option<&[&str]>,
+    log: Gunluk,
+) -> Result<usize, String> {
     if ham_liste.is_empty() {
         return Ok(0);
     }
@@ -523,7 +536,7 @@ pub fn dosya_taraf_kaydet<C: GenericClient>(c: &mut C, dosya: i64, ham_liste: &[
         gorulen.insert(bag);
     }
     if !gorulen.is_empty() {
-        kaybolan_taraflari_isaretle(&mut tx, dosya, &gorulen, None, log)?;
+        kaybolan_taraflari_isaretle(&mut tx, dosya, &gorulen, roller, log)?;
     }
     tx.commit().map_err(hata)?;
     Ok(gorulen.len())

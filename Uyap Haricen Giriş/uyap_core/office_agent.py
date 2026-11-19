@@ -232,6 +232,10 @@ async def handle_uyap_request(meta: dict, body: bytes, kaynak: str = ""):
         return await jobs.handle_control(
             meta.get("method", "GET"), path, meta.get("query", ""), body, kaynak=kaynak)
 
+    kesik = uyap_proxy.kesilen_uc_yaniti(path)
+    if kesik:
+        return kesik
+
     gw = uyap_proxy.gw
     gw.touch()
 

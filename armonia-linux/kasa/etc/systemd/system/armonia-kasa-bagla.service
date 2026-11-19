@@ -1,0 +1,18 @@
+# Kasa acildiysa denetler, /srv/kasa'ya baglar ve CokluUYAP calisma alanini kasaya yonlendirir.
+# (live-boot /etc/fstab'i acilista yeniden yazdigi icin baglama burada yapilir.) Claude, 2026-11-14.
+[Unit]
+Description=Armonia kasa baglama
+After=systemd-cryptsetup@kasa.service
+Before=armonia-kiosk.service
+ConditionPathExists=/dev/mapper/kasa
+# Kapanista kasa kapatilmadan once ayrilsin
+Before=umount.target
+Conflicts=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/armonia/bin/kasa_bagla.sh
+ExecStop=-/bin/umount /var/lib/armonia/cokluuyap
+ExecStop=-/bin/umount /var/lib/armonia/CokluUyap
+ExecStop=-/bin/umount /srv/kasa

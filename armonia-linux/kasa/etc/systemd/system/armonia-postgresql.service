@@ -1,0 +1,68 @@
+# Armonia PostgreSQL: veri kasada (/srv/kasa/postgresql), yalniz Sunucu rolunde, yalniz Unix soketi (ag portu yok).
+# CokluUYAP'a DATABASE_URL, sunucu hazir olunca /run/armonia/cokluuyap.env ile verilir. Claude, 2026-11-14.
+[Unit]
+Description=Armonia PostgreSQL (kasada, Sunucu rolu)
+After=armonia-kasa-bagla.service
+Requires=armonia-kasa-bagla.service
+Before=armonia-kiosk.service
+# Rol isareti kasada; kurulum sihirbazi yazar (Sunucu: "sunucu"). Yoksa / baska rolse PG baslamaz.
+ConditionPathExists=/srv/kasa/armonia/rol-sunucu
+
+[Service]
+Type=notify
+User=postgres
+Group=postgres
+RuntimeDirectory=postgresql
+RuntimeDirectoryMode=0755
+# Ilk acilista initdb (root olarak; sandbox disinda)
+ExecStartPre=+/opt/armonia/bin/pg_hazirla.sh
+ExecStart=/opt/armonia/bin/pg_baslat.sh
+# Hazir olunca kiosk rolu/veritabani + ortam dosyasi
+ExecStartPost=+/opt/armonia/bin/pg_rol.sh
+ExecStopPost=+/bin/rm -f /run/armonia/cokluuyap.env
+# guvenlik-denetci K1: cokerse geri gelsin (kiosk o sirada kasa_denetle.sh ile bekletilir)
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStartSec=120
+TimeoutStopSec=60
+OOMScoreAdjust=-900
+
+# Kum havuzu
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Ad alani '+' onkomutlari icin de kurulur: dizin yoksa servis NAMESPACE (226) ile dusuyordu (Hyper-V 04:12).
+# Dizini kasa_bagla.sh olusturur; '-' yine de yoksa yok sayar.
+ReadWritePaths=-/srv/kasa/postgresql
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# Yalniz Unix soketi: ag ad alani bos, AF_INET hic yok
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @module @raw-io @cpu-emulation @debug
+SystemCallErrorNumber=EPERM
+UMask=0077
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

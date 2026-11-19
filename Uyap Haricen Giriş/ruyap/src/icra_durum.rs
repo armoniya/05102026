@@ -17,6 +17,7 @@
 
 use crate::icra_kayit as kayit;
 use crate::icra_tebligat::{self as teb, tr_kucuk, E_TEBLIG_OKUMA_SURESI_GUN};
+use crate::is_otomatik as otomatik;
 use crate::icra_veri::{
     self as veri, durum_olayi_yaz, KesinlesmeDurumu as K, OlayKaynak, OlayTur, TakipAsamasi as A, TebligatDurumu as T, YeniOlay,
 };
@@ -376,6 +377,8 @@ pub struct Sonuc {
     pub guncellenen: usize,
     /// Durum geçmişine yazılan olay sayısı.
     pub olay: usize,
+    /// Durum geçişinden şablonla açılan iş sayısı (L7).
+    pub otomatik_is: usize,
 }
 
 /// Borçluların kesinleşme, tebliğ durumu ve takip aşamasını kayıtlı tebligatlardan hesaplayıp
@@ -541,8 +544,9 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
         )
         .map_err(hata)?;
         sonuc.guncellenen += 1;
+        let mut olay_kimlikleri: Vec<(OlayTur, i64)> = Vec::new();
         for (tur, eski_metin, yeni_metin, tarih) in &olaylar {
-            durum_olayi_yaz(
+            let oid = durum_olayi_yaz(
                 &mut tx,
                 &YeniOlay {
                     dosya: dosya_id,
@@ -555,7 +559,46 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
                     aciklama: "",
                 },
             )?;
+            olay_kimlikleri.push((*tur, oid));
             sonuc.olay += 1;
+        }
+        // L7: tebliğ / iade / kesinleşme geçişinde şablondan otomatik iş (bkz. is_otomatik).
+        let olay_bilgisi = |t: OlayTur| {
+            let kimlik = olay_kimlikleri.iter().find(|(x, _)| *x == t).map(|(_, i)| *i);
+            let metin = olaylar.iter().find(|o| o.0 == t).map(|o| o.2.clone()).unwrap_or_default();
+            (kimlik, metin)
+        };
+        let mut gecisler: Vec<(&str, OlayTur, Option<NaiveDate>, Option<NaiveDate>)> = Vec::new();
+        if let Some(o) = otomatik::tebligat_olayi(&eski.tebligat_durumu, &yeni.tebligat_durumu) {
+            let son_gun = if o == "tebligat:teblig_edildi" { yeni.kesinlesme_tarihi } else { None };
+            gecisler.push((o, OlayTur::Tebligat, yeni.tebligat_durum_tarihi, son_gun));
+        }
+        if let Some(o) = otomatik::kesinlesme_olayi(&eski.kesinlesme_durumu, &yeni.kesinlesme_durumu) {
+            gecisler.push((o, OlayTur::Kesinlesme, yeni.kesinlesme_tarihi, None));
+        }
+        for (olay, tur, olay_tarihi, son_gun) in gecisler {
+            let (kimlik, metin) = olay_bilgisi(tur);
+            let g = otomatik::Gecis {
+                dosya_id,
+                taraf_id: id,
+                durum_olayi_id: kimlik,
+                olay,
+                olay_tarihi,
+                son_gun,
+                olay_metni: &metin,
+            };
+            // Ayrı savepoint: iş açılamazsa icra hesabı yine kaydedilir.
+            let mut sp = tx.transaction().map_err(hata)?;
+            match otomatik::olaydan_is_ac(&mut sp, &g, bugun) {
+                Ok(acilan) => {
+                    sp.commit().map_err(hata)?;
+                    sonuc.otomatik_is += acilan.len();
+                }
+                Err(e) => {
+                    drop(sp);
+                    log(&format!("⚠️ Otomatik iş açılamadı ({olay}, borçlu {id}): {e}"));
+                }
+            }
         }
     }
     tx.commit().map_err(hata)?;
@@ -620,7 +663,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     c.batch_execute("INSERT INTO kesinlesme_kurali (itiraz_suresi_gun, ad) VALUES (7, 'Varsayılan')").unwrap();
 
     // Takip talebi: ilk hesap geçmişe yazılmaz
-    assert_eq!(hesapla(c, g(2026, 10, 1)), Sonuc { guncellenen: 1, olay: 0 });
+    assert_eq!(hesapla(c, g(2026, 10, 1)), Sonuc { guncellenen: 1, olay: 0, otomatik_is: 0 });
     assert_eq!(durum(c).0, "takip_talebi");
     // Ödeme emri evrakı düzenlendi, tebligatı henüz yok
     kayit::evrak_listesi_kaydet(c, d, &[json!({"birimEvrakNo": 9, "tur": "Ödeme İcra Emri", "onaylandigiTarih": "01/10/2026 09:00"})]).unwrap();

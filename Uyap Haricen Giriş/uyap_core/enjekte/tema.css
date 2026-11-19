@@ -1,0 +1,333 @@
+/* ═══════════════════════════════════════════════════════════════════════════════════════
+   ÇOKLU UYAP — TEMALAR (2026-11-11)
+   ═══════════════════════════════════════════════════════════════════════════════════════
+   uyap_proxy._rewrite_body bu dosyayı sayfanın EN BAŞINA <style> olarak koyar (enjekte betiklerden önce):
+   açılışta renk sıçraması olmaz. Seçim: tema.js (UYAP'ın üst çubuktaki tema düğmesi). Seçili tema
+   <html data-cu-tema="…">'da; UYAP ve Koyu dışındaki temalarda ayrıca <html data-cu-deri> vardır ve
+   UYAP'ın kendi yüzeyleri (üst çubuk, zemin, sol menü, kartlar, dosya penceresi, tablolar) temanın
+   yüzey renklerine bürünür ("deri").
+
+   Temalar:  koyu (UYAP'ın koyu modu) · uyap (varsayılan) · armonia · gul · okyanus · lavanta · gunbatimi · gunes · grafit
+
+   1) Vurgu değişkenleri (Çoklu UYAP'ın kendi öğeleri: çekmece, düğmeler, rozetler, bantlar, menüler):
+     --cu-vurgu / -koyu / -orta     düğme, rozet, seçili öğe (açık zemin üstünde)
+     --cu-vurgu-parlak              koyu panel üstünde vurgu (kenarlık, seçili sekme çizgisi)
+     --cu-vurgu-acik                koyu panel üstünde açık vurgulu yazı
+     --cu-vurgu-zemin / -kenar      açık zemin üstünde vurgu tonlu bant / kenar
+     --cu-vurgu-yazi                vurgu tonlu bant üstündeki yazı
+     --cu-*-rgb                     rgba() içinde saydamlıkla kullanmak için kanal değerleri
+     --cu-panel-rgb                 çekmece, menü, pencere gibi koyu panellerin zemini
+     --cu-cubuk-*, --cu-marka-*     görev çubuğu ve "ÇOKLU UYAP" başlat düğmesi
+   2) Yüzey değişkenleri (yalnız deri temalarında, UYAP'ın öğelerine):
+     --cu-t-ust  üst çubuk (ana sayfa banner'ı da bunu alır)   --cu-t-zemin  sayfa zemini
+     --cu-t-sol / -sol-yazi  sol menü                          --cu-t-yuzey  kart / pencere yüzeyi
+     --cu-t-serit  çizgili satır, gri alanlar                  --cu-t-kenar  kenarlık   --cu-t-yazi  metin */
+
+:root, html[data-cu-tema="uyap"], html[data-cu-tema="koyu"] {
+    --cu-vurgu: #2d4596; --cu-vurgu-rgb: 45, 69, 150; --cu-vurgu-koyu: #1f3277; --cu-vurgu-orta: #4a64b8;
+    --cu-vurgu-parlak: #8ea2e6; --cu-vurgu-parlak-rgb: 142, 162, 230; --cu-vurgu-acik: #c3cdf2;
+    --cu-vurgu-zemin: #e8ecf8; --cu-vurgu-kenar: #9fb0e3; --cu-vurgu-yazi: #1f2f70;
+    --cu-panel-rgb: 17, 22, 40;
+    /* Koyu panel (çekmece/menü/mobil sekme çipi) üstündeki yazı. --cu-panel-rgb HER temada koyudur (açık
+       zeminli Güneş'te bile), bu yüzden panel yazısı da her temada AÇIK kalmalı. Yalnız burada tanımlanır;
+       tema blokları ezmez → tüm temalarda #eef2ff miras alınır (aksi hâlde Güneş'te koyu cubuk-yazi, koyu
+       panel üstünde okunmuyordu — kullanıcı bulgusu 2026-11-13). */
+    --cu-panel-yazi: #eef2ff;
+    --cu-cubuk-ust: #1c2b66; --cu-cubuk-alt: #15214f; --cu-cubuk-vurgu: #3a55b5; --cu-cubuk-yazi: #eef2ff; --cu-cubuk-soluk: #aab4e6;
+    --cu-marka-ust: #3247a8; --cu-marka-alt: #24377f; --cu-marka-ust-acik: #4157c4; --cu-marka-alt-acik: #2c4196; --cu-marka-basili: #1f2f70;
+    /* Vurgu renkli düğme / rozet üstündeki yazı; üst çubuk ve ana sayfa banner'ı üstündeki yazı (açık zeminli
+       temalarda — Güneş — koyu). Temalar tanımlamazsa bu değerler geçerli. */
+    --cu-vurgu-uzeri: #fff;
+    --cu-ust-yazi: #fff; --cu-ust-soluk: rgba(255, 255, 255, 0.75); --cu-ust-kenar: rgba(255, 255, 255, 0.55); --cu-ust-hover: rgba(255, 255, 255, 0.18);
+}
+
+/* ── Armonia: UyapMasa paleti (UyapMasa/theme.py) ── */
+html[data-cu-tema="armonia"] {
+    --cu-vurgu: #5e7d63; --cu-vurgu-rgb: 94, 125, 99; --cu-vurgu-koyu: #4c6851; --cu-vurgu-orta: #7c9a7e;
+    --cu-vurgu-parlak: #a9c3ab; --cu-vurgu-parlak-rgb: 169, 195, 171; --cu-vurgu-acik: #d3e2d3;
+    --cu-vurgu-zemin: #e4ebe0; --cu-vurgu-kenar: #a9bfa9; --cu-vurgu-yazi: #3f5a44;
+    --cu-panel-rgb: 58, 57, 52;
+    --cu-cubuk-ust: #5e7d63; --cu-cubuk-alt: #4c6851; --cu-cubuk-vurgu: #c18a66; --cu-cubuk-yazi: #fcfbf8; --cu-cubuk-soluk: #e4ebe0;
+    --cu-marka-ust: #7c9a7e; --cu-marka-alt: #5e7d63; --cu-marka-ust-acik: #8aa98c; --cu-marka-alt-acik: #6a8a6f; --cu-marka-basili: #4c6851;
+    --cu-t-ust: #5e7d63; --cu-t-zemin: #f1eee8; --cu-t-sol: #eae5dc; --cu-t-sol-yazi: #43423d;
+    --cu-t-yuzey: #fcfbf8; --cu-t-serit: #f3efe7; --cu-t-kenar: #e8e2d7; --cu-t-yazi: #43423d;
+}
+
+/* ── Gül: pembe ve tonları ── */
+html[data-cu-tema="gul"] {
+    --cu-vurgu: #d6447e; --cu-vurgu-rgb: 214, 68, 126; --cu-vurgu-koyu: #b8326a; --cu-vurgu-orta: #e86a9a;
+    --cu-vurgu-parlak: #f7a8c6; --cu-vurgu-parlak-rgb: 247, 168, 198; --cu-vurgu-acik: #fbd3e3;
+    --cu-vurgu-zemin: #fde7f0; --cu-vurgu-kenar: #f2a9c6; --cu-vurgu-yazi: #8e2453;
+    --cu-panel-rgb: 74, 32, 52;
+    --cu-cubuk-ust: #c2416f; --cu-cubuk-alt: #a8315c; --cu-cubuk-vurgu: #ffd1e3; --cu-cubuk-yazi: #fff5f9; --cu-cubuk-soluk: #fbd3e3;
+    --cu-marka-ust: #e15b8e; --cu-marka-alt: #c2416f; --cu-marka-ust-acik: #ea74a0; --cu-marka-alt-acik: #cc4f7d; --cu-marka-basili: #a8315c;
+    --cu-t-ust: #c2416f; --cu-t-zemin: #fff3f7; --cu-t-sol: #fde6ef; --cu-t-sol-yazi: #5a2a3f;
+    --cu-t-yuzey: #fffafc; --cu-t-serit: #fdeef4; --cu-t-kenar: #f6cfdd; --cu-t-yazi: #4a2335;
+}
+
+/* ── Okyanus: camgöbeği ── */
+html[data-cu-tema="okyanus"] {
+    --cu-vurgu: #0f7c8c; --cu-vurgu-rgb: 15, 124, 140; --cu-vurgu-koyu: #0b6370; --cu-vurgu-orta: #2a97a6;
+    --cu-vurgu-parlak: #7fd0da; --cu-vurgu-parlak-rgb: 127, 208, 218; --cu-vurgu-acik: #c4ebf0;
+    --cu-vurgu-zemin: #dff3f5; --cu-vurgu-kenar: #8fd0d8; --cu-vurgu-yazi: #0b4f59;
+    --cu-panel-rgb: 16, 40, 46;
+    --cu-cubuk-ust: #0e6d7b; --cu-cubuk-alt: #0a5560; --cu-cubuk-vurgu: #f2b84b; --cu-cubuk-yazi: #f2fcfd; --cu-cubuk-soluk: #c4ebf0;
+    --cu-marka-ust: #1a8a99; --cu-marka-alt: #0e6d7b; --cu-marka-ust-acik: #2a9cab; --cu-marka-alt-acik: #137a89; --cu-marka-basili: #0a5560;
+    --cu-t-ust: #0e6d7b; --cu-t-zemin: #eef6f7; --cu-t-sol: #e1eff1; --cu-t-sol-yazi: #1f3b40;
+    --cu-t-yuzey: #fbfeff; --cu-t-serit: #eaf4f5; --cu-t-kenar: #cfe5e8; --cu-t-yazi: #1f3b40;
+}
+
+/* ── Lavanta: yumuşak mor ── */
+html[data-cu-tema="lavanta"] {
+    --cu-vurgu: #7b5ea7; --cu-vurgu-rgb: 123, 94, 167; --cu-vurgu-koyu: #654a8e; --cu-vurgu-orta: #9579bf;
+    --cu-vurgu-parlak: #c5b3e3; --cu-vurgu-parlak-rgb: 197, 179, 227; --cu-vurgu-acik: #e2d8f2;
+    --cu-vurgu-zemin: #efe9f8; --cu-vurgu-kenar: #c3b2df; --cu-vurgu-yazi: #4c3670;
+    --cu-panel-rgb: 46, 36, 62;
+    --cu-cubuk-ust: #6b4f96; --cu-cubuk-alt: #563e7b; --cu-cubuk-vurgu: #e9c46a; --cu-cubuk-yazi: #faf7ff; --cu-cubuk-soluk: #e2d8f2;
+    --cu-marka-ust: #8466b3; --cu-marka-alt: #6b4f96; --cu-marka-ust-acik: #937abe; --cu-marka-alt-acik: #775ba3; --cu-marka-basili: #563e7b;
+    --cu-t-ust: #6b4f96; --cu-t-zemin: #f6f3fa; --cu-t-sol: #ece6f5; --cu-t-sol-yazi: #3b2e4f;
+    --cu-t-yuzey: #fdfbff; --cu-t-serit: #f2edf8; --cu-t-kenar: #ddd3ec; --cu-t-yazi: #3b2e4f;
+}
+
+/* ── Gün Batımı: kehribar ve kiremit ── */
+html[data-cu-tema="gunbatimi"] {
+    --cu-vurgu: #c2602f; --cu-vurgu-rgb: 194, 96, 47; --cu-vurgu-koyu: #a34e24; --cu-vurgu-orta: #d97c4c;
+    --cu-vurgu-parlak: #f0b48f; --cu-vurgu-parlak-rgb: 240, 180, 143; --cu-vurgu-acik: #f8dcc8;
+    --cu-vurgu-zemin: #fbebdf; --cu-vurgu-kenar: #edb895; --cu-vurgu-yazi: #7a3a17;
+    --cu-panel-rgb: 58, 36, 24;
+    --cu-cubuk-ust: #b5562a; --cu-cubuk-alt: #964520; --cu-cubuk-vurgu: #ffd38a; --cu-cubuk-yazi: #fff8f2; --cu-cubuk-soluk: #f8dcc8;
+    --cu-marka-ust: #cf6b38; --cu-marka-alt: #b5562a; --cu-marka-ust-acik: #da7b4a; --cu-marka-alt-acik: #bf5f31; --cu-marka-basili: #964520;
+    --cu-t-ust: #b5562a; --cu-t-zemin: #fbf4ee; --cu-t-sol: #f5e8dc; --cu-t-sol-yazi: #4a3020;
+    --cu-t-yuzey: #fffbf7; --cu-t-serit: #f8eee5; --cu-t-kenar: #edd9c7; --cu-t-yazi: #4a3020;
+}
+
+/* ── Güneş: açık, sıcak ayçiçeği sarısı. Sarı zeminde beyaz okunmadığı için düğme, görev çubuğu, üst çubuk
+   ve banner üstündeki yazılar koyu (--cu-vurgu-uzeri, --cu-cubuk-yazi, --cu-ust-*). ── */
+html[data-cu-tema="gunes"] {
+    --cu-vurgu: #f2b51d; --cu-vurgu-rgb: 242, 181, 29; --cu-vurgu-koyu: #e0a10a; --cu-vurgu-orta: #f7c84a;
+    --cu-vurgu-parlak: #ffd65c; --cu-vurgu-parlak-rgb: 255, 214, 92; --cu-vurgu-acik: #ffe7a3;
+    --cu-vurgu-zemin: #fff4cf; --cu-vurgu-kenar: #f5d77a; --cu-vurgu-yazi: #6b4a00;
+    --cu-vurgu-uzeri: #3b2f0b;
+    --cu-panel-rgb: 66, 52, 20;
+    --cu-cubuk-ust: #f9cf55; --cu-cubuk-alt: #f2bd33; --cu-cubuk-vurgu: #fff3c4; --cu-cubuk-yazi: #3b2f0b; --cu-cubuk-soluk: #6b5a22;
+    --cu-marka-ust: #ffdb70; --cu-marka-alt: #f7c948; --cu-marka-ust-acik: #ffe48c; --cu-marka-alt-acik: #f9d15e; --cu-marka-basili: #e8b52e;
+    --cu-ust-yazi: #3b2f0b; --cu-ust-soluk: rgba(59, 47, 11, 0.72); --cu-ust-kenar: rgba(59, 47, 11, 0.45); --cu-ust-hover: rgba(59, 47, 11, 0.10);
+    --cu-t-ust: #f7c948; --cu-t-zemin: #fffbea; --cu-t-sol: #fff3c4; --cu-t-sol-yazi: #3d3418;
+    --cu-t-yuzey: #fffdf3; --cu-t-serit: #fdf6d8; --cu-t-kenar: #f1e2a6; --cu-t-yazi: #3d3418;
+}
+/* Güneş: UYAP'ın üst çubuğu açık sarı; tarih, ad, simgeler koyu yazılsın. */
+html[data-cu-tema="gunes"] .u-navbar,
+html[data-cu-tema="gunes"] .u-navbar :is(span, div, a, i, b, strong, small, button, p) { color: var(--cu-ust-yazi) !important; }
+
+/* ── Grafit: sade gri ── */
+html[data-cu-tema="grafit"] {
+    --cu-vurgu: #475569; --cu-vurgu-rgb: 71, 85, 105; --cu-vurgu-koyu: #334155; --cu-vurgu-orta: #64748b;
+    --cu-vurgu-parlak: #b4bfcd; --cu-vurgu-parlak-rgb: 180, 191, 205; --cu-vurgu-acik: #d9dfe7;
+    --cu-vurgu-zemin: #e9edf2; --cu-vurgu-kenar: #b4bfcd; --cu-vurgu-yazi: #1e293b;
+    --cu-panel-rgb: 30, 34, 41;
+    --cu-cubuk-ust: #374151; --cu-cubuk-alt: #1f2937; --cu-cubuk-vurgu: #94a3b8; --cu-cubuk-yazi: #f8fafc; --cu-cubuk-soluk: #cbd5e1;
+    --cu-marka-ust: #4b5563; --cu-marka-alt: #374151; --cu-marka-ust-acik: #5b6676; --cu-marka-alt-acik: #424c5b; --cu-marka-basili: #1f2937;
+    --cu-t-ust: #374151; --cu-t-zemin: #f3f4f6; --cu-t-sol: #e5e7eb; --cu-t-sol-yazi: #1f2937;
+    --cu-t-yuzey: #ffffff; --cu-t-serit: #f1f2f4; --cu-t-kenar: #d6d9de; --cu-t-yazi: #1f2937;
+}
+
+/* ══ Deri: UYAP'ın kendi yüzeyleri temanın renklerinde (UYAP ve Koyu dışındaki temalar) ══
+   Yalnız zemin / kenar / metin renkleri değişir; yerleşim ve UYAP'ın durum renkleri (kırmızı uyarı vb.)
+   olduğu gibi kalır. Değişkenlerin yedek değerleri UYAP'ın aydınlık görünümü. */
+html[data-cu-deri] .u-navbar,
+html[data-cu-deri] .u-navbar.bg-primary { background-color: var(--cu-t-ust, #24377f) !important; }
+html[data-cu-deri] body,
+html[data-cu-deri] #page-content-wrapper,
+html[data-cu-deri] #contentArea { background-color: var(--cu-t-zemin, #f1f1f1) !important; }
+html[data-cu-deri] #av-sidebar-wrapper { background-color: var(--cu-t-sol, #fff) !important; }
+html[data-cu-deri] #av-sidebar-wrapper,
+html[data-cu-deri] #av-sidebar-wrapper :is(a, button, span, li) { color: var(--cu-t-sol-yazi, #333); }
+/* Kartlar ve beyaz / açık gri Bootstrap yüzeyleri */
+html[data-cu-deri] :is(.hedef-card, .card, .card-body, .card-header, .list-group-item, .bg-white, .modal-content) {
+    background-color: var(--cu-t-yuzey, #fff) !important; border-color: var(--cu-t-kenar, #dee2e6) !important;
+}
+html[data-cu-deri] :is(.bg-light, .badge.bg-light, .badge.bg-secondary-subtle) { background-color: var(--cu-t-serit, #f1f1f1) !important; }
+/* Dosya penceresi (DevExtreme açılır pencere, sekmeler, evrak ağacı, ızgaralar) */
+html[data-cu-deri] .dosya-sorgula-popup :is(.dx-overlay-content, .dx-popup-content, .dx-popup-title, .dx-toolbar,
+    .dx-tabpanel, .dx-tabpanel-container, .dx-multiview-wrapper, .dx-multiview-item, .dx-treeview, .dx-scrollable-container,
+    .dx-datagrid, .dx-datagrid-headers, .dx-datagrid-rowsview, .dx-row) {
+    background-color: var(--cu-t-yuzey, #fff) !important; border-color: var(--cu-t-kenar, #ddd) !important;
+}
+html[data-cu-deri] .dosya-sorgula-popup :is(.dx-tabs, .dx-tab) { background-color: var(--cu-t-serit, #f5f5f5) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-tab.dx-tab-selected { background-color: var(--cu-t-yuzey, #fff) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-datagrid-rowsview .dx-row-alt > td { background-color: var(--cu-t-serit, #f5f5f5) !important; }
+/* Bootstrap çizgili tablolar: hücreler açık gri zemin + siyah yazıyla kalıyordu (ör. Dosya Bilgileri). */
+html[data-cu-deri] table.table > :not(caption) > * > * {
+    background-color: transparent !important; box-shadow: none !important; color: var(--cu-t-yazi, #212529) !important;
+    border-color: var(--cu-t-kenar, #dee2e6) !important;
+}
+html[data-cu-deri] table.table-striped > tbody > tr:nth-of-type(odd) > * { background-color: var(--cu-t-serit, #f2f2f2) !important; }
+/* Güneş: ana sayfa konsolunun mesajları (açık sarı / pembe tonlu) sarı banner'da okunmuyordu. */
+html[data-cu-tema="gunes"] .cu-ana-mesaj { color: var(--cu-ust-yazi) !important; font-weight: 600; }
+
+/* ── Dosya penceresinin kalan gri ve mavi alanları (canlı ölçüm 2026-11-11, Güneş temasında taranarak) ──
+   Hepsi temanın değişkenlerine bağlı: yeni temalar yalnız değişkenlerini tanımlayınca bu alanlar da uyar. */
+html[data-cu-deri] .dosya-sorgula-popup .dx-tabs-wrapper { background-color: var(--cu-t-serit, #f7f7f7) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-tab.dx-tab-selected { border-bottom-color: var(--cu-vurgu, #2f80c0) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-tab-selected :is(.dx-tab-text, .dx-tab-text-span) { color: var(--cu-vurgu-yazi, #1f5f8f) !important; }
+/* Evrak paneli: ileri / geri düğme alanları, sayfalama, ızgara sayfa boyutu */
+html[data-cu-deri] .dosya-sorgula-popup .flex-grow-1.d-flex.align-items-center.justify-content-center { background-color: var(--cu-t-kenar, #c4c6ce) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .evrak-tree-pagination { background-color: var(--cu-t-yuzey, #fcfdff) !important; border-color: var(--cu-t-kenar, #ddd) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-page-size.dx-selection { background-color: var(--cu-t-kenar, #d4d4d4) !important; }
+/* Belge görüntüleyici: sayfaların arkası, araç çubuğu, kaydırma alanı */
+html[data-cu-deri] .dosya-sorgula-popup :is(.ude-document-viewer, .ude-document-viewer-scroll-area) { background-color: var(--cu-t-zemin, #f0f0f0) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .ude-document-viewer-toolbar-wrapper { background-color: var(--cu-t-serit, #f5f5f5) !important; border-color: var(--cu-t-kenar, #ddd) !important; }
+/* PDF görüntüleyici (PDF belgeler UDF'ten ayrı, MUI tabanlı görüntüleyicide açılır; canlı ölçüm 2026-11-11):
+   başlık çubuğu, gövde ve sayfaların arkası. PDF sayfasının kendisi (.react-pdf__Page) beyaz kalır. */
+html[data-cu-deri] .dosya-sorgula-popup .documentViewerHeader { background-color: var(--cu-t-serit, #e3e4e7) !important; border-color: var(--cu-t-kenar, #ddd) !important; }
+html[data-cu-deri] .dosya-sorgula-popup :is(.documentViewerBody, .pdf-container) { background-color: var(--cu-t-zemin, #f1f3f5) !important; }
+/* Sekme şeridinin arkası ve pencere içindeki metin kutuları */
+html[data-cu-deri] .dosya-sorgula-popup .dx-tabpanel-tabs { background-color: var(--cu-t-serit, #f7f7f7) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-texteditor { background-color: var(--cu-t-yuzey, #fff) !important; border-color: var(--cu-t-kenar, #ddd) !important; }
+/* UYAP'ın açık gri Bootstrap düğmeleri (her sayfada) ve vurgulu (dolu) DevExtreme düğmeleri */
+html[data-cu-deri] .btn-light { background-color: var(--cu-t-serit, #f8f9fa) !important; border-color: var(--cu-t-kenar, #dee2e6) !important; color: var(--cu-t-yazi, #212529) !important; }
+html[data-cu-deri] .btn-light:is(.active, :hover, :active) { background-color: var(--cu-t-kenar, #e2e6ea) !important; }
+html[data-cu-deri] .dx-button-mode-contained.dx-button-default { background-color: var(--cu-vurgu, #24377f) !important; border-color: var(--cu-vurgu, #24377f) !important; }
+html[data-cu-deri] .dx-button-mode-contained.dx-button-default :is(.dx-button-text, .dx-icon) { color: var(--cu-vurgu-uzeri, #fff) !important; }
+html[data-cu-deri] .label-light--primary { color: var(--cu-vurgu-yazi, #24377f) !important; }
+/* Evrak ağacı: seçili / üzerine gelinen satırın yarı saydam gri vurgusu temanın vurgu tonunda */
+html[data-cu-deri] .dosya-sorgula-popup .dx-treeview-node.dx-state-selected > .dx-treeview-item,
+html[data-cu-deri] .dosya-sorgula-popup .dx-treeview-item.dx-state-focused { background-color: var(--cu-vurgu-zemin, #e8ecf8) !important; }
+/* UYAP seçili satırın yazısını beyaz yapıyor (mavi zemin için); temanın açık vurgu zemininde okunmuyordu. */
+html[data-cu-deri] .dosya-sorgula-popup :is(.dx-treeview-node.dx-state-selected > .dx-treeview-item, .dx-treeview-item.dx-state-focused),
+html[data-cu-deri] .dosya-sorgula-popup :is(.dx-treeview-node.dx-state-selected > .dx-treeview-item, .dx-treeview-item.dx-state-focused) * { color: var(--cu-vurgu-yazi, #1f2f70) !important; }
+html[data-cu-deri] .dosya-sorgula-popup .dx-treeview-item.dx-state-hover { background-color: var(--cu-t-serit, #f2f2f2) !important; }
+
+/* ══ LOGO (2026-11-11) ══
+   UYAP logosu yerine kendi logomuz (tema.js → logoKur). UYAP'ın h1.logo-content öğesi yerinde kalır; içindeki
+   UYAP başlığı/görseli gizlenir. Renkler temadan: işaret ve yazı üst çubuk yazı rengi, öndeki pencere vurgu rengi. */
+.u-navbar .uyap-logo,
+.u-navbar .uyap-logo .logo-content,
+.u-navbar .uyap-logo .logo-title { background-image: none !important; }
+.u-navbar .uyap-logo .logo-content > :not(.cu-logo) { display: none !important; }
+.u-navbar .uyap-logo .logo-content { display: flex !important; align-items: center; height: 100%; margin: 0; }
+/* UYAP logoyu başlık öğesinin yazısını gizleyip (text-indent / font-size:0 / sabit genişlik + overflow) arka plan
+   resmiyle çiziyor olabilir; bu gizleme yolları bizim logoyu da görünmez yapıyordu (kullanıcı bulgusu 2026-11-11).
+   Hepsi sıfırlanır; sözde öğelerdeki (::before/::after) olası UYAP görseli de kaldırılır. */
+.u-navbar .uyap-logo,
+.u-navbar .uyap-logo .logo-content {
+    text-indent: 0 !important; font-size: 16px !important; line-height: normal !important; width: auto !important;
+    max-width: none !important; min-width: 0 !important; overflow: visible !important; visibility: visible !important;
+    opacity: 1 !important; color: var(--cu-ust-yazi, #fff) !important; filter: none !important; }
+.u-navbar .uyap-logo { display: flex !important; align-items: center; padding: 0 !important; }
+.u-navbar .uyap-logo::before, .u-navbar .uyap-logo::after,
+.u-navbar .uyap-logo .logo-content::before, .u-navbar .uyap-logo .logo-content::after { content: none !important; background-image: none !important; }
+.cu-logo { position: relative; z-index: 1; text-indent: 0; visibility: visible !important; opacity: 1 !important; }
+.cu-logo { display: inline-flex; align-items: center; gap: 10px; height: 60px; padding: 0 4px; color: var(--cu-ust-yazi, #fff);
+    --cu-logo-on: var(--cu-vurgu-parlak, #8ea2e6); --cu-logo-nokta: rgba(0, 0, 0, 0.38); }
+.cu-logo-isaret { flex: 0 0 auto; display: block; color: var(--cu-ust-yazi, #fff); }
+.cu-logo-on { fill: var(--cu-logo-on); }
+.cu-logo-nokta { fill: var(--cu-logo-nokta); }
+.cu-logo-yazi { display: flex; flex-direction: column; justify-content: center; line-height: 1.05; white-space: nowrap; }
+.cu-logo-yazi b { font-size: 17px; font-weight: 600; letter-spacing: 0.01em; color: var(--cu-ust-yazi, #fff); }
+.cu-logo-yazi small { margin-top: 3px; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em;
+    color: var(--cu-ust-soluk, rgba(255, 255, 255, 0.75)); }
+html[data-cu-tema="gunes"] .cu-logo { --cu-logo-on: #3b2f0b; --cu-logo-nokta: rgba(255, 220, 120, 0.9); }
+html[data-cu-tema="gunes"] .u-navbar .cu-logo-yazi small { color: var(--cu-ust-soluk) !important; }
+@media (max-width: 575px) { .cu-logo-yazi { display: none; } }
+/* Mobil (UYAP < 992 px): logo kabı .navbar-brand.mobile-logo; UYAP orada kendi "UYAP AVUKAT" resmini gösterip
+   kabı 100 px'e sıkıştırıyordu (kullanıcı bulgusu 2026-11-11, telefon ekran görüntüsü). Resim/bağlantı gizlenir,
+   kap logomuz kadar genişler; logo üst çubuğu uzatmasın diye biraz kısalır. */
+.u-navbar .navbar-brand.mobile-logo > :not(.cu-logo),
+.u-navbar .navbar-brand img { display: none !important; }
+.u-navbar .navbar-brand:has(> .cu-logo) { width: auto !important; max-width: none !important; padding-top: 0 !important; padding-bottom: 0 !important; }
+.cu-logo { cursor: pointer; }
+@media (max-width: 991px) {
+    .cu-logo { height: 52px; }
+    .u-navbar .navbar-brand:has(> .cu-logo) { margin-top: 0 !important; margin-bottom: 0 !important; }
+}
+
+/* ══ ÜST BANT: düz, sade (kullanıcı kararı 2026-11-11) ══
+   UYAP'ın öğeleri yerinde; yalnız görünüm. Tek renk tema zemini + altta ince çizgi; simge düğmeleri aynı boyda,
+   çerçevesiz, yuvarlak köşeli; tarih-saat küçük etiket; kullanıcı alanı baş harfli avatar + ad + rol. */
+.u-navbar, .u-navbar.bg-primary { background-image: none !important; }
+div.u-navbar { box-shadow: none !important; border-bottom: 1px solid rgba(0, 0, 0, 0.14); }
+html[data-cu-tema="koyu"] div.u-navbar { border-bottom-color: rgba(255, 255, 255, 0.08); }
+.u-navbar .navbar-nav { align-items: center; gap: 4px; }
+.u-navbar .navbar-nav > li.nav-item {
+    background: transparent !important; border: 0 !important; border-radius: 9px !important;
+    height: 40px !important; min-width: 40px; margin: 0 !important; align-self: center; transition: background-color .12s; }
+.u-navbar .navbar-nav > li.nav-item:hover { background: var(--cu-ust-hover, rgba(255, 255, 255, 0.18)) !important; }
+.u-navbar .navbar-nav > li.nav-item > .nav-link,
+.u-navbar .navbar-nav > li.nav-item > div > .nav-link { height: 40px !important; min-width: 40px; padding: 0 10px !important; justify-content: center; }
+.u-navbar .navbar-nav > li.cu-uyap-tema, .u-navbar .cu-uyap-tema { display: none !important; }
+/* Kendi tema düğmemiz */
+#cu-tema-dugme { position: relative; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: var(--cu-ust-yazi, #fff); }
+#cu-tema-dugme svg { width: 20px; height: 20px; display: block; }
+/* UYAP üst çubuktaki svg'lere soldan 10 px iç boşluk veriyor (box-sizing: border-box): 20 px'lik simgelerimizin
+   çizim alanı 10 px'e düşüyor, palet ve göz simgeleri yarı boyda çiziliyordu (canlı ölçüm 2026-11-11). */
+#cu-tema-dugme svg, #cu-mavi-dugme svg { padding: 0 !important; }
+#cu-tema-dugme .cu-tema-nokta { position: absolute; right: 7px; bottom: 7px; width: 9px; height: 9px; border-radius: 50%;
+    border: 1.5px solid var(--cu-ust-yazi, #fff); background: var(--cu-vurgu); }
+#cu-mavi-dugme { color: var(--cu-ust-yazi, #fff); }
+/* Tarih-saat: küçük etiket */
+.u-navbar .layout-timer { padding: 4px 11px; border-radius: 14px; background: var(--cu-ust-hover, rgba(255, 255, 255, 0.14));
+    font-size: 12.5px !important; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.u-navbar .layout-timer i { opacity: .8; }
+/* Kullanıcı alanı */
+.u-navbar li.tour-7 { border-left: 1px solid var(--cu-ust-kenar, rgba(255, 255, 255, 0.35)) !important; padding-left: 10px !important; margin-left: 4px !important; }
+.u-navbar #dropdownMenuButton { gap: 9px; }
+.u-navbar #dropdownMenuButton.cu-avatarli > img.thumbnail-image { display: none !important; }
+.u-navbar .cu-avatar { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+    border-radius: 50%; background: var(--cu-ust-yazi, #fff); color: var(--cu-t-ust, var(--cu-marka-alt, #24377f));
+    font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+html[data-cu-tema="koyu"] .u-navbar .cu-avatar { background: var(--cu-vurgu-parlak); color: #111827; }
+.u-navbar #dropdownMenuButton .dropdown-toggle { font-size: 13px !important; font-weight: 600; line-height: 1.2; }
+.u-navbar #dropdownMenuButton .dropdown-toggle + .nav-link { font-size: 11.5px !important; line-height: 1.2; color: var(--cu-ust-soluk, rgba(255, 255, 255, 0.75)) !important; }
+/* Mobilde açılan menü: düğmeler yan yana, ortalı */
+@media (max-width: 991px) {
+    .u-navbar .navbar-collapse .navbar-nav { flex-direction: row; flex-wrap: wrap; justify-content: center; padding: 6px 0; }
+    .u-navbar li.tour-7 { border-left: 0 !important; }
+}
+
+/* ══ YÜKLEME GÖSTERGELERİ (2026-11-11) ══
+   UYAP'ın yükleme paneli (AdaletLoadPanel → .custom-loader) gösterge olarak UYAP logosunu
+   (uyap-logo-without-bg.svg) ve çevresinde dönen bir halka çiziyor; ekranı da %40 karartıyordu. Diğer
+   yükleyici (.hedef-loader) tüm sayfayı bulanıklaştırıyordu. İkisinin yerine aynı sade, temanın vurgu
+   renginde ince bir halka; zemin çok hafif gölgelenir, bulanıklık yok. */
+.custom-loader .custom-loader-bg,
+.custom-loader .dx-loadindicator-content,
+.custom-loader .dx-loadindicator-icon-custom,
+.custom-loader .dx-loadindicator img,
+.hedef-loader > div { display: none !important; }
+.custom-loader .dx-loadindicator { background-image: none !important; }
+.custom-loader.dx-overlay-shader,
+.custom-loader .dx-overlay-shader { background-color: rgba(0, 0, 0, 0.06) !important; }
+.hedef-loader-bg { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; background-color: rgba(0, 0, 0, 0.06) !important; }
+.custom-loader .dx-loadpanel-content::after,
+.hedef-loader::after {
+    content: ""; position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+    box-sizing: border-box; border-radius: 50%;
+    border: 3px solid rgba(var(--cu-vurgu-rgb, 45, 69, 150), 0.18); border-top-color: var(--cu-vurgu, #2d4596);
+    animation: cu-don 0.9s linear infinite;
+}
+html[data-cu-tema="koyu"] .custom-loader .dx-loadpanel-content::after,
+html[data-cu-tema="koyu"] .hedef-loader::after { border-color: rgba(255, 255, 255, 0.15); border-top-color: #8fa4ff; }
+@keyframes cu-don { to { transform: rotate(360deg); } }
+
+/* Tablolarda rakamlar eşit genişlikte (dosya no, tarih, tutar sütunları hizalı okunur). Yazı tipinin kendisi
+   tema.js'te (yaziTipi): UYAP'ın Poppins / Roboto adları Segoe UI'ya yönlendirilir. */
+table, .dx-datagrid, .dx-treelist { font-variant-numeric: tabular-nums; }
+
+/* ══ MAVİ IŞIK KORUMASI (tema.js: maviIsik) ══ Sayfanın üstünde, tıklamaları geçiren amber bir katman;
+   "çarpma" karışımıyla mavi tonları azaltır. Kademe <html data-cu-mavi="1..5">. */
+#cu-mavi-katman { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; mix-blend-mode: multiply; background: rgb(255, 150, 50); opacity: 0; }
+html[data-cu-mavi="1"] #cu-mavi-katman { opacity: 0.07; }
+html[data-cu-mavi="2"] #cu-mavi-katman { opacity: 0.13; }
+html[data-cu-mavi="3"] #cu-mavi-katman { opacity: 0.19; }
+html[data-cu-mavi="4"] #cu-mavi-katman { opacity: 0.26; }
+html[data-cu-mavi="5"] #cu-mavi-katman { opacity: 0.33; }
+
+/* ══ YENİ TEMA EKLEME ══
+   1) Bu dosyaya bir blok: html[data-cu-tema="kimlik"] { … } — yukarıdaki temalardan birini kopyalayıp renkleri
+      değiştirin. Vurgu (--cu-vurgu…), panel (--cu-panel-rgb), görev çubuğu (--cu-cubuk-…, --cu-marka-…) ve
+      yüzey (--cu-t-…) değişkenlerinin hepsi tanımlanmalı; açık / sarı gibi zeminlerde ayrıca --cu-vurgu-uzeri,
+      --cu-cubuk-yazi ve --cu-ust-* (yazılar koyu olsun).
+   2) tema.js'teki TEMALAR listesine bir satır: [kimlik, ad, açıklama, [örnek renk 1, örnek renk 2]].
+   Başka bir yere dokunmak gerekmez: sayfa başındaki betik UYAP / Koyu dışındaki her seçimi "deri" teması sayar
+   ve UYAP'ın yüzeyleri (bu dosyadaki deri kuralları) yeni temanın değişkenleriyle boyanır. */

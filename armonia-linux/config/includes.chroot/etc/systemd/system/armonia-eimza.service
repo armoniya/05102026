@@ -1,0 +1,81 @@
+# Armonia: Adalet E-imza (UYAP resmi Linux istemcisi, adalet-eimza-tray 1.0.17, Spring Boot + gomulu Java 21).
+# 127.0.0.1:5975'te dinler; uyap_app PIN girisinde buraya gelir (ruyap/src/uyap_giris_disaridan.rs:146).
+# Paket kendi systemd --user birimini getirir (tray, X11); kiosk'ta YERINE bu sistem birimi kullanilir:
+# ayri sistem kullanicisi 'eimza' (kiosk'un postgres/input/video gruplari YOK), ekransiz Java, kendi kum havuzu.
+# Karta pcscd soketi uzerinden erisir (polkit kurali: /etc/polkit-1/rules.d/50-armonia-eimza.rules).
+# Claude, 2026-11-14.
+[Unit]
+Description=Adalet E-imza istemcisi (127.0.0.1:5975)
+After=network.target pcscd.socket
+Wants=pcscd.socket
+
+[Service]
+Type=simple
+User=eimza
+Group=eimza
+# Ayarlar/gunluk: /var/lib/armonia-eimza (RAM'de; kalici ayar gerekmiyor)
+StateDirectory=armonia-eimza
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/armonia-eimza
+WorkingDirectory=/var/lib/armonia-eimza
+# Ekransiz (java.awt.headless=true) CALISMAZ: program acilista Swing ayarlar penceresini (AyarlarUI) kurar ->
+# HeadlessException (Hyper-V 14 Kasim 11:40; derleme chroot'unda kum havuzsuz da ayni). Cozum: yalniz bu birime ait
+# gorunmez X sunucusu (Xvfb, xvfb-run). Soket PrivateTmp icindeki /tmp/.X11-unix'te (baska birim goremez);
+# "-nolisten local" soyut (@) soketi kapatir (soyut soketler PrivateTmp ile yalitilmaz, ag ad alanina baglidir),
+# "-nolisten tcp" TCP 6000+'i kapatir; xvfb-run xauth cerezi uretir. Chroot denemesi: 5975 13 sn'de, yalniz 127.0.0.1.
+# JAVA_TOOL_OPTIONS JVM'in kendisi tarafindan okunur (Conveyor baslaticisi JVM secenegine izin vermiyor), kart probu
+# alt JVM'i de devralir. smartcardio Debian multiarch yolundaki libpcsclite'i bulsun (guvenlik-denetci E-Y2).
+Environment="JAVA_TOOL_OPTIONS=-Dsun.security.smartcardio.library=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1"
+# E-K2: istek DTO'larinin toString()'i PIN'i iceriyor; gunluge dusmesin
+LogFilterPatterns=~(?i)pin
+LogLevelMax=info
+Environment=LANG=C.UTF-8
+# Xvfb root degilken /tmp/.X11-unix'i KENDISI OLUSTURMAZ ("euid != 0"); PrivateTmp her acilista bos -> soket yok,
+# Java ":1xx" ekranina baglanamadi (Hyper-V 14 Kasim 12:25, 9 yeniden baslatma). Dizin birimin kendi /tmp'sinde.
+ExecStartPre=/usr/bin/mkdir -p -m 1777 /tmp/.X11-unix
+# guvenlik-denetci D-X2: Xvfb hatalari gunluge (-e); xvfb-run varsayilanda /dev/null'a atiyordu
+ExecStart=/usr/bin/xvfb-run -a -e /dev/stderr -s "-nolisten tcp -nolisten local -screen 0 1024x768x24" /usr/lib/adalet-eimza-tray/bin/adalet-eimza-tray
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=143
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Kart USB'den degil pcscd soketinden okunur -> /dev bos
+PrivateDevices=yes
+# guvenlik-denetci D-X1: Xvfb/Java MIT-SHM (SysV shm) segmentleri ortak IPC ad alaninda gorunmesin
+PrivateIPC=yes
+InaccessiblePaths=-/srv/kasa -/var/lib/armonia -/run/postgresql -/run/armonia -/run/user -/run/armonia-tarayici.sock
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+KeyringMode=private
+UMask=0077
+LimitCORE=0
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+# JVM JIT -> MemoryDenyWriteExecute KAPALI
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module @raw-io @cpu-emulation @debug
+# Xvfb klavye haritasini xkbcomp ile derler; X sunucusunun System() cocugu once setgid(getgid())/setuid(getuid())
+# cagirir, EPERM'de xkbcomp calismaz -> "Failed to activate virtual core keyboard" (Hyper-V 14 Kasim 12:39; WSL'de
+# grup grup cikarilarak dogrulandi: yalniz ~@privileged dusuruyor, @setuid geri acilinca calisiyor).
+# CapabilityBoundingSet= bos + NoNewPrivileges: CAP_SETUID yok -> yalniz kendi kimligine "gecebilir", yukselme yok.
+SystemCallFilter=@setuid
+SystemCallErrorNumber=EPERM
+# Disari: bedesten.adalet.gov.tr (imza zaman/dogrulama), cdn.uyap.gov.tr (surum denetimi). Adla suzme systemd'de
+# yok; giden trafik beyaz listesi kullanici karari bekliyor (yol haritasi D.4-8).
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+# YALNIZ TEST: 2. acilista klavye olaylarini (tus kodu, basma) COM1'e yazar; Plymouth'a ulasmayan tuslari ayirmak icin.
+# Yalniz sabit test parolasi yazilir; uretim ISO'sunda yoktur. Claude, 2026-11-14.
+[Unit]
+Description=TEST tus kaydi
+DefaultDependencies=no
+ConditionVirtualization=microsoft
+ConditionKernelCommandLine=armonia.test_kasa=1
+ConditionPathExists=/dev/disk/by-partlabel/armonia-kasa
+After=systemd-udev-trigger.service
+
+[Service]
+Type=exec
+ExecStart=/opt/armonia/bin/tus_kaydi_test.sh
+
+[Install]
+WantedBy=sysinit.target

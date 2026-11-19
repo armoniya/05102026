@@ -17,6 +17,39 @@ modeller şimdiden hazır.
 from django.db import models
 from django.utils import timezone
 
+from .tarih import tarih_coz
+
+
+class HamTarihliModel(models.Model):
+    """UYAP/PTT'nin tarihleri METİN olarak geliyor ("28/09/2026 14:05", "Mar 13,
+    2026 11:44:45 AM" …). Ham metin olduğu gibi saklanır (görüntü ve denetim
+    için); yanındaki gerçek tarih alanı her kayıtta ondan TÜRETİLİR (2026-11-14
+    kullanıcı kararı: sorgu, sıralama ve süre hesabı tarih alanıyla yapılır).
+    `TARIH_ALANLARI = {"ham_alan": ("tarih_alani", yalniz_gun)}`.
+    Not: QuerySet.update() save()'i atlar — ham tarih alanı update() ile
+    yazılmamalı (kod tabanında yazılmıyor)."""
+
+    TARIH_ALANLARI = {}
+
+    class Meta:
+        abstract = True
+
+    def tarihleri_turet(self):
+        for ham, (hedef, yalniz_gun) in self.TARIH_ALANLARI.items():
+            t = tarih_coz(getattr(self, ham, None))
+            setattr(self, hedef, (t.date() if (t and yalniz_gun) else t))
+
+    def save(self, *args, **kwargs):
+        self.tarihleri_turet()
+        alanlar = kwargs.get("update_fields")
+        if alanlar is not None:
+            alanlar = set(alanlar)
+            for ham, (hedef, _g) in self.TARIH_ALANLARI.items():
+                if ham in alanlar:
+                    alanlar.add(hedef)
+            kwargs["update_fields"] = alanlar
+        super().save(*args, **kwargs)
+
 
 class YargiTuru(models.IntegerChoices):
     """UYAP'ın sabit Yargı Türü enum'u (`yargiBirimleriSorgula_brd.ajx`
@@ -310,8 +343,14 @@ class Dosya(models.Model):
         self.bekleme_bitis_tarihi = (bekleme_bitis if self.islem_durumu == self.IslemDurumu.BEKLEMEDE
                                      else None)
         if kaydet:
+            eski = type(self).objects.filter(pk=self.pk).values_list("islem_durumu", flat=True).first()
             self.save(update_fields=["islem_durumu", "islem_durumu_notu",
                                      "islem_durumu_tarihi", "bekleme_bitis_tarihi"])
+            if eski != self.islem_durumu:
+                durum_olayi_yaz(self, DurumOlayi.Tur.ISLEM_DURUMU,
+                                dict(self.IslemDurumu.choices).get(eski, eski or ""),
+                                self.get_islem_durumu_display(), kaynak=DurumOlayi.Kaynak.ELLE,
+                                aciklama=self.islem_durumu_notu)
 
 
 class DosyaTaraf(models.Model):
@@ -438,6 +477,13 @@ class DosyaTaraf(models.Model):
     itiraz_edildi_mi = models.BooleanField("İtiraz Edildi mi", default=False)
     itiraz_tarihi = models.DateField("İtiraz Tarihi", null=True, blank=True)
 
+    # 2026-11-14 kullanıcı kararı: UYAP'taki taraf listesinde artık görünmeyen
+    # bağ SİLİNMEZ (geçmiş tebligat/kesinleşme ona bağlı), bu alanla işaretlenir
+    # ve kullanıcı uyarılır. Taraf yeniden görünürse temizlenir. Yalnız TAM bir
+    # taraf listesi (o rol için) alındığında işaretlenir — boş/başarısız yanıt
+    # hiçbir tarafı işaretlemez (bkz. dosya_core.kaybolan_taraflari_isaretle).
+    uyapta_gorulmedi = models.DateTimeField("UYAP'ta Görülmedi (ilk fark)", null=True, blank=True)
+
     class Meta:
         verbose_name = "Dosya Tarafı"
         verbose_name_plural = "Dosya Tarafları"
@@ -530,7 +576,7 @@ class HukukDavaDetay(models.Model):
         return f"{self.dosya} · Dava Detayı"
 
 
-class IdariYargiDetay(models.Model):
+class IdariYargiDetay(HamTarihliModel):
     """İdari Yargı dava dosyasına özgü ayrıntı — dosyaAyrıntıBilgileri_brd.ajx
     yanıtından. CANLI DOĞRULANDI (Chrome ağ yakalama, 2026-09-22, gerçek bir
     İdare Dava Dosyası'nda "Dosya Görüntüle"): {"davaKonusu":"Disiplin
@@ -560,6 +606,9 @@ class IdariYargiDetay(models.Model):
     karar = models.CharField(max_length=120, blank=True)
     karar_no = models.CharField(max_length=40, blank=True)
     karar_tarihi = models.CharField("Karar Tarihi (ham)", max_length=40, blank=True)
+    karar_zamani = models.DateTimeField("Karar Tarihi", null=True, blank=True)
+
+    TARIH_ALANLARI = {"karar_tarihi": ("karar_zamani", False)}
 
     guncelleme = models.DateTimeField(auto_now=True)
 
@@ -571,7 +620,7 @@ class IdariYargiDetay(models.Model):
         return f"{self.dosya} · İdari Yargı Detayı"
 
 
-class DosyaSafahat(models.Model):
+class DosyaSafahat(HamTarihliModel):
     """Dosyanın işlem geçmişi/kronolojisi — `dosya_safahat_bilgileri_brd.ajx`
     yanıtından. CANLI DOĞRULANDI (Chrome ağ yakalama), HER BİRİ AYRI AYRI
     (bkz. sınıf altındaki "ÖNEMLİ" notu — birini görüp diğerini varsaymak
@@ -624,6 +673,7 @@ class DosyaSafahat(models.Model):
 
     islem_yapan_birim = models.CharField(max_length=255, blank=True)
     safahat_tarihi = models.CharField("Safahat Tarihi (ham)", max_length=40, blank=True)
+    safahat_zamani = models.DateTimeField("Safahat Tarihi", null=True, blank=True, db_index=True)
     safahat_turu_kod = models.IntegerField(null=True, blank=True)
     safahat_turu_aciklama = models.CharField(max_length=255, blank=True)
     aciklama = models.TextField(blank=True)
@@ -632,6 +682,8 @@ class DosyaSafahat(models.Model):
     personel = models.CharField(max_length=120, blank=True)
 
     olusturulma = models.DateTimeField(auto_now_add=True)
+
+    TARIH_ALANLARI = {"safahat_tarihi": ("safahat_zamani", False)}
 
     class Meta:
         verbose_name = "Dosya Safahatı"
@@ -642,7 +694,7 @@ class DosyaSafahat(models.Model):
         return f"{self.dosya} · {self.safahat_turu_aciklama or self.pk}"
 
 
-class DosyaTahsilatHarc(models.Model):
+class DosyaTahsilatHarc(HamTarihliModel):
     """Dosyaya yapılan tahsilat VEYA harç ödemesi — `dosya_tahsilat_reddiyat_
     bilgileri_brd.ajx` yanıtının `tahsilatList`/`harcList` dizilerinden.
     CANLI DOĞRULANDI, HER BİRİ AYRI AYRI (2026-09-22):
@@ -682,11 +734,14 @@ class DosyaTahsilatHarc(models.Model):
     odeyen_kisi = models.CharField(max_length=255, blank=True)
     tahsilat_turu = models.CharField(max_length=120, blank=True)
     tahsilat_tarihi = models.CharField("Tahsilat Tarihi (ham)", max_length=40, blank=True)
+    tahsilat_zamani = models.DateTimeField("Tahsilat Tarihi", null=True, blank=True, db_index=True)
     yatirilan_miktar = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     hesaplama_yapilan_tutar = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     odenebilir_miktar = models.DecimalField(max_digits=14, decimal_places=2, default=0)
 
     olusturulma = models.DateTimeField(auto_now_add=True)
+
+    TARIH_ALANLARI = {"tahsilat_tarihi": ("tahsilat_zamani", False)}
 
     class Meta:
         verbose_name = "Dosya Tahsilat/Harç Kaydı"
@@ -700,7 +755,7 @@ class DosyaTahsilatHarc(models.Model):
         return f"{self.dosya} · {self.get_tur_display()} · {self.makbuz_no}"
 
 
-class DosyaReddiyat(models.Model):
+class DosyaReddiyat(HamTarihliModel):
     """Dosyadan yapılan reddiyat (iade) — `dosya_tahsilat_reddiyat_bilgileri_
     brd.ajx` yanıtının `reddiyatList` dizisinden. CANLI DOĞRULANDI, HER
     BİRİ AYRI AYRI (2026-09-22):
@@ -732,6 +787,9 @@ class DosyaReddiyat(models.Model):
     odeyen_kisi = models.CharField(max_length=255, blank=True)
     reddiyat_nedeni = models.CharField(max_length=255, blank=True)
     reddiyat_tarihi = models.CharField("Reddiyat Tarihi (ham)", max_length=40, blank=True)
+    reddiyat_zamani = models.DateTimeField("Reddiyat Tarihi", null=True, blank=True, db_index=True)
+
+    TARIH_ALANLARI = {"reddiyat_tarihi": ("reddiyat_zamani", False)}
     gelir_vergisi = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     damga_vergisi = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     odenecek_miktar = models.DecimalField(max_digits=14, decimal_places=2, default=0)
@@ -788,7 +846,7 @@ class IcraDosyaHesabi(models.Model):
         return f"{self.dosya} · {self.metin_alan}: {self.deger_alan}"
 
 
-class BorcluSorgu(models.Model):
+class BorcluSorgu(HamTarihliModel):
     """İcra dosyasının "Borçlu Bilgileri" sekmesinden bir borçlu için
     çalıştırılan malvarlığı/adres araştırma sorgusu —
     `borclu_bilgileri_goruntule_<tur>.ajx` uç nokta ailesinden. UYAP bu
@@ -816,6 +874,9 @@ class BorcluSorgu(models.Model):
 
     sorgu_turu = models.CharField("Sorgu Türü", max_length=60)  # UYAP'ın kendi "sorgulamaTuru" metni (ör. "Mersis", "GİB", "Kamu Çalışanı")
     sorgu_tarihi = models.CharField("Sorgu Tarihi (ham)", max_length=40, blank=True)
+    sorgulama_zamani = models.DateTimeField("Sorgu Tarihi", null=True, blank=True)
+
+    TARIH_ALANLARI = {"sorgu_tarihi": ("sorgulama_zamani", False)}
     sorgu_sonucu = models.BooleanField("Sorgu Sonucu", null=True, blank=True)
     has_error = models.BooleanField("Hata Var mı", default=False)
     has_data = models.BooleanField("Veri Var mı", default=False)
@@ -832,7 +893,7 @@ class BorcluSorgu(models.Model):
         return f"{self.dosya} · {self.borclu} · {self.sorgu_turu}"
 
 
-class TebligatBarkod(models.Model):
+class TebligatBarkod(HamTarihliModel):
     """'Barkod Sorgu' modülünün (UyapMasa/modules/barkod_sorgu.py) her çalıştırmada
     upsert ettiği sonuç kaydı: bir 'Kapalı Tebligat' evrakının PTT barkodu +
     PTT'deki güncel tebliğ durumu + o dosyada tebliğ mazbatasının (fiziki
@@ -857,7 +918,8 @@ class TebligatBarkod(models.Model):
         limit_choices_to={"rol": DosyaTaraf.Rol.BORCLU})
 
     evrak_aciklama = models.CharField("Evrak Açıklaması", max_length=500, blank=True)
-    evrak_tarihi = models.CharField("Evrak Tarihi", max_length=40, blank=True)
+    evrak_tarihi = models.CharField("Evrak Tarihi (ham)", max_length=40, blank=True)
+    evrak_gunu = models.DateField("Evrak Tarihi", null=True, blank=True, db_index=True)
 
     barkod = models.CharField("PTT Barkod No", max_length=32, blank=True, db_index=True)
     elektronik_tebligat = models.BooleanField(
@@ -876,7 +938,9 @@ class TebligatBarkod(models.Model):
     tebligat_turu = models.CharField("Tebligat Türü", max_length=120, blank=True)
 
     ptt_durumu = models.CharField("PTT Durumu", max_length=255, blank=True)
-    son_islem_tarihi = models.CharField("Son İşlem Tarihi", max_length=40, blank=True)
+    son_islem_tarihi = models.CharField("Son İşlem Tarihi (ham)", max_length=40, blank=True)
+    # PTT teslim/iade/son hareket tarihi; e-tebligatta tebliğ (evrak) tarihi.
+    son_islem_zamani = models.DateTimeField("Son İşlem Tarihi", null=True, blank=True, db_index=True)
     ham_yanit = models.JSONField("PTT Ham Yanıt", null=True, blank=True)
     # PTT hareketlerindeki "işlem detayı"ndan (bkz. barkod_sorgu.ptt_teslim_sekli):
     # teslimde kime/nasıl (muhtara 21. md., bizzat, aynı konutta yakına, kapıya
@@ -915,6 +979,9 @@ class TebligatBarkod(models.Model):
 
     sorgu_zamani = models.DateTimeField(auto_now=True)
     olusturulma = models.DateTimeField(auto_now_add=True)
+
+    TARIH_ALANLARI = {"evrak_tarihi": ("evrak_gunu", True),
+                      "son_islem_tarihi": ("son_islem_zamani", False)}
 
     class Meta:
         verbose_name = "Tebligat Barkod Sorgusu"
@@ -969,6 +1036,54 @@ class Evrak(models.Model):
         return f"{self.dosya} · {self.birim_evrak_no}"
 
 
+class KesinlesmeKurali(models.Model):
+    """Takip türüne göre itiraz süresi (2026-11-14 kullanıcı kararı: süreleri
+    kullanıcı takip türüne göre girecek). Eşleşme `IcraTakipDetay`'ın UYAP
+    kodlarıyla yapılır (takibin_turu / takibin_yolu / takibin_sekli); boş alan
+    "hepsi" demektir. Bir dosyaya en çok alanı eşleşen (en özel) aktif kural
+    uygulanır; üç alanı boş kural VARSAYILANDIR (takip türü bilinmeyen dosyalar
+    dahil). `itiraz_suresi_gun` boşsa o türde kesinleşme HESAPLANMAZ (ör. ilamlı
+    takip için henüz kural girilmediyse)."""
+    takibin_turu = models.CharField("Takibin Türü Kodu", max_length=8, blank=True)
+    takibin_yolu = models.CharField("Takibin Yolu Kodu", max_length=8, blank=True)
+    takibin_sekli = models.CharField("Takibin Şekli Kodu", max_length=8, blank=True)
+    ad = models.CharField("Ad (ör. İlamsız — Genel Haciz)", max_length=160, blank=True)
+    itiraz_suresi_gun = models.PositiveSmallIntegerField("İtiraz Süresi (gün)", null=True, blank=True)
+    aktif = models.BooleanField(default=True)
+    aciklama = models.TextField(blank=True)
+    guncelleme = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Kesinleşme Kuralı"
+        verbose_name_plural = "Kesinleşme Kuralları"
+        ordering = ["takibin_turu", "takibin_yolu", "takibin_sekli"]
+        constraints = [
+            models.UniqueConstraint(fields=["takibin_turu", "takibin_yolu", "takibin_sekli"],
+                                    name="uq_kesinlesme_kurali"),
+        ]
+
+    def __str__(self):
+        kod = "/".join(x or "*" for x in (self.takibin_turu, self.takibin_yolu, self.takibin_sekli))
+        gun = f"{self.itiraz_suresi_gun} gün" if self.itiraz_suresi_gun is not None else "hesaplanmaz"
+        return f"{self.ad or kod} — {gun}"
+
+    def ozgulluk(self):
+        return sum(1 for x in (self.takibin_turu, self.takibin_yolu, self.takibin_sekli) if x)
+
+    def eslesir(self, turu, yolu, sekli):
+        return all(not k or k == (v or "") for k, v in (
+            (self.takibin_turu, turu), (self.takibin_yolu, yolu), (self.takibin_sekli, sekli)))
+
+
+def kesinlesme_kurali_sec(kurallar, turu="", yolu="", sekli=""):
+    """Aktif kurallar listesinden dosyanın takip koduna en özel eşleşeni döner;
+    yoksa None. Takip türü bilinmiyorsa (kodlar boş) yalnız varsayılan eşleşir."""
+    adaylar = [k for k in kurallar if k.aktif and k.eslesir(turu, yolu, sekli)]
+    if not adaylar:
+        return None
+    return max(adaylar, key=lambda k: k.ozgulluk())
+
+
 class ResmiTatil(models.Model):
     """Resmi/dini tatil takvimi — kesinleşme süre hesaplarında (bkz.
     kesinlesme_core.py) 7. günün hafta sonu/tatile denk gelmesi durumunda
@@ -988,3 +1103,142 @@ class ResmiTatil(models.Model):
 
     def __str__(self):
         return f"{self.tarih:%d.%m.%Y}" + (f" — {self.aciklama}" if self.aciklama else "")
+
+
+class PttHareket(models.Model):
+    """PTT gönderi hareketleri (2026-11-14): eskiden yalnız TebligatBarkod.ham_yanit
+    JSON'unun içindeydi; artık her hareket ayrı satır ve GERÇEK tarih alanıyla
+    (zamana göre sorgu/sıralama). Her başarılı PTT sorgusunda o tebligatın
+    hareketleri yeniden yazılır (bkz. ptt_hareketlerini_yaz)."""
+    tebligat = models.ForeignKey(TebligatBarkod, on_delete=models.CASCADE, related_name="ptt_hareketleri")
+    sira = models.PositiveSmallIntegerField()
+    zaman = models.DateTimeField("Hareket Zamanı", null=True, blank=True, db_index=True)
+    aciklama = models.CharField("Hareket", max_length=255, blank=True)
+    yer = models.CharField("Yer", max_length=255, blank=True)
+    islem_detay = models.CharField("İşlem Detayı", max_length=255, blank=True)
+    ham = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "PTT Hareketi"
+        verbose_name_plural = "PTT Hareketleri"
+        ordering = ["tebligat", "sira"]
+        constraints = [models.UniqueConstraint(fields=["tebligat", "sira"], name="uq_ptt_hareket")]
+
+    def __str__(self):
+        return f"{self.tebligat.barkod} · {self.zaman or ''} · {self.aciklama}"
+
+
+_YER_ANAHTARLARI = ("islem_yeri", "merkez", "sube", "ilce", "il")
+
+
+def ptt_hareketlerini_yaz(tebligat, ham_yanit):
+    """PTT ham yanıtının `hareketDongu` listesini PttHareket satırlarına yazar
+    (o tebligatın eski hareketleri silinip yeniden yazılır). Hatalı/atlanmış
+    yanıtta (`_hata`) hiçbir şeye dokunmaz. Döner: yazılan hareket sayısı."""
+    import json
+    if isinstance(ham_yanit, str):
+        try:
+            ham_yanit = json.loads(ham_yanit)
+        except ValueError:
+            return 0
+    if not isinstance(ham_yanit, dict) or ham_yanit.get("_hata"):
+        return 0
+    hareketler = [h for h in (ham_yanit.get("hareketDongu") or []) if isinstance(h, dict)]
+    satirlar = []
+    for i, h in enumerate(hareketler):
+        tarih = str(h.get("tarih") or "").strip()
+        saat = str(h.get("saat") or "").strip()
+        yer = " / ".join(dict.fromkeys(str(h.get(k)).strip() for k in _YER_ANAHTARLARI
+                                       if str(h.get(k) or "").strip()))
+        satirlar.append(PttHareket(
+            tebligat=tebligat, sira=i, zaman=tarih_coz(f"{tarih} {saat}".strip()),
+            aciklama=str(h.get("aciklama") or "")[:255], yer=yer[:255],
+            islem_detay=str(h.get("islem_detay") or "")[:255], ham=h))
+    PttHareket.objects.filter(tebligat=tebligat).delete()
+    PttHareket.objects.bulk_create(satirlar)
+    return len(satirlar)
+
+
+class DurumOlayi(models.Model):
+    """Durum geçmişi (2026-11-14): kesinleşme, tebliğ, taraf ve dosya durumu
+    değiştiğinde eski → yeni değer, ne zaman ve kaynağı. Eskiden değişiklik
+    yalnız üzerine yazılıyordu. İş Listesi'ndeki otomatik işler bu olaylardan
+    doğacak (ör. Kesinleşti → haciz talebi)."""
+
+    class Tur(models.TextChoices):
+        KESINLESME = "kesinlesme", "Kesinleşme"
+        TEBLIGAT = "tebligat", "Tebliğ"
+        TARAF_GORULMEDI = "taraf_gorulmedi", "Taraf UYAP'ta görülmedi"
+        TARAF_GERI_GELDI = "taraf_geri_geldi", "Taraf UYAP'ta yeniden görüldü"
+        TARAF_KIMLIK = "taraf_kimlik", "Taraf kimliğiyle ayrıldı"
+        DOSYA_DURUMU = "dosya_durumu", "Dosya durumu (UYAP)"
+        ISLEM_DURUMU = "islem_durumu", "İşlem durumu"
+
+    class Kaynak(models.TextChoices):
+        HESAP = "hesap", "Hesap"
+        UYAP = "uyap", "UYAP"
+        ELLE = "elle", "Elle"
+
+    dosya = models.ForeignKey(Dosya, on_delete=models.CASCADE, related_name="durum_olaylari")
+    dosya_taraf = models.ForeignKey(DosyaTaraf, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name="durum_olaylari")
+    taraf_adi = models.CharField("Taraf (o anki adı)", max_length=400, blank=True)
+    tur = models.CharField(max_length=20, choices=Tur.choices, db_index=True)
+    eski = models.CharField("Eski", max_length=255, blank=True)
+    yeni = models.CharField("Yeni", max_length=255, blank=True)
+    olay_tarihi = models.DateField("Olay Günü (tebliğ/kesinleşme)", null=True, blank=True)
+    kaynak = models.CharField(max_length=8, choices=Kaynak.choices, default=Kaynak.HESAP)
+    aciklama = models.TextField(blank=True)
+    zaman = models.DateTimeField("Kayıt Zamanı", auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Durum Olayı"
+        verbose_name_plural = "Durum Olayları"
+        ordering = ["-zaman", "-id"]
+
+    def __str__(self):
+        return f"{self.dosya} · {self.get_tur_display()}: {self.eski} → {self.yeni}"
+
+
+def durum_olayi_yaz(dosya, tur, eski, yeni, dosya_taraf=None, olay_tarihi=None,
+                    kaynak="hesap", aciklama=""):
+    """Olay kaydı; geçmiş yazılamazsa asıl işlemi bozmaz (sessizce geçer)."""
+    try:
+        DurumOlayi.objects.create(
+            dosya=dosya, dosya_taraf=dosya_taraf,
+            taraf_adi=str(dosya_taraf.taraf)[:400] if dosya_taraf is not None else "",
+            tur=tur, eski=(eski or "")[:255], yeni=(yeni or "")[:255],
+            olay_tarihi=olay_tarihi, kaynak=kaynak, aciklama=aciklama or "")
+    except Exception:
+        pass
+
+
+class TebligatTurEslesmesi(models.Model):
+    """Kullanıcının "Tür Eşleştir"de verdiği kararlar (2026-11-14): eskiden her
+    bilgisayarın kendi %LOCALAPPDATA% JSON dosyasındaydı, bürodaki diğer
+    bilgisayarlar görmüyordu. Anahtar: tur_eslestirme.anahtar(ham yazılış)."""
+    anahtar = models.TextField(unique=True)
+    tur = models.CharField(max_length=120)
+    olusturulma = models.DateTimeField(auto_now_add=True)
+    guncelleme = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Tebligat Tür Eşleşmesi"
+        verbose_name_plural = "Tebligat Tür Eşleşmeleri"
+
+    def __str__(self):
+        return f"{self.anahtar} → {self.tur}"
+
+
+class TebligatTurKategorisi(models.Model):
+    """Kullanıcının eklediği (temel listede olmayan) tebligat türleri."""
+    ad = models.CharField(max_length=120, unique=True)
+    olusturulma = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Tebligat Tür Kategorisi"
+        verbose_name_plural = "Tebligat Tür Kategorileri"
+        ordering = ["ad"]
+
+    def __str__(self):
+        return self.ad

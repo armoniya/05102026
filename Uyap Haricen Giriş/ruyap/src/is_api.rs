@@ -22,6 +22,12 @@
 //!   POST kisi_ekle / kisi_cikar {id, kullanici, rol}
 //!   POST sablon               şablon ekle / düzenle
 //!   POST tekrar · tekrar_durdur {id, aktif}
+//!   GET  hatirlaticilar       ?gorev=  — kişinin bekleyen hatırlatıcıları (plan L6)
+//!   POST hatirlatici          {gorev_id, zaman: "YYYY-AA-GGTSS:DD", notu} → {id}  (kişi kendine kurar)
+//!   POST hatirlatici_sil · hatirlatici_tamam {id} · hatirlatici_ertele {id, dakika}
+//!
+//! `ozet` (sayfa dakikada bir yoklar): sayaçlar + `yeni`/`yeni_isler` (başkasının açtığı, bakılmamış işler)
+//! + `hatirlatma`/`hatirlatma_sayi` (zamanı gelmiş hatırlatıcılar). Hepsi ofiste kalır; buluta gitmez.
 
 use crate::is_veri::{self as iv, Kisi};
 use chrono::NaiveDate;
@@ -62,6 +68,14 @@ fn metin(g: &Value, k: &str) -> String {
 }
 fn tarih(s: &str, ad: &str) -> Result<Option<NaiveDate>, String> {
     iv::tarih_coz(s).map_err(|_| format!("{ad} anlaşılamadı."))
+}
+/// "2026-11-16T09:30", "2026-11-16 09:30" (saniyeli de olur) → yerel saat.
+fn zaman_coz(s: &str) -> Result<chrono::NaiveDateTime, String> {
+    let s = s.trim().replace('T', " ");
+    ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"]
+        .iter()
+        .find_map(|b| chrono::NaiveDateTime::parse_from_str(&s, b).ok())
+        .ok_or_else(|| "Hatırlatma zamanı anlaşılamadı.".to_string())
 }
 
 /// Hesap adından büro kullanıcısı. Hiç görülmemiş hesap üye olarak eklenir (ad, buluttan eşitlenince
@@ -155,6 +169,23 @@ fn dagit<C: GenericClient>(
         ("GET", "kisiler") => json!(iv::kullanicilar(c)?),
         ("GET", "tekrarlar") => json!(iv::tekrar_kurallari(c, &k)?),
         ("GET", "evrak_sablon") => json!(iv::evraga_uyan_sablonlar(c, &qs("ad"))?),
+        ("GET", "hatirlaticilar") => json!(iv::hatirlaticilar(c, &k, qi("gorev"))?),
+        ("POST", "hatirlatici") => {
+            let simdi = chrono::Local::now().naive_local();
+            json!({"id": iv::hatirlatici_kur(c, &k, sayi(&g["gorev_id"]), zaman_coz(&metin(g, "zaman"))?, &metin(g, "notu"), simdi)?})
+        }
+        ("POST", "hatirlatici_sil") => {
+            iv::hatirlatici_sil(c, &k, tam(g, "id")?)?;
+            Value::Null
+        }
+        ("POST", "hatirlatici_tamam") => {
+            iv::hatirlatici_goruldu(c, &k, tam(g, "id")?)?;
+            Value::Null
+        }
+        ("POST", "hatirlatici_ertele") => {
+            iv::hatirlatici_ertele(c, &k, tam(g, "id")?, sayi(&g["dakika"]).unwrap_or(60))?;
+            Value::Null
+        }
         ("POST", "ac") => {
             let mut y = iv::YeniGorev::jsondan(g)?;
             // Dosya kartından açılan iş: UYAP birim kimliği + dosya no ile icra şemasındaki dosyaya bağlanır
@@ -195,6 +226,10 @@ fn dagit<C: GenericClient>(
             Value::Null
         }
         ("POST", "not") => json!({"id": iv::not_ekle(c, &k, tam(g, "id")?, &metin(g, "metin"))?}),
+        ("POST", "ek_sil") => {
+            iv::ek_sil(c, &k, tam(g, "id")?)?;
+            Value::Null
+        }
         ("POST", "kisi_ekle") => {
             iv::kisi_ekle(c, &k, tam(g, "id")?, tam(g, "kullanici")?, &metin(g, "rol"))?;
             Value::Null
@@ -231,6 +266,10 @@ pub async fn handle(method: &str, path: &str, query: &str, body: &[u8], capraz_s
         return yanit(503, json!({"ok": false, "kod": "E-402", "error": "Büro veritabanı hazır değil."}));
     }
     let q: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+    // Ekler: ham gövde (yükleme) ve ham yanıt (indirme); JSON değil.
+    if (yontem == "POST" && uc == "ek_yukle") || (yontem == "GET" && uc == "ek_indir") {
+        return ek_ucu(&yontem, &q, body.to_vec(), hesap).await;
+    }
     let g: Value = if body.is_empty() {
         json!({})
     } else {
@@ -251,6 +290,50 @@ pub async fn handle(method: &str, path: &str, query: &str, body: &[u8], capraz_s
         Ok(Err(e)) => {
             let sunucu_hatasi = e.starts_with("veritabanı") || e.contains("büro veritabanı");
             yanit(if sunucu_hatasi { 500 } else { 400 }, json!({"ok": false, "error": e}))
+        }
+        Err(e) => yanit(500, json!({"ok": false, "error": format!("İşlem tamamlanamadı: {e}")})),
+    }
+}
+
+/// `POST ek_yukle?gorev=<id>&ad64=<base64url ad>&mime=<tür>` (gövde = dosya) ve `GET ek_indir?id=<ek>`.
+/// Ad Base64 ile gelir: adres satırından geçen Türkçe harfler bozulabiliyordu (paylaşımda görüldü, 17.11.2026).
+async fn ek_ucu(yontem: &str, q: &HashMap<String, String>, body: Vec<u8>, hesap: String) -> Yanit {
+    use base64::Engine as _;
+    let sayi_q = |k: &str| q.get(k).and_then(|s| s.trim().parse::<i64>().ok());
+    let yukle = yontem == "POST";
+    let id = if yukle { sayi_q("gorev") } else { sayi_q("id") };
+    let Some(id) = id else { return yanit(400, json!({"ok": false, "error": "Kimlik eksik."})) };
+    let ad = q
+        .get("ad64")
+        .and_then(|s| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim().trim_end_matches('=')).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_default();
+    let mime = q.get("mime").cloned().unwrap_or_default();
+    let sonuc = tokio::task::spawn_blocking(move || -> Result<Result<i64, (String, String, Vec<u8>)>, String> {
+        let mut c = crate::veritabani::baglanti()?;
+        let k = kisi_getir(&mut *c, &hesap)?;
+        if yukle {
+            iv::ek_ekle(&mut *c, &k, id, &ad, &mime, &body).map(Ok)
+        } else {
+            iv::ek_oku(&mut *c, &k, id).map(Err)
+        }
+    })
+    .await;
+    match sonuc {
+        Ok(Ok(Ok(eid))) => yanit(200, json!({"ok": true, "veri": {"id": eid}})),
+        Ok(Ok(Err((ad, mime, veri)))) => {
+            let mut h = HashMap::new();
+            let tur = if mime.is_empty() || mime.chars().any(|c| c.is_control()) { "application/octet-stream".to_string() } else { mime };
+            h.insert("Content-Type".to_string(), tur);
+            h.insert("Cache-Control".to_string(), "no-store".to_string());
+            h.insert("X-Content-Type-Options".to_string(), "nosniff".to_string());
+            let kodlu: String = url::form_urlencoded::byte_serialize(ad.as_bytes()).collect::<String>().replace('+', "%20");
+            h.insert("Content-Disposition".to_string(), format!("attachment; filename=\"ek\"; filename*=UTF-8''{kodlu}"));
+            (200, h, veri)
+        }
+        Ok(Err(e)) => {
+            let sunucu = e.starts_with("veritabanı");
+            yanit(if sunucu { 500 } else { 400 }, json!({"ok": false, "error": e}))
         }
         Err(e) => yanit(500, json!({"ok": false, "error": format!("İşlem tamamlanamadı: {e}")})),
     }
@@ -333,8 +416,42 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     // Erteleme (onay gerekmeyen iş: doğrudan uygulanır)
     assert_eq!(gonder(c, "katip@api", "ertele", json!({"id": gizli, "yeni_tarih": "2026-11-18", "gerekce": "yarın"})).unwrap()["uygulandi"], true);
     assert!(dagit(c, "katip@api", "GET", "olmayan", &bos, &json!({}), bugun).unwrap().is_none());
+    // Bildirim (L6): müdürün katibe açtığı iş katibin "yeni" sayacında; katip açıp bakınca düşer.
+    let yeni_id = gonder(c, "mudur@api", "ac", json!({"baslik": "Yeni atanan iş", "son_tarih": "2026-11-20", "sorumlu_id": katip}))
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let oz = al(c, "katip@api", "ozet", &[]).unwrap();
+    assert_eq!(oz["yeni"], 1, "{oz}");
+    assert_eq!(oz["yeni_isler"][0]["id"], yeni_id);
+    assert_eq!(al(c, "mudur@api", "ozet", &[]).unwrap()["yeni"], 0, "kendi açtığı iş kendine yeni sayılmaz");
+    al(c, "katip@api", "gorev", &[("id", &yeni_id.to_string())]).unwrap();
+    assert_eq!(al(c, "katip@api", "ozet", &[]).unwrap()["yeni"], 0, "bakılan iş yeni değil");
+    // Hatırlatıcı: geçmişe kurulamaz; başkasının gizli işine kurulamaz; zamanı gelince özette görünür
+    let ileri = (chrono::Local::now() + chrono::Duration::days(30)).format("%Y-%m-%d").to_string();
+    let ileri_t = format!("{ileri}T09:00");
+    assert!(gonder(c, "katip@api", "hatirlatici", json!({"gorev_id": yeni_id, "zaman": "2020-01-01T09:00"})).is_err());
+    assert!(gonder(c, "mudur@api", "hatirlatici", json!({"gorev_id": gizli, "zaman": ileri_t})).is_err());
+    let h = gonder(c, "katip@api", "hatirlatici", json!({"gorev_id": yeni_id, "zaman": ileri_t, "notu": "ara"})).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let liste = al(c, "katip@api", "liste", &[("gorunum", "tum"), ("dosya_no", "")]).unwrap();
+    let satir = liste.as_array().unwrap().iter().find(|g| g["id"] == yeni_id).unwrap().clone();
+    assert_eq!(satir["hatirlatma"], format!("{ileri} 09:00"));
+    assert_eq!(al(c, "katip@api", "gorev", &[("id", &yeni_id.to_string())]).unwrap()["hatirlaticilar"][0]["notu"], "ara");
+    assert_eq!(al(c, "katip@api", "ozet", &[]).unwrap()["hatirlatma_sayi"], 0, "zamanı gelmedi");
+    c.execute("UPDATE hatirlatici SET zaman = now() - interval '1 minute' WHERE id = $1", &[&h]).unwrap();
+    let oz = al(c, "katip@api", "ozet", &[]).unwrap();
+    assert_eq!((oz["hatirlatma_sayi"].as_i64(), oz["hatirlatma"][0]["baslik"].as_str()), (Some(1), Some("Yeni atanan iş")));
+    assert!(gonder(c, "mudur@api", "hatirlatici_sil", json!({"id": h})).is_err(), "başkasının hatırlatıcısı silinemez");
+    gonder(c, "katip@api", "hatirlatici_ertele", json!({"id": h, "dakika": 30})).unwrap();
+    assert_eq!(al(c, "katip@api", "ozet", &[]).unwrap()["hatirlatma_sayi"], 0, "ertelendi");
+    c.execute("UPDATE hatirlatici SET zaman = now() - interval '1 minute' WHERE id = $1", &[&h]).unwrap();
+    gonder(c, "katip@api", "hatirlatici_tamam", json!({"id": h})).unwrap();
+    assert_eq!(al(c, "katip@api", "ozet", &[]).unwrap()["hatirlatma_sayi"], 0, "görüldü");
+    assert!(al(c, "katip@api", "hatirlaticilar", &[]).unwrap().as_array().unwrap().is_empty());
     // Pasif hesap reddedilir
     iv::kullanici_esitle(c, "eski@api", "Eski", false, false).unwrap();
     assert!(al(c, "eski@api", "ben", &[]).is_err());
-    c.batch_execute("DELETE FROM gorev WHERE baslik IN ('API deneme işi', 'Kişisel')").unwrap();
+    c.batch_execute("DELETE FROM gorev WHERE baslik IN ('API deneme işi', 'Kişisel', 'Yeni atanan iş')").unwrap();
 }

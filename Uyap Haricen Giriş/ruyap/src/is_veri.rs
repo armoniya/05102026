@@ -1024,6 +1024,104 @@ pub fn erteleme_karar<C: GenericClient>(c: &mut C, k: &Kisi, erteleme_id: i64, k
 
 // ── Not, kişi ───────────────────────────────────────────────────────────────────────────────────
 
+// ── Ek dosyalar (ofis diskinde %LOCALAPPDATA%\CokluUyap\ekler\<sha256>; buluta gitmez) ─────────────
+
+/// Tek ekin en büyük boyutu.
+pub const EK_EN_BUYUK: usize = 25 * 1024 * 1024;
+
+fn ek_adi_temizle(ad: &str) -> String {
+    let t: String = ad
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { ' ' } else { c })
+        .collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t: String = t.trim_matches(|c| c == '.' || c == ' ').chars().take(200).collect();
+    if t.is_empty() { "belge".into() } else { t }
+}
+
+/// İşe ek yükler (işi görebilen herkes; not eklemekle aynı kural). Kimliği döner.
+pub fn ek_ekle<C: GenericClient>(c: &mut C, k: &Kisi, gorev: i64, ad: &str, mime: &str, veri: &[u8]) -> Result<i64, String> {
+    if veri.is_empty() {
+        return Err("Dosya boş.".into());
+    }
+    if veri.len() > EK_EN_BUYUK {
+        return Err(format!("Dosya çok büyük (en çok {} MB).", EK_EN_BUYUK / 1024 / 1024));
+    }
+    let oz = gorev_ozu(c, gorev)?.ok_or("İş bulunamadı.")?;
+    if !yetki(c, &oz, k)?.gorebilir {
+        return Err("İş bulunamadı.".into());
+    }
+    use sha2::{Digest, Sha256};
+    let sha = hex::encode(Sha256::digest(veri));
+    let dizin = crate::is_aktar::ekler_dizini();
+    std::fs::create_dir_all(&dizin).map_err(|e| format!("Ekler klasörü açılamadı: {e}"))?;
+    let yol = dizin.join(&sha);
+    if !yol.exists() {
+        let gecici = dizin.join(format!("{sha}.yarim"));
+        std::fs::write(&gecici, veri).map_err(|e| format!("Dosya yazılamadı: {e}"))?;
+        std::fs::rename(&gecici, &yol).map_err(|e| format!("Dosya yazılamadı: {e}"))?;
+    }
+    let ad = ek_adi_temizle(ad);
+    let mime: String = mime.trim().chars().take(120).collect();
+    let mut tx = c.transaction().map_err(hata)?;
+    let eid: i64 = tx
+        .query_one(
+            "INSERT INTO gorev_ek (gorev_id, yukleyen_id, ad, mime, boyut, sha256) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+            &[&gorev, &k.id, &ad, &mime, &(veri.len() as i64), &sha],
+        )
+        .map_err(hata)?
+        .get(0);
+    olay_yaz(&mut tx, Some(gorev), Some(k.id), olay::EK, json!({"ek": eid, "ad": ad}))?;
+    tx.commit().map_err(hata)?;
+    Ok(eid)
+}
+
+/// Ekin adı, türü ve içeriği (işi görebilene).
+pub fn ek_oku<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(String, String, Vec<u8>), String> {
+    let r = c
+        .query_opt("SELECT gorev_id, ad, mime, sha256 FROM gorev_ek WHERE id = $1", &[&id])
+        .map_err(hata)?
+        .ok_or("Ek bulunamadı.")?;
+    let oz = gorev_ozu(c, r.get(0))?.ok_or("Ek bulunamadı.")?;
+    if !yetki(c, &oz, k)?.gorebilir {
+        return Err("Ek bulunamadı.".into());
+    }
+    let sha: String = r.get(3);
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Ek kaydı bozuk.".into());
+    }
+    let veri = std::fs::read(crate::is_aktar::ekler_dizini().join(&sha))
+        .map_err(|_| "Ekin dosyası ofis bilgisayarında bulunamadı.".to_string())?;
+    Ok((r.get(1), r.get(2), veri))
+}
+
+/// Eki siler: yükleyen ya da işi yönetebilen. Başka kayıt aynı dosyayı kullanmıyorsa disktekini de siler.
+pub fn ek_sil<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String> {
+    let r = c
+        .query_opt("SELECT gorev_id, yukleyen_id, ad, sha256 FROM gorev_ek WHERE id = $1", &[&id])
+        .map_err(hata)?
+        .ok_or("Ek bulunamadı.")?;
+    let gorev: i64 = r.get(0);
+    let oz = gorev_ozu(c, gorev)?.ok_or("Ek bulunamadı.")?;
+    let yt = yetki(c, &oz, k)?;
+    if !yt.gorebilir {
+        return Err("Ek bulunamadı.".into());
+    }
+    if !(yt.yonetebilir || r.get::<_, Option<i64>>(1) == Some(k.id)) {
+        return Err("Bu eki yalnız yükleyen ya da işi yöneten silebilir.".into());
+    }
+    let sha: String = r.get(3);
+    let mut tx = c.transaction().map_err(hata)?;
+    tx.execute("DELETE FROM gorev_ek WHERE id = $1", &[&id]).map_err(hata)?;
+    olay_yaz(&mut tx, Some(gorev), Some(k.id), olay::EK, json!({"silinen": id, "ad": r.get::<_, String>(2)}))?;
+    let baska: bool = tx.query_one("SELECT EXISTS (SELECT 1 FROM gorev_ek WHERE sha256 = $1)", &[&sha]).map_err(hata)?.get(0);
+    tx.commit().map_err(hata)?;
+    if !baska && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let _ = std::fs::remove_file(crate::is_aktar::ekler_dizini().join(&sha));
+    }
+    Ok(())
+}
+
 pub fn not_ekle<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, metin: &str) -> Result<i64, String> {
     let metin = metin.trim();
     if metin.is_empty() {
@@ -1253,7 +1351,9 @@ pub fn gorevler<C: GenericClient>(c: &mut C, k: &Kisi, s: &Suzgec, bugun: NaiveD
         kosul.join(" AND ")
     );
     let refs: Vec<&(dyn ToSql + Sync)> = p.iter().map(|b| b.as_ref()).collect();
-    Ok(c.query(&sql, &refs).map_err(hata)?.iter().map(|r| gorev_json(r, bugun)).collect())
+    let mut liste: Vec<Value> = c.query(&sql, &refs).map_err(hata)?.iter().map(|r| gorev_json(r, bugun)).collect();
+    hatirlatma_ekle(c, k, &mut liste)?;
+    Ok(liste)
 }
 
 /// İşin bütün ayrıntısı: alt işler, notlar, kişiler, ekler, ertelemeler, geçmiş, yetki.
@@ -1291,10 +1391,15 @@ pub fn gorev_ayrinti<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, bugun: Naiv
         .map(|r| json!({"id": r.get::<_, i64>(0), "ad": r.get::<_, String>(1), "rol": r.get::<_, String>(2)}))
         .collect();
     let ekler: Vec<Value> = c
-        .query("SELECT id, ad, mime, boyut, olusturulma::timestamp FROM gorev_ek WHERE gorev_id = $1 ORDER BY id", &[&id])
+        .query(
+            "SELECT e.id, e.ad, e.mime, e.boyut, e.olusturulma::timestamp, e.yukleyen_id, k.ad FROM gorev_ek e
+               LEFT JOIN kullanici k ON k.id = e.yukleyen_id WHERE e.gorev_id = $1 ORDER BY e.id",
+            &[&id],
+        )
         .map_err(hata)?
         .iter()
-        .map(|r| json!({"id": r.get::<_, i64>(0), "ad": r.get::<_, String>(1), "mime": r.get::<_, String>(2), "boyut": r.get::<_, i64>(3), "zaman": ts(r.get(4))}))
+        .map(|r| json!({"id": r.get::<_, i64>(0), "ad": r.get::<_, String>(1), "mime": r.get::<_, String>(2), "boyut": r.get::<_, i64>(3),
+                        "zaman": ts(r.get(4)), "yukleyen_id": r.get::<_, Option<i64>>(5), "yukleyen": r.get::<_, Option<String>>(6)}))
         .collect();
     let ertelemeler: Vec<Value> = c
         .query(
@@ -1350,6 +1455,8 @@ pub fn gorev_ayrinti<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, bugun: Naiv
     v["sonuclar"] = json!(sonuclar);
     v["kontrol"] = json!(kontrol.unwrap_or_default());
     v["yetki"] = json!({"calisabilir": yt.calisabilir, "onaylayabilir": yt.onaylayabilir, "yonetebilir": yt.yonetebilir});
+    v["hatirlaticilar"] = json!(hatirlaticilar(c, k, Some(id))?);
+    hatirlatma_ekle(c, k, std::slice::from_mut(&mut v))?;
     // Kişi işi gördü
     let son_olay: i64 = c
         .query_one("SELECT coalesce(max(id), 0) FROM gorev_olay WHERE gorev_id = $1", &[&id])
@@ -1387,7 +1494,177 @@ pub fn ozet<C: GenericClient>(c: &mut C, k: &Kisi, bugun: NaiveDate) -> Result<V
         )
         .map_err(hata)?
         .get(0);
-    Ok(json!({"bugun": r.get::<_, i64>(0), "geciken": r.get::<_, i64>(1), "onay": r.get::<_, i64>(2), "erteleme": erteleme}))
+    let (yeni, yeni_isler) = yeni_isler(c, k)?;
+    let (hatirlatma_sayi, hatirlatma) = vadesi_gelen_hatirlaticilar(c, k)?;
+    Ok(json!({"bugun": r.get::<_, i64>(0), "geciken": r.get::<_, i64>(1), "onay": r.get::<_, i64>(2), "erteleme": erteleme,
+              "yeni": yeni, "yeni_isler": yeni_isler, "hatirlatma_sayi": hatirlatma_sayi, "hatirlatma": hatirlatma}))
+}
+
+/// Başkasının kişiye açtığı ya da kişiye devrettiği, kişinin henüz açıp bakmadığı işler (son 7 gün).
+/// Sistemin açtığı işler (rutin örneği vb., olayda kişi yok) sayılmaz. `olay`: uyarının tekrarlanmaması
+/// için sayfanın hatırladığı anahtar (aynı iş yeniden devredilirse yeni olay = yeni uyarı).
+fn yeni_isler<C: GenericClient>(c: &mut C, k: &Kisi) -> Result<(i64, Vec<Value>), String> {
+    let satirlar = c
+        .query(
+            "SELECT g.id, g.baslik, coalesce(u.ad, ''), o.id, count(*) OVER ()
+             FROM gorev g
+             JOIN LATERAL (SELECT oo.id, oo.kullanici_id, oo.olusturulma FROM gorev_olay oo
+                           WHERE oo.gorev_id = g.id AND oo.tur IN ('acildi', 'sorumlu') ORDER BY oo.id DESC LIMIT 1) o ON true
+             LEFT JOIN kullanici u ON u.id = o.kullanici_id
+             LEFT JOIN gorev_goruldu gg ON gg.gorev_id = g.id AND gg.kullanici_id = $1
+             WHERE g.ust_gorev_id IS NULL AND g.durum IN ('acik', 'devam') AND g.sorumlu_id = $1
+               AND o.kullanici_id IS NOT NULL AND o.kullanici_id <> $1
+               AND o.id > coalesce(gg.son_olay_id, 0) AND o.olusturulma > now() - interval '7 days'
+             ORDER BY o.id DESC LIMIT 5",
+            &[&k.id],
+        )
+        .map_err(hata)?;
+    let toplam = satirlar.first().map(|r| r.get::<_, i64>(4)).unwrap_or(0);
+    let liste = satirlar
+        .iter()
+        .map(|r| json!({"id": r.get::<_, i64>(0), "baslik": r.get::<_, String>(1), "atayan": r.get::<_, String>(2), "olay": r.get::<_, i64>(3)}))
+        .collect();
+    Ok((toplam, liste))
+}
+
+// ── Hatırlatıcı: kişi kendine kurar (plan L6). Sayfa uyarısı `goruldu`, telefon sinyali `gonderildi` ile susar. ──
+
+const HATIRLATICI_SEC: &str = "SELECT h.id, h.gorev_id, h.zaman::timestamp, h.baslik, h.notu, coalesce(g.baslik, h.baslik)
+    FROM hatirlatici h LEFT JOIN gorev g ON g.id = h.gorev_id";
+
+fn hatirlatici_json(r: &postgres::Row) -> Value {
+    json!({"id": r.get::<_, i64>(0), "gorev_id": r.get::<_, Option<i64>>(1), "zaman": ts(r.get(2)),
+           "baslik": r.get::<_, String>(5), "notu": r.get::<_, String>(4)})
+}
+
+/// Zamanı gelmiş, kişinin henüz "Tamam" demediği hatırlatıcılar (kapanmış işlerinkiler hariç), en çok 5.
+fn vadesi_gelen_hatirlaticilar<C: GenericClient>(c: &mut C, k: &Kisi) -> Result<(i64, Vec<Value>), String> {
+    let kosul = "WHERE h.kullanici_id = $1 AND h.goruldu IS NULL AND h.zaman <= now()
+                   AND (h.gorev_id IS NULL OR g.durum IN ('acik', 'devam', 'onayda'))";
+    let toplam: i64 = c
+        .query_one(&format!("SELECT count(*) FROM hatirlatici h LEFT JOIN gorev g ON g.id = h.gorev_id {kosul}"), &[&k.id])
+        .map_err(hata)?
+        .get(0);
+    if toplam == 0 {
+        return Ok((0, vec![]));
+    }
+    let liste = c
+        .query(&format!("{HATIRLATICI_SEC} {kosul} ORDER BY h.zaman LIMIT 5"), &[&k.id])
+        .map_err(hata)?
+        .iter()
+        .map(hatirlatici_json)
+        .collect();
+    Ok((toplam, liste))
+}
+
+/// Kişinin bekleyen (görmediği) hatırlatıcıları; `gorev` verilirse yalnız o işin.
+pub fn hatirlaticilar<C: GenericClient>(c: &mut C, k: &Kisi, gorev: Option<i64>) -> Result<Vec<Value>, String> {
+    Ok(c
+        .query(
+            &format!("{HATIRLATICI_SEC} WHERE h.kullanici_id = $1 AND h.goruldu IS NULL AND ($2::bigint IS NULL OR h.gorev_id = $2) ORDER BY h.zaman LIMIT 100"),
+            &[&k.id, &gorev],
+        )
+        .map_err(hata)?
+        .iter()
+        .map(hatirlatici_json)
+        .collect())
+}
+
+/// Kişi kendine hatırlatıcı kurar. İşe bağlıysa işi görebilmeli; zaman geçmişte olamaz.
+pub fn hatirlatici_kur<C: GenericClient>(
+    c: &mut C,
+    k: &Kisi,
+    gorev: Option<i64>,
+    zaman: chrono::NaiveDateTime,
+    notu: &str,
+    simdi: chrono::NaiveDateTime,
+) -> Result<i64, String> {
+    if zaman < simdi - Duration::minutes(1) {
+        return Err("Geçmiş bir zamana hatırlatıcı kurulamaz.".into());
+    }
+    if zaman > simdi + Duration::days(800) {
+        return Err("Hatırlatma zamanı çok ileri.".into());
+    }
+    let notu: String = notu.trim().chars().take(500).collect();
+    let baslik: String = match gorev {
+        Some(id) => {
+            let oz = gorev_ozu(c, id)?.ok_or("İş bulunamadı.")?;
+            if !yetki(c, &oz, k)?.gorebilir {
+                return Err("İş bulunamadı.".into());
+            }
+            let b: String = c.query_one("SELECT baslik FROM gorev WHERE id = $1", &[&id]).map_err(hata)?.get(0);
+            b.chars().take(300).collect()
+        }
+        None if notu.is_empty() => return Err("Hatırlatma için bir not yazın.".into()),
+        None => notu.chars().take(300).collect(),
+    };
+    let bekleyen: i64 = c
+        .query_one("SELECT count(*) FROM hatirlatici WHERE kullanici_id = $1 AND goruldu IS NULL", &[&k.id])
+        .map_err(hata)?
+        .get(0);
+    if bekleyen >= 500 {
+        return Err("Bekleyen hatırlatıcınız çok fazla; eskilerini silin.".into());
+    }
+    c.query_one(
+        "INSERT INTO hatirlatici (gorev_id, kullanici_id, olusturan_id, zaman, baslik, notu)
+         VALUES ($1, $2, $2, $3::timestamp, $4, $5) RETURNING id",
+        &[&gorev, &k.id, &zaman, &baslik, &notu],
+    )
+    .map(|r| r.get(0))
+    .map_err(hata)
+}
+
+pub fn hatirlatici_sil<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String> {
+    match c.execute("DELETE FROM hatirlatici WHERE id = $1 AND kullanici_id = $2", &[&id, &k.id]).map_err(hata)? {
+        0 => Err("Hatırlatıcı bulunamadı.".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Sayfadaki uyarıda "Tamam".
+pub fn hatirlatici_goruldu<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String> {
+    c.execute("UPDATE hatirlatici SET goruldu = now() WHERE id = $1 AND kullanici_id = $2 AND goruldu IS NULL", &[&id, &k.id])
+        .map_err(hata)?;
+    Ok(())
+}
+
+/// Uyarıda "Sonra hatırlat": `dakika` sonra yeniden (5 dk – 7 gün).
+pub fn hatirlatici_ertele<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, dakika: i64) -> Result<(), String> {
+    let dakika = dakika.clamp(5, 7 * 24 * 60) as i32;
+    match c
+        .execute(
+            "UPDATE hatirlatici SET zaman = now() + make_interval(mins => $3), goruldu = NULL, gonderildi = NULL
+             WHERE id = $1 AND kullanici_id = $2",
+            &[&id, &k.id, &dakika],
+        )
+        .map_err(hata)?
+    {
+        0 => Err("Hatırlatıcı bulunamadı.".into()),
+        _ => Ok(()),
+    }
+}
+
+/// İş satırlarına kişinin sıradaki hatırlatma zamanını ekler (`hatirlatma`: "YYYY-AA-GG SS:DD" ya da null).
+pub fn hatirlatma_ekle<C: GenericClient>(c: &mut C, k: &Kisi, isler: &mut [Value]) -> Result<(), String> {
+    let idler: Vec<i64> = isler.iter().filter_map(|g| g["id"].as_i64()).collect();
+    if idler.is_empty() {
+        return Ok(());
+    }
+    let m: HashMap<i64, Value> = c
+        .query(
+            "SELECT gorev_id, min(zaman)::timestamp FROM hatirlatici
+             WHERE kullanici_id = $1 AND goruldu IS NULL AND gorev_id = ANY($2) GROUP BY gorev_id",
+            &[&k.id, &idler],
+        )
+        .map_err(hata)?
+        .iter()
+        .map(|r| (r.get::<_, i64>(0), ts(r.get(1))))
+        .collect();
+    for g in isler.iter_mut() {
+        let v = g["id"].as_i64().and_then(|id| m.get(&id).cloned()).unwrap_or(Value::Null);
+        g["hatirlatma"] = v;
+    }
+    Ok(())
 }
 
 // ── Tekrar eden işler ───────────────────────────────────────────────────────────────────────────
@@ -1766,6 +2043,15 @@ pub fn etiketler<C: GenericClient>(c: &mut C, k: &Kisi) -> Result<Vec<Value>, St
 
 /// Eski sistemin kodlanmış süreç, şablon ve etiketlerini (zs_store::hazir_*) tablolara yazar.
 /// Yalnız eksikleri ekler; kullanıcının sonradan yaptığı değişikliklere dokunmaz. Eklenen kayıt sayısı.
+/// Açılışta: büroda hiç hazır şablon yoksa (yeni kurulum) hazır verileri yükler; varsa dokunmaz.
+pub fn hazir_verileri_ilk_kez<C: GenericClient>(c: &mut C) -> Result<usize, String> {
+    let var: bool = c.query_one("SELECT EXISTS (SELECT 1 FROM sablon WHERE hazir)", &[]).map_err(hata)?.get(0);
+    if var {
+        return Ok(0);
+    }
+    hazir_verileri_yukle(c)
+}
+
 pub fn hazir_verileri_yukle<C: GenericClient>(c: &mut C) -> Result<usize, String> {
     use crate::zs_store as zs;
     let mut tx = c.transaction().map_err(hata)?;
@@ -1837,8 +2123,8 @@ pub fn hazir_verileri_yukle<C: GenericClient>(c: &mut C) -> Result<usize, String
         let eklendi = tx
             .execute(
                 "INSERT INTO sablon (anahtar, baslik, aciklama, kontrol, tur, oncelik, sure_turu, sure_deger, taraf, eylem,
-                     surec_asama_id, eski_adlar, hazir)
-                 VALUES ($1, $2, $3, $4, 'is', $5, 'is_gunu', $6, $7, $8, $9, $10, true) ON CONFLICT (anahtar) DO NOTHING",
+                     surec_asama_id, eski_adlar, hazir, olay_turu)
+                 VALUES ($1, $2, $3, $4, 'is', $5, 'is_gunu', $6, $7, $8, $9, $10, true, $11) ON CONFLICT (anahtar) DO NOTHING",
                 &[
                     &anahtar,
                     &s["title"].as_str().unwrap_or(anahtar),
@@ -1850,6 +2136,7 @@ pub fn hazir_verileri_yukle<C: GenericClient>(c: &mut C) -> Result<usize, String
                     &s["action"].as_str().unwrap_or(""),
                     &asama_id,
                     &eski,
+                    &crate::is_otomatik::hazir_olay_turu(anahtar),
                 ],
             )
             .map_err(hata)?;
@@ -2148,4 +2435,29 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
             "bilinmeyen olay türü: {t}"
         );
     }
+}
+
+/// Ekler: yükle → ayrıntıda görünür → indir (aynı bayt) → yetkisiz silme reddi → sil (disktekiyle).
+/// `veritabani::tests::uctan_uca` içinden, `veritabani_senaryosu`ndan sonra çağrılır.
+#[cfg(test)]
+pub(crate) fn ek_senaryosu(c: &mut postgres::Client) {
+    let bugun = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+    let amir = kisi_bul(c, "amir").unwrap().expect("amir");
+    let uye = kisi_bul(c, "uye").unwrap().expect("uye");
+    let y = YeniGorev { baslik: "Ek denemesi".into(), son_tarih: Some(bugun), sorumlu_id: Some(amir.id), ..Default::default() };
+    let gid = gorev_ac(c, Some(&amir), &y, bugun).unwrap();
+    assert!(ek_ekle(c, &amir, gid, "x", "", b"").is_err(), "boş dosya");
+    let veri = "Taşınmaz satış ilanı".as_bytes();
+    let eid = ek_ekle(c, &amir, gid, "Satış/İlanı:1.pdf", "application/pdf", veri).unwrap();
+    let a = gorev_ayrinti(c, &amir, gid, bugun).unwrap().unwrap();
+    assert_eq!(a["ekler"][0]["ad"], "Satış İlanı 1.pdf", "ad temizlenir");
+    assert_eq!(a["ekler"][0]["yukleyen_id"], amir.id);
+    let (ad, mime, oku) = ek_oku(c, &uye, eid).unwrap();
+    assert_eq!((ad.as_str(), mime.as_str(), oku.as_slice()), ("Satış İlanı 1.pdf", "application/pdf", veri));
+    assert!(ek_sil(c, &uye, eid).is_err(), "yükleyen ya da yönetici değil");
+    ek_sil(c, &amir, eid).unwrap();
+    assert!(ek_oku(c, &amir, eid).is_err());
+    use sha2::{Digest, Sha256};
+    assert!(!crate::is_aktar::ekler_dizini().join(hex::encode(Sha256::digest(veri))).exists(), "dosya da silinir");
+    c.execute("DELETE FROM gorev WHERE id = $1", &[&gid]).unwrap();
 }

@@ -608,7 +608,83 @@ fn bulutu_kapat() -> Result<(), String> {
     Ok(())
 }
 
+/// `--bulut-kopyasini-sil [--evet]`: taşınmış büronun buluttaki İş Listesi kayıtlarını siler (kullanıcı onayı
+/// 17.11.2026; GERİ ALINAMAZ). Önce buluttan son kez dışa aktarılıp ofis diskine arşivlenir; buluttaki her açık
+/// ana iş büro veritabanında (eski_id) bulunmalı ve bitmiş işlerde belge olmamalıdır, yoksa hiçbir şey silinmez.
+/// Sunucu da iş sayısını yeniden sayar (arada değişiklik varsa reddeder). Kullanıcılar (giriş) ve bildirim
+/// abonelikleri bulutta kalır. `--evet` verilmezse yalnız denetler ve ne silineceğini yazar.
+fn bulut_kopyasini_sil(evet: bool) -> Result<(), String> {
+    let b = buluta_baglan()?;
+    println!("Silmeden önce buluttan son kez dışa aktarılıyor ({})…", b.base);
+    let d = b.disa_aktar()?;
+    println!("Arşiv: {}", arsivle(&d)?.display());
+    let isler = liste(&d, "tasks");
+    let tasinacak = tasinacak_isler(&d);
+    let biten_belge = liste(&d, "files")
+        .iter()
+        .filter(|f| sayi(f, "task_id").is_some_and(|t| !tasinacak.contains(&t)))
+        .count();
+    if biten_belge > 0 {
+        return Err(format!("bitmiş işlerde {biten_belge} belge var; arşive yalnız kayıtları giriyor, önce belgeler indirilmeli"));
+    }
+    let acik_kokler: Vec<i64> = isler
+        .iter()
+        .filter(|t| t["parent_id"].is_null() && ACIK.contains(&metin(t, "status").as_str()))
+        .filter_map(|t| sayi(t, "id"))
+        .collect();
+    let gunluk: crate::veritabani::Gunluk = std::sync::Arc::new(|m: &str| println!("{m}"));
+    crate::veritabani::baslat(gunluk)?;
+    let dsn = crate::veritabani::dsn().ok_or("büro veritabanı hazır değil")?;
+    let mut c = postgres::Client::connect(&dsn, postgres::NoTls).map_err(hata)?;
+    let bulunan: i64 = c
+        .query_one("SELECT count(*) FROM gorev WHERE eski_id = ANY($1)", &[&acik_kokler])
+        .map_err(hata)?
+        .get(0);
+    if bulunan as usize != acik_kokler.len() {
+        return Err(format!(
+            "buluttaki {} açık ana işin yalnız {bulunan} tanesi büro veritabanında; önce --is-listesi-aktar çalıştırın",
+            acik_kokler.len()
+        ));
+    }
+    println!(
+        "Denetim tamam: {} iş (alt işler dahil), {} açık ana işin hepsi büro veritabanında; {} not, {} geçmiş kaydı, {} hatırlatıcı, {} şablon.",
+        isler.len(), acik_kokler.len(), liste(&d, "notes").len(), liste(&d, "events").len(),
+        liste(&d, "reminders").len(), liste(&d, "templates").len()
+    );
+    if !evet {
+        println!("Silinmedi (deneme). Silmek için --evet ekleyin.");
+        return Ok(());
+    }
+    let r = b
+        .istemci
+        .post(format!("{}/is-listesi/api/tasindi/sil", b.base))
+        .bearer_auth(&b.jeton)
+        .json(&json!({"onay": "SIL", "is_sayisi": isler.len()}))
+        .send()
+        .map_err(|e| format!("buluta ulaşılamadı: {e}"))?;
+    let durum = r.status();
+    let y: Value = r.json().unwrap_or(Value::Null);
+    if !durum.is_success() || y["ok"] != json!(true) {
+        return Err(if durum.as_u16() == 404 {
+            "bulutta silme ucu yok (sunucu güncellenmemiş)".into()
+        } else {
+            y["error"].as_str().map(String::from).unwrap_or_else(|| format!("HTTP {durum}"))
+        });
+    }
+    println!("Bulut İş Listesi kopyası silindi (büro: {}): {}", y["office_id"].as_str().unwrap_or(""), y["silinen"]);
+    Ok(())
+}
+
 pub fn komut(argv: &[String]) -> i32 {
+    if argv.iter().any(|a| a == "--bulut-kopyasini-sil") {
+        return match bulut_kopyasini_sil(argv.iter().any(|a| a == "--evet")) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("BULUT KOPYASI SİLİNMEDİ: {e}");
+                2
+            }
+        };
+    }
     if argv.iter().any(|a| a == "--bulutu-kapat") {
         return match bulutu_kapat() {
             Ok(()) => 0,

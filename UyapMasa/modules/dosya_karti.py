@@ -157,18 +157,27 @@ def _taraflar_sekmesi(app, parent, taraflar):
     # Kesinleşme/Tebliğ Durumu yalnız borçlu satırlarında dolu olur (bkz.
     # dosya_core._taraflar_kesinlesme_bilgisi_ekle); diğer rollerde "—".
     parent.columnconfigure(1, weight=1)
+    # 2026-11-14: UYAP'ın taraf listesinde artık olmayan bağ silinmez, burada uyarılır.
+    kayip = [t for t in taraflar if t.get("uyaptaYok")]
+    if kayip:
+        tk.Label(parent, text=("⚠ " + ", ".join(f"{t.get('rol', '')}: {t.get('adi', '')}" for t in kayip)
+                               + " UYAP'taki taraf listesinde artık görünmüyor. Kayıt silinmedi; "
+                               "UYAP'ta kontrol edin (ad düzeltmesi, taraf çıkarma vb.)."),
+                 bg=C.CARD, fg=C.CLAY, font=app.f_small, anchor="w", justify="left",
+                 wraplength=640).grid(row=0, column=0, columnspan=5, sticky="w", padx=18, pady=(12, 0))
     for c, baslik in enumerate(("Rol", "Ad / Unvan", "Vekil", "Kesinleşme Durumu", "Tebliğ Durumu")):
         tk.Label(parent, text=baslik, bg=C.CARD, fg=C.INK_SOFT, font=app.f_nav_b,
-                 anchor="w").grid(row=0, column=c, sticky="w",
+                 anchor="w").grid(row=1, column=c, sticky="w",
                                   padx=(18 if c == 0 else 0, 18 if c == 4 else 10),
                                   pady=(12, 4))
-    for i, t in enumerate(taraflar, start=1):
-        tk.Label(parent, text=t.get("rol", "") or "—", bg=C.CARD, fg=C.INK,
-                 font=app.f_body, anchor="w").grid(row=i, column=0, sticky="w",
-                                                   padx=(18, 10), pady=3)
+    for i, t in enumerate(taraflar, start=2):
+        renk = C.CLAY if t.get("uyaptaYok") else C.INK
+        tk.Label(parent, text=(t.get("rol", "") or "—") + (" ⚠" if t.get("uyaptaYok") else ""),
+                 bg=C.CARD, fg=renk, font=app.f_body, anchor="w").grid(row=i, column=0, sticky="w",
+                                                                       padx=(18, 10), pady=3)
         for c, val in ((1, t.get("adi", "")), (2, (t.get("vekil") or "").strip("[]")),
                        (3, t.get("kesinlesmeDurumu", "")), (4, t.get("tebligatDurumu", ""))):
-            tk.Label(parent, text=val or "—", bg=C.CARD, fg=C.INK, font=app.f_body,
+            tk.Label(parent, text=val or "—", bg=C.CARD, fg=renk, font=app.f_body,
                      anchor="w", justify="left", wraplength=200).grid(
                 row=i, column=c, sticky="w", padx=(0, 18 if c == 4 else 10), pady=3)
 
@@ -183,12 +192,59 @@ def _barkod_sekmesi(parent, barkodlar):
             ("tebligMazbatasiVar", "Tebliğ Mazbatası", 100),
             ("kapaliTebligMazbatasiVar", "Kapalı Mazbata", 100),
             ("sorguZamani", "Sorgu Zamanı", 120)]
-    tree = ttk.Treeview(parent, columns=[c[0] for c in cols], show="headings", height=8)
+    tree = ttk.Treeview(parent, columns=[c[0] for c in cols], show="headings", height=7)
     for k, lbl, w in cols:
         tree.heading(k, text=lbl)
         tree.column(k, width=w, anchor="w", stretch=False)
-    for rec in barkodlar:
-        tree.insert("", "end", values=[rec.get(k, "") for k, _l, _w in cols])
+    for i, rec in enumerate(barkodlar):
+        tree.insert("", "end", iid=str(i), values=[rec.get(k, "") for k, _l, _w in cols])
+    tree.grid(row=0, column=0, sticky="nsew", padx=18, pady=(12, 4))
+    ysb = tk.Scrollbar(parent, orient="vertical", command=tree.yview)
+    ysb.grid(row=0, column=1, sticky="ns", pady=(12, 4))
+    tree.configure(yscrollcommand=ysb.set)
+    parent.rowconfigure(0, weight=1)
+
+    # Seçili tebligatın PTT hareketleri (2026-11-14: ayrı tablo, gerçek tarihli).
+    hcols = [("zaman", "Zaman", 120), ("aciklama", "Hareket", 220), ("yer", "Yer", 220),
+             ("islemDetay", "İşlem Detayı", 300)]
+    htree = ttk.Treeview(parent, columns=[c[0] for c in hcols], show="headings", height=5)
+    for k, lbl, w in hcols:
+        htree.heading(k, text=lbl)
+        htree.column(k, width=w, anchor="w", stretch=False)
+    htree.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 12))
+    parent.rowconfigure(1, weight=1)
+
+    def secildi(_e=None):
+        htree.delete(*htree.get_children())
+        sec = tree.selection()
+        if not sec:
+            return
+        tb_id = barkodlar[int(sec[0])].get("tbId")
+        if not tb_id:
+            return
+        try:
+            hareketler = dosya_core.ptt_hareketleri_listele(tb_id)
+        except Exception:
+            hareketler = []
+        for h in hareketler:
+            htree.insert("", "end", values=[h.get(k, "") for k, _l, _w in hcols])
+        if not hareketler:
+            htree.insert("", "end", values=["", "PTT hareketi yok (e-tebligat ya da henüz sorgulanmadı)", "", ""])
+    tree.bind("<<TreeviewSelect>>", secildi)
+
+
+def _gecmis_sekmesi(parent, olaylar):
+    """Durum geçmişi (DurumOlayi) — yeniden eskiye."""
+    parent.columnconfigure(0, weight=1)
+    cols = [("zaman", "Kayıt", 115), ("tur", "Olay", 150), ("taraf", "Taraf", 170),
+            ("eski", "Eski", 200), ("yeni", "Yeni", 200), ("olayTarihi", "Olay Günü", 85),
+            ("kaynak", "Kaynak", 60)]
+    tree = ttk.Treeview(parent, columns=[c[0] for c in cols], show="headings", height=10)
+    for k, lbl, w in cols:
+        tree.heading(k, text=lbl)
+        tree.column(k, width=w, anchor="w", stretch=False)
+    for o in olaylar:
+        tree.insert("", "end", values=[o.get(k, "") for k, _l, _w in cols])
     tree.grid(row=0, column=0, sticky="nsew", padx=18, pady=12)
     ysb = tk.Scrollbar(parent, orient="vertical", command=tree.yview)
     ysb.grid(row=0, column=1, sticky="ns", pady=12)
@@ -227,11 +283,11 @@ def ac(app, rec, log_fn=None, liste_yenile_fn=None, bitti_fn=None):
         except Exception as e:
             if log_fn:
                 log_fn(f"⚠️ Künye veritabanından okunamadı: {e}")
-        return sonuc, barkodlar_getir(kart_rec, log_fn)
+        return sonuc, barkodlar_getir(kart_rec, log_fn), dosya_core.durum_olaylari_listele(kart_rec, log_fn)
 
     def hazir(veri):
         try:
-            _pencere(app, kart_rec, veri[0], veri[1], oku, liste_yenile_fn, log_fn)
+            _pencere(app, kart_rec, veri[0], veri[1], oku, liste_yenile_fn, log_fn, olaylar=veri[2])
         finally:
             if bitti_fn:
                 bitti_fn()
@@ -301,7 +357,7 @@ def _bekleme_penceresi(app, top, rec, durum_kaydet):
     tarih_e.focus_set()
 
 
-def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None):
+def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None, olaylar=None):
     global _pencere_sayaci
     _stil_hazirla(app)
     baslik = f"Dosya Bilgileri — {rec.get('dosyaNo', '') or ''}".rstrip(" —")
@@ -375,8 +431,8 @@ def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None):
         ciz(**son_cizim)
         durum.config(text=f"İşlem durumu: {rec['islemDurumu']}")
 
-    def ciz(sonuc, barkodlar, canli):
-        son_cizim.update(sonuc=sonuc, barkodlar=barkodlar, canli=canli)
+    def ciz(sonuc, barkodlar, canli, olaylar=None):
+        son_cizim.update(sonuc=sonuc, barkodlar=barkodlar, canli=canli, olaylar=olaylar)
         for w in icerik.winfo_children():
             w.destroy()
         ham, aile, kaydedildi, hata, taraflar = sonuc
@@ -415,6 +471,11 @@ def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None):
             nb.add(tab_barkod, text="Barkod / Tebligat")
             _barkod_sekmesi(tab_barkod, barkodlar)
 
+        if olaylar:
+            tab_gecmis = tk.Frame(nb, bg=C.CARD)
+            nb.add(tab_gecmis, text="Geçmiş")
+            _gecmis_sekmesi(tab_gecmis, olaylar)
+
     def canli_getir():
         canli_btn.set_state("disabled")
         durum.config(text="UYAP'tan canlı veri alınıyor…")
@@ -423,15 +484,15 @@ def _pencere(app, rec, sonuc, barkodlar, oku, liste_yenile_fn, log_fn=None):
     def canli_geldi(veri):
         if not top.winfo_exists():
             return
-        sonuc_c, barkodlar_c = veri
+        sonuc_c, barkodlar_c, olaylar_c = veri
         canli_btn.set_state("normal")
         pasif_btn_tazele()
-        ciz(sonuc_c, barkodlar_c, canli=True)
+        ciz(sonuc_c, barkodlar_c, canli=True, olaylar=olaylar_c)
         if sonuc_c[2] and liste_yenile_fn:   # kaydedildi → liste yeni veriyi göstersin
             liste_yenile_fn()
 
     pasif_btn_tazele()
-    ciz(sonuc, barkodlar or [], canli=False)
+    ciz(sonuc, barkodlar or [], canli=False, olaylar=olaylar or [])
 
     top.update_idletasks()
     kaydirma = (_pencere_sayaci % 8) * 28

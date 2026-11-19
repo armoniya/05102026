@@ -18,7 +18,7 @@ from datetime import datetime
 
 from django.db import transaction
 
-from .models import Birim, Dosya
+from .models import Birim, Dosya, DurumOlayi, durum_olayi_yaz
 
 
 def _tarih(d):
@@ -99,19 +99,30 @@ def dosya_kunyesi_kaydet(rec, yargi_turu=None):
     anahtar = {"birim": birim, "yil": yil, "sira_no": sira, "tur_kod": tur_kod}
     try:
         dosya = Dosya.objects.select_for_update().get(**anahtar)
-        eski_durum_kod, created = dosya.durum_kod, False
+        eski_durum_kod, eski_durum, created = dosya.durum_kod, dosya.durum, False
     except Dosya.DoesNotExist:
-        dosya, eski_durum_kod, created = Dosya(**anahtar), None, True
+        dosya, eski_durum_kod, eski_durum, created = Dosya(**anahtar), None, None, True
     for alan, deger in dosya_defaults.items():
         setattr(dosya, alan, deger)
     guncel_alanlar = list(dosya_defaults) + ["son_senkron"]
+    otomatik_pasif = False
     if (dosya.durum_kod == Dosya.Durum.KAPALI and eski_durum_kod != Dosya.Durum.KAPALI
             and dosya.islem_durumu != Dosya.IslemDurumu.PASIF):
+        otomatik_pasif = dosya.get_islem_durumu_display()
         dosya.islem_durumu_ata(Dosya.IslemDurumu.PASIF,
                                "UYAP'ta dosya kapandı (otomatik)", kaydet=False)
         guncel_alanlar += ["islem_durumu", "islem_durumu_notu",
                            "islem_durumu_tarihi", "bekleme_bitis_tarihi"]
     dosya.save(update_fields=None if created else guncel_alanlar)
+    # Durum geçmişi (2026-11-14): UYAP durumu değiştiyse (ör. "Açık" → "Açık
+    # (Durdurulmuş : Takibe İtiraz)" / "Kapalı") ve otomatik Pasif'e düşüş.
+    if not created and (eski_durum or "") != (dosya.durum or ""):
+        durum_olayi_yaz(dosya, DurumOlayi.Tur.DOSYA_DURUMU, eski_durum, dosya.durum,
+                        kaynak=DurumOlayi.Kaynak.UYAP)
+    if otomatik_pasif and not created:
+        durum_olayi_yaz(dosya, DurumOlayi.Tur.ISLEM_DURUMU, otomatik_pasif,
+                        dosya.get_islem_durumu_display(), kaynak=DurumOlayi.Kaynak.HESAP,
+                        aciklama="UYAP'ta dosya kapandı (otomatik)")
     return dosya, created
 
 

@@ -35,6 +35,10 @@ pub mod akis_pkcs11;
 pub mod cades;
 pub mod udf_converter;
 pub mod udf_pdf;
+pub mod paylas_win;
+pub mod pdf_birlestir;
+pub mod py_cevir;
+pub mod tiff_pdf;
 pub mod udf_signer;
 pub mod uyap_giris_disaridan;
 pub mod yerel_giris;
@@ -46,6 +50,7 @@ pub mod sifreli_gunluk;
 #[cfg(windows)]
 pub mod tepsi;
 pub mod is_listesi;
+pub mod is_otomatik;
 pub mod uyap_proxy;
 // Büro veritabanı (ofis bilgisayarında gömülü PostgreSQL) — 2026-11-15
 pub mod veritabani;
@@ -59,6 +64,7 @@ pub mod is_veri;
 pub mod icra_aktar;
 pub mod is_aktar;
 pub mod is_api;
+pub mod is_isaret;
 pub mod kimlik;
 
 // @p2p-net modülleri
@@ -73,6 +79,7 @@ pub mod dosya_kaydet;
 pub mod esas_no;
 pub mod evrak_toplu;
 pub mod gerekceli_karar;
+pub mod icra_guncelle;
 pub mod ipotek;
 pub mod job_handlers;
 pub mod jobs;

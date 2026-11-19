@@ -18,6 +18,8 @@ a = Analysis(
     datas=[
         # UYAP statik önbelleği (office_agent/home_client CACHE_DIR)
         (os.path.join(HERE, "uyap_core", "static_cache"), "uyap_core/static_cache"),
+        # Enjekte betiğe satır içi eklenen ayrı JS dosyaları (uyap_proxy._ek_betikler).
+        (os.path.join(HERE, "uyap_core", "enjekte"), "uyap_core/enjekte"),
         # E-imza giriş modülü: adı Türkçe karakter içerdiğinden uyap_proxy bunu dosya
         # yolundan (importlib) yükler → PyInstaller çözümlemesi göremez, elle taşınır.
         (os.path.join(HERE, "uyap_core", "uyap_giris_dışarıdan.py"), "uyap_core"),

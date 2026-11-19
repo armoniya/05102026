@@ -1,0 +1,46 @@
+# Armonia kiosk oturumu: tty1 uzerinde kiosk kullanicisiyla labwc + CokluUYAP. Claude, 2026-11-13.
+[Unit]
+Description=Armonia kiosk (labwc + CokluUYAP)
+After=systemd-user-sessions.service plymouth-quit-wait.service
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+User=kiosk
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XKB_DEFAULT_LAYOUT=tr
+# Cizici: WLR_RENDERER zorlanmaz. wlroots render dugumu (/dev/dri/renderD*) varsa GPU (gles2), yoksa (Hyper-V
+# hyperv_drm) kendiliginden pixman secer. pixman zorlaninca gercek donanimda (i5-3470/HD 2500) uygulama da
+# yazilim GL'e dustu, arayuz saniyelerce gec tepki verdi (14 Kasim USB denemesi).
+Environment=WLR_NO_HARDWARE_CURSORS=1
+WorkingDirectory=/var/lib/armonia/cokluuyap
+# Hesaplar (accounts.json), zs.sqlite3, zs_files: varsayilan "programin klasoru" (/opt, RAM'de, salt-okunur)
+# yerine kasaya yonlenen calisma dizini
+Environment=UYAP_DATA_DIR=/var/lib/armonia/cokluuyap
+# guvenlik-denetci (AppArmor denetimi) K2/O2: $HOME/.config root'a ait (salt okunur) ve $HOME/Documents RAM'de.
+# LAN TLS (8843) sertifikasi + yerel giris jetonu ve toplu evrak kasaya:
+Environment=XDG_CONFIG_HOME=/var/lib/armonia/CokluUyap/config
+Environment=UYAP_EVRAK_KLASORU=/var/lib/armonia/CokluUyap/Evrak
+# guvenlik-denetci O-X1: labwc 0.8.3 (wlroots 0.18) tembel Xwayland icin X0 soketlerini (dosya + soyut @) aciliste
+# dinliyor; kiosk'ta X11 istemcisi yok. Ilk baglantida calistirilacak ikili /bin/false -> X sunucusu hic olusmaz
+# (soket dinlemeye devam eder, baglanan istemci sunucusuz kalir). Xwayland ikilisi yoksa labwc 0.8.3 acilmiyor
+# (eksik Xwayland'i tolere etme upstream #3401). DOGRULAMA: olcum.sh "X0 baglanti denemesi".
+Environment=WLR_XWAYLAND=/bin/false
+# -C: XDG_CONFIG_HOME yukarida uyap_app icin kasaya yonlendirildi; labwc ayari orada aramasin. -C olmadan
+# rc.xml HIC okunmuyordu (Num Lock kapali, kisayol/kok menu kilitleri ve yalniz-kapat basligi etkisiz; 14 Kasim).
+ExecStart=/usr/bin/labwc -C /var/lib/armonia/.config/labwc -s /opt/armonia/bin/oturum.sh
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical.target

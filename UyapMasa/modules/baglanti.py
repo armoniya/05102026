@@ -471,7 +471,7 @@ class BaglantiEkrani:
         if "İlk giriş tamam" in ln or "[+] Oturum hazır" in ln:
             self._uyap_ready, self._uyap_err, self._uyap_giris_suruyor = True, "", False
         elif "İlk giriş başarısız" in ln:
-            # Biçim: "[!] İlk giriş başarısız (<neden>). Keepalive döngüsü tekrar deneyecek."
+            # Biçim: "[!] İlk giriş başarısız (<neden>). Otomatik yeniden deneme yapılmayacak."
             self._uyap_ready, self._uyap_giris_suruyor = False, False
             kuyruk = ln.split("İlk giriş başarısız", 1)[1]
             neden = kuyruk.split("(", 1)[1].rsplit(")", 1)[0] if "(" in kuyruk and ")" in kuyruk else kuyruk
@@ -523,7 +523,7 @@ class BaglantiEkrani:
         if self._uyap_ready:
             metin, renk = "● Paylaşım aktif (UYAP oturumu açık)", C.SAGE_DK
         elif self._uyap_err:
-            metin, renk = "● UYAP girişi başarısız — yeniden denenecek", C.CLAY
+            metin, renk = "● UYAP girişi başarısız — denemeler durduruldu", C.CLAY
         else:
             metin, renk = "● UYAP girişi yapılıyor…", C.GOLD
         self.share_status.config(text=metin, fg=renk)
@@ -536,8 +536,8 @@ class BaglantiEkrani:
             if self._uyap_err:
                 self._render_state(
                     "error", "UYAP girişi başarısız",
-                    f"{self._uyap_err}\nProgram birkaç saniyede bir kendiliğinden yeniden deniyor. "
-                    "Düzelmezse e-imza kartını ve PIN'i kontrol edip paylaşımı durdurup yeniden başlatın.")
+                    f"{self._uyap_err}\nProgram kendiliğinden yeniden denemez. "
+                    "E-imza kartını ve PIN'i kontrol edip paylaşımı durdurup yeniden başlatın.")
             else:
                 dis = ("cokluuyap.com bağlantısı kuruldu; " if self._share_ready else "")
                 sub = f"{dis}e-imza ile UYAP girişi henüz tamamlanmadı. Bu sırada UYAP'a sorgu gitmez."

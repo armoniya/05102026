@@ -52,6 +52,19 @@ def ilk_is_gunu_sonrasi(tarih, tatiller=()):
     return sonraki_is_gunu(tarih + datetime.timedelta(days=1), tatiller)
 
 
+def kesinlesme_hesapla(teblig_tarihi, sure_gun, tatiller=()):
+    """Genel kural (2026-11-14): süre takip türüne göre `KesinlesmeKurali`
+    tablosundan gelir (ilamsız genel haciz 7 gün …). Tebliğ günü sayılmaz;
+    son gün hafta sonu/tatile denk gelirse ilk iş gününe kayar; kesinleşme
+    son günden SONRAKİ ilk iş günüdür. Döner: orn7 ile aynı sözlük."""
+    son_ham = teblig_tarihi + datetime.timedelta(days=int(sure_gun))
+    itiraz_son_gunu = sonraki_is_gunu(son_ham, tatiller)
+    return {
+        "itiraz_son_gunu": itiraz_son_gunu,
+        "kesinlesebilir_tarihi": ilk_is_gunu_sonrasi(itiraz_son_gunu, tatiller),
+    }
+
+
 def orn7_ilamsiz_genel_haciz_kesinlesme_hesapla(teblig_tarihi, tatiller=()):
     """Örnek-7 (ilamsız, genel haciz yoluyla takip) ödeme emri tebliğ
     tarihinden itiraz süresi + kesinleşme tarihlerini hesaplar.

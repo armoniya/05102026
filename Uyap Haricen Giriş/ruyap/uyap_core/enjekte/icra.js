@@ -18,6 +18,12 @@
 // UYAP'a istek atılmaz; yalnız "UYAP'ta aç" düğmesi dosyayı UYAP'ta bulup kendi kartını açar.
 //
 // Sekmeler: Süreçler (aşama şeridi + borçlu listesi + dosya paneli) · Kesinleşme Süreleri · Resmî Tatiller.
+//
+// Liste (kullanıcı isteği 16.11.2026): her borçlunun BÜTÜN tebligatları (barkodları) satırında görünür. Kesinleşme,
+// tebligat türü, tebliğ durumu ve mazbata başlıklarında "yaz ya da seç" kutusu var (UyapMasa'daki başlık kutuları):
+// yazınca içinde geçenleri, listeden seçince tam o değeri süzer. Seçenekler adetleriyle sunucudan gelir ve diğer
+// süzgeçlere göre daralır (boş sonuç veren seçenek görünmez). Tür + tebliğ + mazbata aynı tebligatta birlikte aranır.
+// Seçili süzgeçler listenin üstünde etiket olarak durur; tek tıkla kalkar.
 // Renkler tema değişkenlerinden (--cu-t-*, --cu-vurgu*); UYAP / Koyu temalarında kendi yedek değerleri.
 (function() {
     'use strict';
@@ -127,8 +133,55 @@
             '#cu-icra table{width:100%;border-collapse:separate;border-spacing:0;background:var(--i-yuzey);border:1px solid var(--i-kenar);border-radius:12px;overflow:hidden}',
             '#cu-icra th{text-align:left;font-weight:600;font-size:12px;color:var(--i-soluk);background:var(--i-serit);padding:8px 12px;white-space:nowrap}',
             '#cu-icra td{padding:8px 12px;border-top:1px solid var(--i-kenar);vertical-align:top}',
-            '#cu-icra tr.tik{cursor:pointer}#cu-icra tr.tik:hover td{background:var(--i-serit)}',
-            '#cu-icra tr.sec td{background:var(--i-vurgu-zemin)!important}',
+            '#cu-icra tbody.tik{cursor:pointer}#cu-icra tbody.tik:hover td{background:var(--i-serit)}',
+            '#cu-icra tbody.sec td{background:var(--i-vurgu-zemin)!important}',
+            // Başlıktaki "yaz ya da seç" kutusu + açılır seçenek listesi
+            '#cu-icra table.liste th{vertical-align:top}#cu-icra th.suz{min-width:150px}',
+            '#cu-icra .i-kutu-s{position:relative;display:flex;margin-top:5px}',
+            '#cu-icra .i-kutu-s input{flex:1;min-width:0;width:100%;font-weight:400;font-size:12.5px;padding:5px 44px 5px 8px;border-radius:8px;text-overflow:ellipsis}',
+            '#cu-icra .i-kutu-s.dolu input{border-color:var(--i-vurgu);background:var(--i-vurgu-zemin);color:var(--i-vurgu-yazi);font-weight:600}',
+            '#cu-icra .i-kutu-s button{position:absolute;top:1px;bottom:1px;width:20px;border:0;background:none;color:var(--i-silik);cursor:pointer;padding:0;font-size:11px}',
+            '#cu-icra .i-kutu-s .ok{right:3px}#cu-icra .i-kutu-s .sil{right:22px;font-size:13px}',
+            '#cu-icra .i-kutu-s button:hover{color:var(--i-yazi)}',
+            '#cu-icra .i-acilir{position:fixed;z-index:5;background:var(--i-yuzey);border:1px solid var(--i-kenar);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.18);',
+            'max-height:320px;overflow:auto;padding:4px;min-width:220px;max-width:min(460px,calc(100vw - 16px));font-size:13px}',
+            '#cu-icra .i-acilir .sec{display:flex;justify-content:space-between;gap:14px;padding:6px 9px;border-radius:7px;cursor:pointer;align-items:baseline}',
+            '#cu-icra .i-acilir .sec:hover,#cu-icra .i-acilir .sec.imlec{background:var(--i-vurgu-zemin)}',
+            '#cu-icra .i-acilir .sec.on{font-weight:600;color:var(--i-vurgu-koyu)}',
+            '#cu-icra .i-acilir .sec .kt{flex:none;width:15px;height:15px;border:1.5px solid var(--i-kenar);border-radius:4px;align-self:center;display:flex;align-items:center;justify-content:center;font-size:11px;line-height:1;color:#fff}',
+            '#cu-icra .i-acilir .sec.on .kt{background:var(--i-vurgu-koyu);border-color:var(--i-vurgu-koyu)}',
+            '#cu-icra .i-acilir .sec .ad{flex:1;min-width:0}',
+            '#cu-icra .i-acilir .sec span:last-child{color:var(--i-silik);font-size:12px;white-space:nowrap;font-weight:400}',
+            '#cu-icra .i-acilir .yok{padding:8px 9px;color:var(--i-silik)}',
+            '#cu-icra .i-secili{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:-2px 0 12px;font-size:12.5px;color:var(--i-soluk)}',
+            '#cu-icra .i-secili .et{display:inline-flex;gap:6px;align-items:center;background:var(--i-vurgu-zemin);color:var(--i-vurgu-yazi);border:0;border-radius:999px;padding:3px 6px 3px 11px;cursor:pointer;max-width:100%}',
+            '#cu-icra .i-secili .et b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}',
+            '#cu-icra .i-secili .et i{font-style:normal;opacity:.7;padding:0 4px}',
+            '#cu-icra .i-suzgecler{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}',
+            '#cu-icra .i-suzgecler .i-kutu-s{flex:1 1 150px;margin:0}',
+            '#cu-icra .i-suzgecler.ust .i-kutu-s{flex:0 1 220px}',
+            '#cu-icra .i-gt{background:var(--i-yuzey);border:1px solid var(--i-kenar);border-radius:12px;padding:12px 14px;margin-bottom:12px}',
+            '#cu-icra .i-gt-ust{display:flex;align-items:center;gap:8px;margin-bottom:6px}',
+            '#cu-icra .i-gt-form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}',
+            '#cu-icra .i-gt-form select{max-width:340px}',
+            '#cu-icra .i-gt-cubuk{height:8px;border-radius:5px;background:var(--i-serit);overflow:hidden;margin:8px 0 4px;border:1px solid var(--i-kenar)}',
+            '#cu-icra .i-gt-cubuk i{display:block;height:100%;background:var(--i-vurgu);transition:width .4s}',
+            '#cu-icra .i-gt-not{color:var(--i-soluk);font-size:12.5px}',
+            '#cu-icra .i-gt-uyari{color:#a15c00;font-size:12.5px;margin-top:6px}',
+            'html[data-cu-tema="koyu"] #cu-icra .i-gt-uyari{color:#f0b35a}',
+            '#cu-icra .i-gt-rapor{margin:6px 0 0;padding:0;list-style:none;font-size:13px}',
+            '#cu-icra .i-gt-rapor li{margin:2px 0}',
+            '#cu-icra .i-gt-uyarilar{max-height:160px;overflow:auto;font-size:12px;color:var(--i-soluk);margin:4px 0 0;padding-left:18px}',
+            '#cu-icra .i-gt details summary{cursor:pointer;color:var(--i-soluk);font-size:12.5px;margin-top:6px}',
+            // Borçlunun tebligat satırları
+            '#cu-icra td.tb{font-size:13px}',
+            '#cu-icra tr.ek td{border-top:1px dashed var(--i-kenar)}',
+            '#cu-icra td.tb.sol{opacity:.45}',
+            '#cu-icra td.tb .uzun{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:300px}',
+            '#cu-icra .mz{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;white-space:nowrap;background:color-mix(in srgb,#4f8a57 18%,var(--i-yuzey));color:color-mix(in srgb,#4f8a57 80%,var(--i-yazi))}',
+            '#cu-icra .silik{color:var(--i-silik)}',
+            '#cu-icra .i-dahasi{border:0;background:none;color:var(--i-vurgu-koyu);cursor:pointer;padding:0;font-size:12.5px}',
+            '#cu-icra .i-dahasi:hover{text-decoration:underline}',
             '#cu-icra .dno{font-weight:600;white-space:nowrap}#cu-icra .alt{color:var(--i-soluk);font-size:12px}',
             '#cu-icra .chip{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12.5px;font-weight:500;white-space:nowrap;',
             'background:color-mix(in srgb,var(--r) 18%,var(--i-yuzey));color:color-mix(in srgb,var(--r) 80%,var(--i-yazi))}',
@@ -173,19 +226,57 @@
             'html.cu-dar #cu-icra .i-panel{position:absolute;inset:0;width:auto;border-left:0;z-index:2}',
             'html.cu-dar #cu-icra .i-iki{grid-template-columns:1fr}',
             'html.cu-dar #cu-icra table.liste thead{display:none}',
-            'html.cu-dar #cu-icra table.liste tr{display:block;border-top:1px solid var(--i-kenar);padding:6px 0}',
-            'html.cu-dar #cu-icra table.liste tr:first-child{border-top:0}',
-            'html.cu-dar #cu-icra table.liste td{display:block;border:0;padding:2px 12px}',
+            'html.cu-dar #cu-icra table.liste tbody{display:block;border-top:1px solid var(--i-kenar);padding:6px 0}',
+            'html.cu-dar #cu-icra table.liste tbody:first-of-type{border-top:0}',
+            'html.cu-dar #cu-icra table.liste tr{display:block}',
+            'html.cu-dar #cu-icra table.liste td{display:block;border:0!important;padding:2px 12px}',
+            'html.cu-dar #cu-icra table.liste td.tb{margin-left:12px;padding-left:10px;border-left:2px solid var(--i-kenar)!important}',
+            'html.cu-dar #cu-icra table.liste td.tb.tb0{margin-top:8px}',
         ].join('\n');
         document.head.appendChild(e('style', { id: 'cu-icra-stil', metin: css }));
     }
 
     // ── Durum ──
     const d = {
-        sekme: 'surec', filtre: { q: '', asama: '', acik: true, sayfa: 1 }, ozet: null, liste: null,
-        secili: null, panelSekme: 'borclular', hata: ''
+        sekme: 'surec', filtre: { q: '', asama: '', durum: 'acik', sayfa: 1, kesinlesme: '', tur: '', teblig: '', mazbata: '',
+                                  birim: '', alacakli: '', borclu: '', yil: '', dosya_tur: '', acilis_bas: '', acilis_son: '' },
+        ozet: null, liste: null, secili: null, panelSekme: 'borclular', hata: '',
+        kutu: null, kutuMetin: '', kutuYazildi: false,   // açık başlık kutusu (anahtar), içindeki yazı
+        tumTebligat: {},                                 // bag → true: borçlunun bütün tebligatları açık
+        gt: null, gtAcik: false,                         // UYAP'tan güncelleme: son tarama, panel açık mı
+        gtForm: { birim: '', bas: '', son: '' }          // güncelleme kapsamı (yeniden çizimde korunur)
     };
-    let kok = null, govde = null, araZaman = null;
+    let kok = null, govde = null, araZaman = null, kutuZaman = null;
+    // Başlık süzgeçleri. kodlu: değer sabit bir koddur (yalnız listeden seçilir); değilse yazıyla "içinde geçen" de süzülür.
+    // baslik: sütun başlığının adı (kutunun adından farklıysa). Sıra = tablo sütunları (Takip aşaması 3. kutudan sonra).
+    const SUZGEC = [
+        { k: 'birim', ad: 'İcra dairesi', baslik: 'Dosya', kodlu: false },
+        { k: 'borclu', ad: 'Borçlu', kodlu: false },
+        { k: 'alacakli', ad: 'Alacaklı', kodlu: false },
+        { k: 'kesinlesme', ad: 'Kesinleşme', kodlu: true },
+        { k: 'tur', ad: 'Tebligat türü', kodlu: false },
+        { k: 'teblig', ad: 'Tebliğ durumu', kodlu: false },
+        { k: 'mazbata', ad: 'Mazbata', kodlu: true }
+    ];
+    // Tablo üstündeki künye kutuları (sütunu olmayanlar).
+    const UST_SUZGEC = [
+        { k: 'yil', ad: 'Dosya yılı', kodlu: true },
+        { k: 'dosya_tur', ad: 'Dosya türü', kodlu: true }
+    ];
+    const TUM_SUZGEC = SUZGEC.concat(UST_SUZGEC);
+    const DURUMLAR = [['acik', 'Açık dosyalar'], ['kapali', 'Kapalı dosyalar'], ['', 'Bütün dosyalar']];
+    function listeSorgusu() {
+        const f = d.filtre;
+        const s = { q: f.q, asama: f.asama, durum: f.durum, acilis_bas: f.acilis_bas, acilis_son: f.acilis_son,
+                    sayfa: String(f.sayfa), boyut: '50' };
+        TUM_SUZGEC.forEach(function(z) { s[z.k] = f[z.k]; });
+        return new URLSearchParams(s).toString();
+    }
+    const TEBLIGAT_GORUNEN = 3;                  // satırda ilk gösterilen tebligat sayısı (kalanı "+N tebligat daha")
+    function trKucuk(x) {
+        return String(x || '').replace(/İ/g, 'i').replace(/I/g, 'ı').toLowerCase()
+            .replace(/ı/g, 'i').replace(/ş/g, 's').replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ö/g, 'o').replace(/ç/g, 'c');
+    }
     let gorunum = 'kapali';                     // 'kapali' | 'acik' | 'kucuk'
     const icradanAcilan = new Set();             // bu sayfadan "UYAP'ta aç" ile açılan dosya kartları (anahtar)
     function kartAcikMi() {
@@ -233,6 +324,7 @@
             document.body.appendChild(kok);
             ciz();
             yukle();
+            gtYokla(true);
         }
         kok.style.display = '';
         if (one && kartAcikMi() && window.__cuGorunurKartiKucult) window.__cuGorunurKartiKucult();
@@ -260,6 +352,7 @@
         icradanAcilan.clear();
         if (kok) kok.remove();
         kok = null; govde = null;
+        d.kutu = null; d.kutuMetin = ''; d.kutuYazildi = false;
         const m = document.getElementById('cu-menu-icra');
         if (m) m.classList.remove('on');
         gorevGuncelle(true);
@@ -317,9 +410,7 @@
         d.hata = '';
         try {
             if (d.sekme === 'surec') {
-                const sorgu = new URLSearchParams({ q: d.filtre.q, asama: d.filtre.asama, acik: d.filtre.acik ? '1' : '',
-                                                    sayfa: String(d.filtre.sayfa), boyut: '50' });
-                const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + sorgu.toString())]);
+                const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + listeSorgusu())]);
                 d.ozet = sonuc[0]; d.liste = sonuc[1];
                 durumYaz();
                 surecCiz();
@@ -349,8 +440,10 @@
         if (o && !o.icra_dosya) {
             ana.appendChild(e('div', { sinif: 'i-bilgi' }, [
                 e('div', { stil: 'font-weight:600;color:var(--i-yazi);margin-bottom:4px', metin: 'Büro veritabanında henüz icra dosyası yok.' }),
-                'Dosyalar ve tebligatlar UYAP taraması yapıldığında burada görünecek; takip aşaması, kesinleşme ve tebliğ durumu o zaman hesaplanır.'
+                'Dosyalar ve tebligatlar UYAP taraması yapıldığında burada görünecek; takip aşaması, kesinleşme ve tebliğ durumu o zaman hesaplanır.',
+                e('div', { stil: 'margin-top:10px' }, [gtDugme()])
             ]));
+            if (gtGorunsun()) ana.appendChild(gtPaneli());
             return;
         }
         ana.appendChild(e('div', { sinif: 'i-asamalar' }, (o ? o.asamalar : []).map(function(a) {
@@ -366,9 +459,14 @@
                 clearTimeout(araZaman);
                 araZaman = setTimeout(function() { d.filtre.q = ara.value; d.filtre.sayfa = 1; yukle(); }, 300);
             } });
-        const kutu = e('input', { type: 'checkbox' });
-        kutu.checked = d.filtre.acik;
-        kutu.addEventListener('change', function() { d.filtre.acik = kutu.checked; d.filtre.sayfa = 1; yukle(); });
+        const durumSec = e('select', { 'aria-label': 'Dosya durumu', title: 'UYAP\'taki dosya durumu' },
+            DURUMLAR.map(function(x) { const o = e('option', { value: x[0], metin: x[1] }); if (d.filtre.durum === x[0]) o.selected = true; return o; }));
+        durumSec.addEventListener('change', function() { d.filtre.durum = durumSec.value; d.filtre.sayfa = 1; yukle(); });
+        const tarihKutusu = function(k, ad) {
+            const t = e('input', { type: 'date', value: d.filtre[k], title: ad, 'aria-label': ad });
+            t.addEventListener('change', function() { d.filtre[k] = t.value; d.filtre.sayfa = 1; yukle(); });
+            return t;
+        };
         const hesapla = e('button', { sinif: 'i-d', metin: 'Yeniden hesapla',
             title: 'Kesinleşme, tebliğ durumu ve takip aşamasını kayıtlı tebligatlardan yeniden hesaplar (UYAP\'a gitmez)',
             onclick: async function() {
@@ -376,37 +474,34 @@
                 try { const s = await istek('hesapla', {}); bildir(s.guncellenen ? s.guncellenen + ' borçlunun durumu güncellendi.' : 'Değişen durum yok.'); yukle(); }
                 catch (x) { bildir(x.message); hesapla.disabled = false; }
             } });
-        ana.appendChild(e('div', { sinif: 'i-arac' }, [ara, e('label', { sinif: 'i-onay' }, [kutu, 'Yalnız açık dosyalar']),
-            e('div', { sinif: 'i-bosluk' }), hesapla]));
+        ana.appendChild(e('div', { sinif: 'i-arac' }, [ara, durumSec,
+            e('label', { sinif: 'i-onay', title: 'Açılış tarihi aralığı (iki gün dahil)' },
+              ['Açılış', tarihKutusu('acilis_bas', 'Açılış tarihi: başlangıç'), '–', tarihKutusu('acilis_son', 'Açılış tarihi: bitiş')]),
+            e('div', { sinif: 'i-bosluk' }), gtDugme(), hesapla]));
+        if (gtGorunsun()) ana.appendChild(gtPaneli());
         if (d.filtre.q && document.activeElement !== ara) setTimeout(function() {
             ara.focus(); ara.setSelectionRange(ara.value.length, ara.value.length);
         }, 0);
 
+        seciliCiz(ana);
+        ana.appendChild(e('div', { sinif: 'i-suzgecler' + (dar() ? '' : ' ust') }, (dar() ? TUM_SUZGEC : UST_SUZGEC).map(function(z) { return suzgecKutusu(z, true); })));
+
         const l = d.liste;
+        const suzBaslik = function(z) { return e('th', { sinif: 'suz' }, [z.baslik || z.ad, dar() ? null : suzgecKutusu(z, false)]); };
+        const basliklar = SUZGEC.slice(0, 3).map(suzBaslik).concat([e('th', { metin: 'Takip aşaması' })]).concat(SUZGEC.slice(3).map(suzBaslik));
+        const tablo = e('table', { sinif: 'liste' }, [e('thead', {}, [e('tr', {}, basliklar)])]);
         if (!l || !l.satirlar.length) {
-            ana.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Bu ölçütlere uyan borçlu yok.' }));
+            tablo.appendChild(e('tbody', {}, [e('tr', {}, [e('td', { colspan: '8', sinif: 'silik', stil: 'text-align:center;padding:22px',
+                metin: 'Bu ölçütlere uyan dosya yok.' })])]));
+            ana.appendChild(tablo);
         } else {
-            const tablo = e('table', { sinif: 'liste' }, [
-                e('thead', {}, [e('tr', {}, ['Dosya', 'Borçlu', 'Alacaklı', 'Takip aşaması', 'Kesinleşme', 'Tebliğ'].map(function(b) {
-                    return e('th', { metin: b });
-                }))]),
-                e('tbody', {}, l.satirlar.map(function(s) {
-                    return e('tr', { sinif: 'tik' + (d.secili && d.secili.id === s.dosya ? ' sec' : ''),
-                                     onclick: function() { dosyaAc(s.dosya); } }, [
-                        e('td', {}, [e('div', { sinif: 'dno', metin: s.dosya_no }), e('div', { sinif: 'alt', metin: s.birim })]),
-                        e('td', {}, [s.borclu, s.uyapta_gorulmedi ? e('div', { sinif: 'uyari', metin: 'UYAP\'ta görülmedi' }) : null]),
-                        e('td', { metin: s.alacakli || '—' }),
-                        e('td', {}, [chip(s.asama, s.asama_tarihi)]),
-                        e('td', { metin: s.kesinlesme || '—' }),
-                        e('td', { metin: s.tebligat || '—' }),
-                    ]);
-                }))
-            ]);
+            l.satirlar.forEach(function(s) { tablo.appendChild(borcluGovdesi(s)); });
             ana.appendChild(tablo);
             const son = Math.max(1, Math.ceil(l.toplam / l.boyut));
             const git = function(n) { return function() { d.filtre.sayfa = n; yukle(); }; };
             ana.appendChild(e('div', { sinif: 'i-sayfa' }, [
-                e('span', { metin: l.toplam + ' borçlu · ' + ((l.sayfa - 1) * l.boyut + 1) + '–' + Math.min(l.toplam, l.sayfa * l.boyut) + ' gösteriliyor' }),
+                e('span', { metin: l.toplam + ' satır (' + (l.dosya_sayisi != null ? l.dosya_sayisi : '?') + ' dosya) · '
+                    + ((l.sayfa - 1) * l.boyut + 1) + '–' + Math.min(l.toplam, l.sayfa * l.boyut) + ' gösteriliyor' }),
                 son > 1 ? e('span', {}, [
                     e('button', { sinif: 'i-d kucuk', metin: '‹ Önceki', disabled: l.sayfa <= 1, onclick: git(l.sayfa - 1) }), ' ',
                     l.sayfa + ' / ' + son, ' ',
@@ -414,7 +509,478 @@
                 ]) : null
             ]));
         }
+        ana.addEventListener('scroll', acilirKapat);
+        // Yeniden çizimden sonra: yazılmakta olan başlık kutusu odağını ve açık listesini korur.
+        if (d.kutu) {
+            const kutu = kok.querySelector('.i-kutu-s[data-k="' + d.kutu + '"] input');
+            if (kutu) { kutu.focus(); kutu.setSelectionRange(kutu.value.length, kutu.value.length); acilirCiz(); }
+            else acilirKapat();
+        }
         if (d.secili) panelCiz();
+    }
+
+    // ── Başlık süzgeçleri ("yaz ya da seç") ──
+    function secenekler(k) { return (d.liste && d.liste.secenekler && d.liste.secenekler[k]) || []; }
+    function suzgecBul(k) { return TUM_SUZGEC.find(function(z) { return z.k === k; }); }
+    // Seçili süzgecin ekranda görünen karşılığı (listeden seçildiyse etiketi, yazıldıysa yazının kendisi).
+    // Listeden seçilen değerler (birden çok seçilebilir; süzgeçte satır sonuyla ayrılır). Yazıyla süzülüyorsa boş.
+    function seciliDegerler(z) {
+        const v = d.filtre[z.k];
+        if (!v) return [];
+        if (z.kodlu) return v.split('\n');
+        return v.charAt(0) === '=' ? v.slice(1).split('\n') : [];
+    }
+    function degerEtiketi(z, deger) {
+        const sec = secenekler(z.k).find(function(o) { return o.deger === deger; });
+        return sec ? sec.etiket : (deger || '(boş)');
+    }
+    function suzgecEtiketi(z) {
+        const v = d.filtre[z.k];
+        if (!v) return '';
+        if (!z.kodlu && v.charAt(0) !== '=') return v;
+        const s = seciliDegerler(z);
+        return degerEtiketi(z, s[0]) + (s.length > 1 ? ' +' + (s.length - 1) : '');
+    }
+    // Açılır listede bir seçeneği seçer / bırakır; liste açık kalır, başka seçenekler de işaretlenebilir.
+    function secimDegistir(z, deger) {
+        const s = seciliDegerler(z);
+        const i = s.indexOf(deger);
+        if (i >= 0) s.splice(i, 1); else s.push(deger);
+        clearTimeout(kutuZaman);
+        d.filtre[z.k] = s.length ? (z.kodlu ? '' : '=') + s.join('\n') : '';
+        d.filtre.sayfa = 1;
+        yukle();
+    }
+    function suzgecUygula(k, deger) {
+        clearTimeout(kutuZaman);
+        d.filtre[k] = deger;
+        d.filtre.sayfa = 1;
+        yukle();
+    }
+    function suzgecKutusu(z, yerTutucuAd) {
+        const dolu = !!d.filtre[z.k];
+        const acik = d.kutu === z.k;
+        const giris = e('input', { type: 'text', autocomplete: 'off', spellcheck: 'false',
+            // Liste açıkken (seçim sonrası yeniden çizim) kutu boş, seçim yer tutucuda: yazı seçimin sonuna eklenmez.
+            placeholder: acik && dolu ? suzgecEtiketi(z) : (yerTutucuAd ? z.ad : (z.kodlu ? 'Seçin' : 'Yazın ya da seçin')),
+            'aria-label': z.ad + ' süzgeci', title: z.ad + ': ' + (z.kodlu ? 'listeden seçin' : 'yazın (içinde geçenler) ya da listeden seçin; birden çok seçilebilir'),
+            value: acik ? (d.kutuYazildi ? d.kutuMetin : '') : suzgecEtiketi(z) });
+        giris.addEventListener('focus', function() {
+            if (d.kutu !== z.k) { d.kutu = z.k; d.kutuMetin = ''; d.kutuYazildi = false; giris.select(); }
+            acilirCiz();
+        });
+        giris.addEventListener('input', function() {
+            d.kutu = z.k; d.kutuMetin = giris.value; d.kutuYazildi = true;
+            acilirCiz();
+            // Listeden seçim yapılmışsa yazı yalnız açılır listeyi daraltır (seçimler kaybolmasın).
+            if (z.kodlu || seciliDegerler(z).length) return;
+            // Yazarak süzme: içinde geçenler (kısa bir beklemeyle, her tuşta sorgu gitmesin).
+            clearTimeout(kutuZaman);
+            kutuZaman = setTimeout(function() { d.filtre[z.k] = giris.value.trim(); d.filtre.sayfa = 1; yukle(); }, 350);
+        });
+        giris.addEventListener('keydown', function(ev) {
+            if (ev.key === 'Escape') { ev.preventDefault(); kutuBirak(); giris.blur(); surecCiz(); return; }
+            if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); imlecOynat(ev.key === 'ArrowDown' ? 1 : -1); return; }
+            if (ev.key !== 'Enter') return;
+            ev.preventDefault();
+            const imlec = kok.querySelector('.i-acilir .sec.imlec');
+            if (imlec) { imlec.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return; }
+            if (z.kodlu) {
+                const ilk = gorunenSecenekler(z)[0];
+                if (ilk) secimDegistir(z, ilk.deger);
+            } else { const yazi = giris.value.trim(); kutuBirak(); suzgecUygula(z.k, yazi); }
+        });
+        giris.addEventListener('blur', function() {
+            // Liste satırına basış mousedown ile işlenir; burada yalnız kutu bırakılır.
+            setTimeout(function() {
+                // Liste yeniden çizildiyse bu kutu artık sayfada değil (yenisi odağı aldı): dokunma.
+                if (!giris.isConnected || d.kutu !== z.k || document.activeElement === giris) return;
+                const yazim = d.kutuYazildi && !z.kodlu;
+                kutuBirak();
+                if (!yazim && kok) giris.value = suzgecEtiketi(z);
+            }, 120);
+        });
+        return e('div', { sinif: 'i-kutu-s' + (dolu ? ' dolu' : ''), 'data-k': z.k, onclick: function(ev) { ev.stopPropagation(); } }, [
+            giris,
+            dolu ? e('button', { sinif: 'sil', type: 'button', metin: '✕', title: z.ad + ' süzgecini kaldır', 'aria-label': z.ad + ' süzgecini kaldır',
+                onmousedown: function(ev) { ev.preventDefault(); kutuBirak(); suzgecUygula(z.k, ''); } }) : null,
+            e('button', { sinif: 'ok', type: 'button', metin: '▾', tabindex: '-1', title: 'Seçenekleri göster', 'aria-label': z.ad + ' seçenekleri',
+                onmousedown: function(ev) {
+                    ev.preventDefault();
+                    if (d.kutu === z.k && kok.querySelector('.i-acilir')) { kutuBirak(); giris.blur(); }
+                    else { d.kutu = null; giris.focus(); }
+                } })
+        ]);
+    }
+    function kutuBirak() { d.kutu = null; d.kutuMetin = ''; d.kutuYazildi = false; acilirKapat(); }
+    function acilirKapat() { if (!kok) return; const a = kok.querySelector('.i-acilir'); if (a) a.remove(); }
+    // Kutuya yazılan kelimelerin hepsi etikette geçiyor mu (açılır listeyi daraltmak için).
+    function yaziyaUyar(etiket) {
+        const aranan = d.kutuYazildi ? trKucuk(d.kutuMetin).split(/\s+/).filter(Boolean) : [];
+        const m = trKucuk(etiket);
+        return aranan.every(function(a) { return m.indexOf(a) >= 0; });
+    }
+    function gorunenSecenekler(z) {
+        return secenekler(z.k).filter(function(o) { return yaziyaUyar(o.etiket); });
+    }
+    function imlecOynat(yon) {
+        const hepsi = Array.from(kok.querySelectorAll('.i-acilir .sec'));
+        if (!hepsi.length) return;
+        let i = hepsi.findIndex(function(x) { return x.classList.contains('imlec'); });
+        if (i >= 0) hepsi[i].classList.remove('imlec');
+        i = (i + yon + hepsi.length + (i < 0 && yon < 0 ? 1 : 0)) % hepsi.length;
+        hepsi[i].classList.add('imlec');
+        hepsi[i].scrollIntoView({ block: 'nearest' });
+    }
+    // Açık kutunun seçenek listesi: adetleriyle, yazılan metne göre daralır. Sayfanın üstünde sabit konumda
+    // (tablonun köşe yuvarlaması taşanı kestiği için başlığın içine konmaz).
+    function acilirCiz() {
+        acilirKapat();
+        const z = suzgecBul(d.kutu);
+        const kap = z && kok.querySelector('.i-kutu-s[data-k="' + z.k + '"]');
+        if (!kap) return;
+        const secili = d.filtre[z.k];
+        const seciler = seciliDegerler(z);
+        const liste = gorunenSecenekler(z);
+        // Seçilip de listede olmayan değerler (sınırın dışında kalan ya da artık adedi olmayan) de görünsün, bırakılabilsin.
+        seciler.forEach(function(s) {
+            const etiket = degerEtiketi(z, s);
+            if (yaziyaUyar(etiket) && !liste.some(function(o) { return o.deger === s; })) liste.unshift({ deger: s, etiket: etiket, adet: null });
+        });
+        const kutu = e('div', { sinif: 'i-acilir', role: 'listbox', 'aria-label': z.ad, 'aria-multiselectable': 'true' });
+        if (secili) kutu.appendChild(e('div', { sinif: 'sec', role: 'option',
+            onmousedown: function(ev) { ev.preventDefault(); kutuBirak(); suzgecUygula(z.k, ''); } },
+            [e('span', { sinif: 'ad', metin: 'Hepsi (süzgeci kaldır)' })]));
+        liste.forEach(function(o) {
+            const on = seciler.indexOf(o.deger) >= 0;
+            kutu.appendChild(e('div', { sinif: 'sec' + (on ? ' on' : ''), role: 'option', 'aria-selected': on ? 'true' : 'false',
+                onmousedown: function(ev) { ev.preventDefault(); secimDegistir(z, o.deger); } },
+                [e('span', { sinif: 'kt', metin: on ? '✓' : '' }), e('span', { sinif: 'ad', metin: o.etiket }),
+                 e('span', { metin: o.adet === null ? '' : String(o.adet) })]));
+        });
+        if (!liste.length) kutu.appendChild(e('div', { sinif: 'yok', metin: secenekler(z.k).length ? 'Yazdığınıza uyan seçenek yok.' : 'Bu ölçütlerde seçenek yok.' }));
+        const sinir = d.liste && d.liste.secenek_siniri;
+        if (sinir && secenekler(z.k).length >= sinir) kutu.appendChild(e('div', { sinif: 'yok', metin: 'En çok kullanılan ' + sinir + ' seçenek gösteriliyor; diğerleri için yazın.' }));
+        kok.appendChild(kutu);
+        const r = kap.getBoundingClientRect();
+        const g = kutu.getBoundingClientRect();
+        kutu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - g.width - 8)) + 'px';
+        const altta = window.innerHeight - r.bottom - 8;
+        if (altta < 160 && r.top > altta) { kutu.style.maxHeight = Math.min(320, r.top - 8) + 'px'; kutu.style.bottom = (window.innerHeight - r.top + 2) + 'px'; }
+        else { kutu.style.maxHeight = Math.min(320, altta) + 'px'; kutu.style.top = (r.bottom + 2) + 'px'; }
+        kutu.style.minWidth = Math.max(220, r.width) + 'px';
+    }
+
+    // Seçili süzgeçler: tek satırda etiketler; tıklayınca o süzgeç kalkar.
+    function seciliCiz(ana) {
+        const etiketler = [];
+        if (d.filtre.asama) etiketler.push(['Aşama', ASAMA_KISA[d.filtre.asama] || d.filtre.asama, function() { d.filtre.asama = ''; }]);
+        if (d.filtre.acilis_bas || d.filtre.acilis_son) etiketler.push(['Açılış',
+            (d.filtre.acilis_bas ? gunMetni(d.filtre.acilis_bas) : '…') + ' – ' + (d.filtre.acilis_son ? gunMetni(d.filtre.acilis_son) : '…'),
+            function() { d.filtre.acilis_bas = ''; d.filtre.acilis_son = ''; }]);
+        TUM_SUZGEC.forEach(function(z) {
+            const v = d.filtre[z.k];
+            if (!v) return;
+            const yazi = !z.kodlu && v.charAt(0) !== '=';
+            const adlar = yazi ? [] : seciliDegerler(z).map(function(s) { return degerEtiketi(z, s); });
+            const metin = adlar.join(', ');
+            etiketler.push([z.ad, yazi ? '“' + v + '” geçen' : (metin.length > 70 ? adlar[0] + ' ve ' + (adlar.length - 1) + ' seçim daha' : metin),
+                            function() { d.filtre[z.k] = ''; }]);
+        });
+        if (!etiketler.length) return;
+        const kaldir = function(fn) { return function() { fn(); kutuBirak(); d.filtre.sayfa = 1; yukle(); }; };
+        ana.appendChild(e('div', { sinif: 'i-secili' }, [e('span', { metin: 'Süzgeç:' })].concat(etiketler.map(function(x) {
+            return e('button', { sinif: 'et', type: 'button', title: x[0] + ' süzgecini kaldır', onclick: kaldir(x[2]) },
+                [e('span', { metin: x[0] + ':' }), e('b', { metin: x[1] }), e('i', { metin: '✕' })]);
+        })).concat(etiketler.length > 1 ? [e('button', { sinif: 'i-dahasi', type: 'button', metin: 'Hepsini kaldır',
+            onclick: kaldir(function() {
+                d.filtre.asama = ''; d.filtre.acilis_bas = ''; d.filtre.acilis_son = '';
+                TUM_SUZGEC.forEach(function(z) { d.filtre[z.k] = ''; });
+            }) })] : [])));
+    }
+
+    // ── Borçlu satırı: künye + borçlunun bütün tebligatları (tebligat başına bir alt satır) ──
+    function tebligatHucreleri(t, suzgecVar, ilk) {
+        const sol = suzgecVar && !t.uyan ? ' sol' : '';
+        const sinif = 'tb' + sol + (ilk ? ' t1' : '');
+        const alt1 = [t.evrak_tarihi, t.elektronik ? 'E-tebligat' : (t.barkod || 'barkod yok')].filter(Boolean).join(' · ');
+        const alt2 = [t.son_islem_tarihi, t.teslim_sekli].filter(Boolean).join(' · ');
+        return [
+            e('td', { sinif: sinif + ' tb0' }, [e('div', { metin: t.tur || 'Tebligat' }), e('div', { sinif: 'alt', metin: alt1 })]),
+            e('td', { sinif: sinif }, [t.ptt_durumu ? e('div', { sinif: 'uzun', title: t.ptt_durumu, metin: t.ptt_durumu })
+                                                     : e('div', { sinif: 'silik', metin: 'Henüz sorgulanmadı' }),
+                                       alt2 ? e('div', { sinif: 'alt', metin: alt2 }) : null]),
+            e('td', { sinif: sinif }, [t.mazbata_var ? e('span', { sinif: 'mz', title: t.mazbata || 'Mazbata dosyaya döndü', metin: 'Döndü' })
+                                                     : e('span', { sinif: 'silik', metin: 'Dönmedi' })])
+        ];
+    }
+    function borcluGovdesi(s) {
+        const suzgecVar = !!(d.filtre.tur || d.filtre.teblig || d.filtre.mazbata);
+        // Süzgece uyan tebligatlar öne alınır (sıra içinde yeniden eskiye kalır).
+        const hepsi = (s.tebligatlar || []).slice().sort(function(a, b) { return suzgecVar ? (b.uyan ? 1 : 0) - (a.uyan ? 1 : 0) : 0; });
+        const tumu = !!d.tumTebligat[s.bag];
+        const gorunen = tumu ? hepsi : hepsi.slice(0, TEBLIGAT_GORUNEN);
+        const fazla = hepsi.length - TEBLIGAT_GORUNEN;
+        const satirSayisi = Math.max(1, gorunen.length) + (fazla > 0 ? 1 : 0);
+        const kunye = [
+            e('td', { rowspan: String(satirSayisi) }, [e('div', { sinif: 'dno', metin: s.dosya_no }), e('div', { sinif: 'alt', metin: s.birim }),
+                e('div', { sinif: 'alt', metin: [s.dosya_tur, s.acilis_tarihi ? 'açılış ' + gunMetni(s.acilis_tarihi) : ''].filter(Boolean).join(' · ') }),
+                s.acik ? null : e('div', { sinif: 'alt', metin: s.dosya_durumu || 'Kapalı' })]),
+            e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [e('span', { sinif: 'silik', metin: 'Borçlu kaydı yok' })]
+                : [s.borclu, s.uyapta_gorulmedi ? e('div', { sinif: 'uyari', metin: 'UYAP\'ta görülmedi' }) : null]),
+            e('td', { rowspan: String(satirSayisi), metin: s.alacakli || '—' }),
+            e('td', { rowspan: String(satirSayisi) }, s.bag == null ? [] : [chip(s.asama, s.asama_tarihi)]),
+            e('td', { rowspan: String(satirSayisi), metin: s.kesinlesme || '—' })
+        ];
+        const govdeEl = e('tbody', { sinif: 'tik' + (d.secili && d.secili.id === s.dosya ? ' sec' : ''), onclick: function() { dosyaAc(s.dosya); } });
+        if (!gorunen.length) {
+            govdeEl.appendChild(e('tr', {}, kunye.concat([e('td', { colspan: '3', sinif: 'tb t1 tb0 silik',
+                metin: s.bag == null ? 'Dosyanın tarafları henüz taranmadı' : 'Bu borçluya gönderilmiş tebligat kaydı yok' })])));
+        } else {
+            gorunen.forEach(function(t, i) {
+                govdeEl.appendChild(e('tr', { sinif: i ? 'ek' : '' }, (i ? [] : kunye).concat(tebligatHucreleri(t, suzgecVar, i === 0))));
+            });
+        }
+        if (fazla > 0) {
+            govdeEl.appendChild(e('tr', { sinif: 'ek' }, [e('td', { colspan: '3', sinif: 'tb' }, [e('button', { sinif: 'i-dahasi', type: 'button',
+                metin: tumu ? 'Daha az göster' : '+' + fazla + ' tebligat daha',
+                title: tumu ? '' : 'Bu borçlunun bütün tebligatlarını göster (' + hepsi.length + ')',
+                onclick: function(ev) { ev.stopPropagation(); if (tumu) delete d.tumTebligat[s.bag]; else d.tumTebligat[s.bag] = true; surecCiz(); } })])]));
+        }
+        return govdeEl;
+    }
+
+    // ── UYAP'tan güncelleme ──
+    // İstekler ofis bilgisayarından, sırayla ve yavaş hızla UYAP'a gider (icra_guncelle.rs). Sayfa yalnız başlatır,
+    // izler, durdurur ve doğrulama (captcha) çıkarsa kullanıcıya çözdürür.
+    const GT_UC = '/__uyap_agent__/icra_guncelle';
+    const GT_SON = ['bitti', 'hata', 'iptal'];
+    const GT_ASAMA = { liste: 'Dosya listesi alınıyor', kunye: 'Künyeler yazılıyor', taraf: 'Taraflar ve borçlu kimlikleri alınıyor',
+                       kapanan: 'Kapanan dosyalar kontrol ediliyor', hesap: 'Durumlar hesaplanıyor', bitti: 'Bitti' };
+    let gtZaman = null, tsYukleniyor = null;
+    function gtSuruyor() { return !!(d.gt && GT_SON.indexOf(d.gt.durum) < 0); }
+    function gtGorunsun() { return d.gtAcik || gtSuruyor(); }
+    async function gtIstek(yol, govde) {
+        let r;
+        try {
+            r = await fetch(GT_UC + yol, govde === undefined
+                ? { cache: 'no-store', credentials: 'same-origin' }
+                : { method: 'POST', cache: 'no-store', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(govde) });
+        } catch (x) { throw new Error('Ofis bilgisayarına ulaşılamadı.'); }
+        let j = null;
+        try { j = await r.json(); } catch (x) {}
+        if (!j) throw new Error('Ofis bilgisayarından beklenmeyen yanıt (' + r.status + '). Program güncel olmayabilir.');
+        if (j.error || j.ok === false) throw new Error(j.error || 'İşlem yapılamadı.');
+        return j.tarama || null;
+    }
+    // Tarama sürerken yazılan dosyalar listede görünsün: sayaçlar değişince liste sessizce yenilenir
+    // (en çok 10 sn'de bir). Kullanıcı başlık kutusunda yazıyor ya da bir alana odaklanmışsa beklenir;
+    // kaydırma yeri korunur.
+    const CANLI_ARA_MS = 10000;
+    let canliIz = '', canliSon = 0, canliSuruyor = false;
+    async function canliYenile(t) {
+        const iz = [t.yazilan, t.taraf_cekilen, t.kapandi, t.yeni_dosya].join('/');
+        if (iz === canliIz || canliSuruyor || t.captcha || !govde || d.sekme !== 'surec' || d.kutu) return;
+        if (Date.now() - canliSon < CANLI_ARA_MS) return;
+        const odak = document.activeElement;
+        if (odak && kok && kok.contains(odak) && /^(INPUT|SELECT|TEXTAREA)$/.test(odak.tagName)) return;
+        canliSuruyor = true;
+        try {
+            const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + listeSorgusu())]);
+            if (!govde || d.sekme !== 'surec' || d.kutu) return;
+            const ana = govde.querySelector('.i-ana');
+            const yer = ana ? ana.scrollTop : 0;
+            d.ozet = sonuc[0]; d.liste = sonuc[1];
+            durumYaz();
+            surecCiz();
+            const yeniAna = govde.querySelector('.i-ana');
+            if (yeniAna) yeniAna.scrollTop = yer;
+            canliIz = iz;
+        } catch (x) {
+            // sessiz: bir sonraki yoklamada yeniden denenir
+        } finally {
+            canliSon = Date.now(); canliSuruyor = false;
+        }
+    }
+    // Süren taramayı izler (2 sn'de bir); bitince liste ve özet yenilenir.
+    async function gtYokla(ilk) {
+        clearTimeout(gtZaman);
+        let t;
+        try { t = await gtIstek(''); }
+        catch (x) { if (!ilk && gtSuruyor()) gtZaman = setTimeout(gtYokla, 10000); return; }
+        const onceSuruyordu = gtSuruyor();
+        d.gt = t;
+        if (gtSuruyor()) gtZaman = setTimeout(gtYokla, 2000);
+        if (onceSuruyordu && !gtSuruyor()) { d.gtAcik = true; canliIz = ''; yukle(); return; }
+        gtCiz();
+        if (gtSuruyor()) canliYenile(t);
+    }
+    function gtCiz() {
+        if (!kok) return;
+        const dugme = kok.querySelector('.i-gt-dugme');
+        if (dugme) dugme.replaceWith(gtDugme());
+        const eski = kok.querySelector('.i-gt');
+        // Doğrulama kutusu açıkken yeniden çizilmez (kullanıcının çözdüğü kutu kaybolmasın).
+        if (eski && d.gt && d.gt.captcha && eski.getAttribute('data-captcha') === String(d.gt.captcha.n)) return;
+        if (!gtGorunsun()) { if (eski) eski.remove(); return; }
+        const yeni = gtPaneli();
+        if (eski) { eski.replaceWith(yeni); return; }
+        const arac = kok.querySelector('.i-arac') || kok.querySelector('.i-bilgi');
+        if (arac) arac.after(yeni);
+    }
+    function gtDugme() {
+        const t = d.gt;
+        const metin = gtSuruyor()
+            ? 'Güncelleniyor' + (t.toplam ? ' · ' + Math.min(100, Math.round(t.i * 100 / t.toplam)) + '%' : '…')
+            : 'UYAP\'tan güncelle';
+        return e('button', { sinif: 'i-d i-gt-dugme' + (gtSuruyor() ? ' ana' : ''), type: 'button', metin: metin,
+            title: 'UYAP\'taki açık icra dosyalarını büro veritabanına alır: dosya listesi ya da taraf bilgileri',
+            onclick: function() { d.gtAcik = gtSuruyor() ? true : !d.gtAcik; gtCiz(); if (d.gtAcik) gtYokla(true); } });
+    }
+    function mesaiMi() {
+        const s = new Date(), gun = s.getDay(), dk = s.getHours() * 60 + s.getMinutes();
+        return gun >= 1 && gun <= 5 && dk >= 8 * 60 + 30 && dk < 18 * 60;
+    }
+    function sureMetni(sn) {
+        if (sn == null) return '';
+        if (sn < 60) return '1 dakikadan az';
+        const dk = Math.round(sn / 60);
+        return dk < 60 ? '≈ ' + dk + ' dk' : '≈ ' + Math.floor(dk / 60) + ' sa ' + (dk % 60) + ' dk';
+    }
+    function gtPaneli() {
+        const t = d.gt;
+        const kutu = e('div', { sinif: 'i-gt', role: 'region', 'aria-label': 'UYAP\'tan güncelleme' });
+        kutu.appendChild(e('div', { sinif: 'i-gt-ust' }, [e('b', { metin: 'UYAP\'tan güncelle' }), e('div', { sinif: 'i-bosluk' }),
+            gtSuruyor() ? null : e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Kapat', onclick: function() { d.gtAcik = false; gtCiz(); } })]));
+        if (gtSuruyor()) { gtSurenCiz(kutu, t); return kutu; }
+        if (t) gtSonucCiz(kutu, t);
+        gtFormCiz(kutu, t);
+        return kutu;
+    }
+    function gtTurAdi(t) { return t && t.mod === 'taraf' ? 'Taraf bilgileri' : 'Dosya listesi'; }
+    function gtSurenCiz(kutu, t) {
+        kutu.appendChild(e('div', { stil: 'font-weight:600', metin: gtTurAdi(t) + ' güncelleniyor' + (t.kapsam ? ' — ' + t.kapsam : '') }));
+        kutu.appendChild(e('div', { metin: GT_ASAMA[t.asama] || t.asama }));
+        kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: t.mesaj || '' }));
+        if (t.toplam) {
+            kutu.appendChild(e('div', { sinif: 'i-gt-cubuk', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(t.toplam), 'aria-valuenow': String(t.i) },
+                [e('i', { stil: 'width:' + Math.min(100, t.i * 100 / t.toplam).toFixed(1) + '%' })]));
+        }
+        const parcalar = [];
+        if (t.toplam) parcalar.push(t.i + ' / ' + t.toplam);
+        if (t.kalan_sn != null) parcalar.push('kalan ' + sureMetni(t.kalan_sn));
+        if (t.mola_kalan_sn != null) parcalar.push('mola: ' + t.mola_kalan_sn + ' sn');
+        parcalar.push(t.alinan + ' dosya alındı', t.yeni_dosya + ' yeni');
+        if (t.taraf_cekilen) parcalar.push(t.taraf_cekilen + ' dosyanın tarafları / borçlu kimlikleri alındı');
+        if (t.kapandi) parcalar.push(t.kapandi + ' kapandı');
+        kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: parcalar.join(' · ') }));
+        if (t.captcha) gtCaptchaCiz(kutu, t);
+        if (t.uyarilar && t.uyarilar.length) {
+            kutu.appendChild(e('ul', { sinif: 'i-gt-uyarilar' }, t.uyarilar.slice(-5).map(function(u) { return e('li', { metin: u }); })));
+        }
+        const dur = e('button', { sinif: 'i-d tehlike', type: 'button', metin: 'Durdur', stil: 'margin-top:8px',
+            onclick: async function() {
+                dur.disabled = true;
+                try { d.gt = await gtIstek('/' + t.id + '/iptal', {}); } catch (x) { bildir(x.message); }
+                gtYokla();
+            } });
+        kutu.appendChild(dur);
+    }
+    function gtSonucCiz(kutu, t) {
+        const tur = t.mod === 'taraf' ? 'Son taraf güncellemesi' : 'Son dosya listesi güncellemesi';
+        const ad = tur + ({ bitti: ' tamamlandı', iptal: ' durduruldu', hata: ' hatayla bitti' }[t.durum] || '');
+        kutu.appendChild(e('div', { stil: 'font-weight:600', metin: ad + (t.kapsam ? ' (' + t.kapsam + ')' : '') }));
+        if (t.mesaj) kutu.appendChild(e('div', { sinif: 'i-gt-not', metin: t.mesaj }));
+        if (t.rapor && t.rapor.length) kutu.appendChild(e('ul', { sinif: 'i-gt-rapor' }, t.rapor.map(function(s) { return e('li', { metin: s }); })));
+        if (t.uyarilar && t.uyarilar.length) {
+            kutu.appendChild(e('details', {}, [e('summary', { metin: t.uyari_sayisi + ' uyarı / not' + (t.uyari_sayisi > t.uyarilar.length ? ' (son ' + t.uyarilar.length + ')' : '') }),
+                e('ul', { sinif: 'i-gt-uyarilar' }, t.uyarilar.map(function(u) { return e('li', { metin: u }); }))]));
+        }
+    }
+    function gtFormCiz(kutu, t) {
+        const f = d.gtForm;
+        kutu.appendChild(e('div', { sinif: 'i-gt-not', stil: 'margin-top:6px',
+            metin: 'İstekler ofis bilgisayarından sırayla ve yavaş gider; sayfayı kapatsanız da sürer. Kapsamı daraltmak için daire ya da açılış tarihi aralığı seçin.' }));
+        const sec = e('select', { 'aria-label': 'Güncelleme kapsamı: daire' }, [e('option', { value: '', metin: 'Bütün açık dosyalar' })]
+            .concat(((d.ozet && d.ozet.birimler) || []).map(function(b) {
+                const o = e('option', { value: b.birim_id, metin: b.ad + ' (' + b.acik + ' açık)' });
+                if (b.birim_id === f.birim) o.selected = true;
+                return o;
+            })));
+        sec.addEventListener('change', function() { f.birim = sec.value; });
+        const tarih = function(k, ad) {
+            const x = e('input', { type: 'date', value: f[k], title: ad, 'aria-label': ad });
+            x.addEventListener('change', function() { f[k] = x.value; });
+            return x;
+        };
+        const basK = tarih('bas', 'Açılış tarihi: başlangıç'), sonK = tarih('son', 'Açılış tarihi: bitiş');
+        const iso = function(dt) { return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0'); };
+        const buAy = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Bu ay', title: 'Bu ay açılan dosyalar',
+            onclick: function() { const s = new Date(); f.bas = basK.value = iso(new Date(s.getFullYear(), s.getMonth(), 1)); f.son = sonK.value = iso(s); } });
+        const temizle = e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tarihsiz', title: 'Tarih aralığını kaldır',
+            onclick: function() { f.bas = basK.value = ''; f.son = sonK.value = ''; } });
+        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [e('label', { sinif: 'i-gt-not', metin: 'Kapsam' }), sec,
+            e('label', { sinif: 'i-gt-not', metin: 'Açılış' }), basK, '–', sonK, buAy, temizle]));
+        const baslat = function(mod, dugme) {
+            return async function() {
+                dugme.disabled = true;
+                const govde = { mod: mod };
+                if (f.birim) { govde.birim_id = f.birim; govde.birim_adi = sec.options[sec.selectedIndex].textContent.replace(/ \(\d+ açık\)$/, ''); }
+                if (f.bas) govde.acilis_bas = f.bas;
+                if (f.son) govde.acilis_son = f.son;
+                try { d.gt = await gtIstek('', govde); gtYokla(); }
+                catch (x) { bildir(x.message); dugme.disabled = false; }
+            };
+        };
+        const liste = e('button', { sinif: 'i-d ana', type: 'button', metin: 'Dosya listesini güncelle',
+            title: 'Açık dosyaların listesi: yeni dosyalar eklenir, kapanan dosyalar işaretlenir (taraf istenmez)' });
+        liste.addEventListener('click', baslat('liste', liste));
+        const taraf = e('button', { sinif: 'i-d', type: 'button', metin: 'Taraf bilgilerini güncelle',
+            title: 'Yalnız tarafı ya da borçlu TCKN / vergi no\'su eksik dosyalar sorgulanır' });
+        taraf.addEventListener('click', baslat('taraf', taraf));
+        kutu.appendChild(e('div', { sinif: 'i-gt-form' }, [liste, taraf,
+            e('span', { sinif: 'i-gt-not', metin: 'Tebligat bilgileri: sonraki aşamada.' })]));
+        kutu.appendChild(e('div', { sinif: 'i-gt-not', stil: 'margin-top:6px',
+            metin: 'Taraf bilgileri dosya başına 1–2 istek atar (~3 sn arayla); bütün açık dosyalarda saatler sürebilir, önce dar bir kapsam seçin.' }));
+        if (mesaiMi()) {
+            kutu.appendChild(e('div', { sinif: 'i-gt-uyari', role: 'note',
+                metin: 'Mesai saatindesiniz: tarama UYAP\'ı yavaşlatabilir ve büronun sorgularıyla çakışabilir. Akşam 18:00\'den sonra çalıştırmanız önerilir.' }));
+        }
+    }
+    // Güvenlik doğrulaması: UYAP'ın kendi Turnstile site anahtarıyla, kullanıcı çözer (Gerekçeli Kararlar paneliyle aynı).
+    function tsYukle() {
+        if (window.turnstile) return Promise.resolve(window.turnstile);
+        if (tsYukleniyor) return tsYukleniyor;
+        tsYukleniyor = new Promise(function(res, rej) {
+            const sc = document.createElement('script');
+            sc.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+            sc.async = true;
+            sc.onload = function() { res(window.turnstile); };
+            sc.onerror = function() { tsYukleniyor = null; rej(new Error('doğrulama betiği yüklenemedi')); };
+            document.head.appendChild(sc);
+        });
+        return tsYukleniyor;
+    }
+    function gtCaptchaCiz(kutu, t) {
+        const c = t.captcha;
+        kutu.setAttribute('data-captcha', String(c.n));
+        const yer = e('div', { stil: 'margin-top:6px;min-height:65px' });
+        const cevap = async function(jeton) {
+            try { d.gt = await gtIstek('/' + t.id + '/captcha', { token: jeton }); } catch (x) { bildir(x.message); }
+            kutu.removeAttribute('data-captcha');
+            gtYokla();
+        };
+        kutu.appendChild(e('div', { sinif: 'i-gt-uyari', metin: c.mesaj || 'UYAP güvenlik doğrulaması istiyor.' }));
+        kutu.appendChild(yer);
+        kutu.appendChild(e('button', { sinif: 'i-d kucuk', type: 'button', metin: 'Tekrar dene', onclick: function() { cevap(null); } }));
+        tsYukle().then(function(ts) {
+            ts.render(yer, { sitekey: c.site_key, callback: cevap,
+                'error-callback': function(kod) {
+                    yer.appendChild(e('div', { sinif: 'i-gt-uyari', metin: 'Doğrulama açılamadı (kod: ' + kod + '). Biraz bekleyip "Tekrar dene"ye basın.' }));
+                    return true;
+                } });
+        }).catch(function(x) { yer.appendChild(e('div', { sinif: 'i-gt-uyari', metin: 'Doğrulama gösterilemedi (' + x.message + ').' })); });
     }
 
     // ── Dosya paneli ──
@@ -431,8 +997,7 @@
         const id = d.secili.id;
         await dosyaAc(id);
         try {
-            const sorgu = new URLSearchParams({ q: d.filtre.q, asama: d.filtre.asama, acik: d.filtre.acik ? '1' : '', sayfa: String(d.filtre.sayfa), boyut: '50' });
-            const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + sorgu.toString())]);
+            const sonuc = await Promise.all([istek('ozet'), istek('borclular?' + listeSorgusu())]);
             d.ozet = sonuc[0]; d.liste = sonuc[1];
             durumYaz(); surecCiz();
         } catch (x) {}

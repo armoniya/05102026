@@ -99,6 +99,10 @@ pub struct IndirmeInner {
     pub captcha_jeton: Option<String>,
     pub captcha_sayisi: usize,
     pub yavaslatma: f64,
+    /// İki istek arası taban süre ve yavaşlayınca üst sınır. Gerekçeli Kararlar (gerekceli_karar.rs)
+    /// aynı kapıyı daha yavaş hızla kullanır (Python: Tarama.aralik()).
+    pub istek_arasi_sn: f64,
+    pub yavas_en_cok_sn: f64,
 }
 
 pub struct Indirme {
@@ -136,6 +140,8 @@ impl Indirme {
                 captcha_jeton: None,
                 captcha_sayisi: 0,
                 yavaslatma: 1.0,
+                istek_arasi_sn: ISTEK_ARASI_SN,
+                yavas_en_cok_sn: YAVAS_EN_COK_SN,
             }),
             captcha_notify: Notify::new(),
         })
@@ -153,6 +159,7 @@ impl Indirme {
             "mesaj": g.mesaj,
             "toplam": g.toplam,
             "inen": g.inen,
+            "i": g.inen + g.atlanan + g.basarisiz.len(),
             "atlanan": g.atlanan,
             "basarisiz": g.basarisiz,
             "captcha": g.captcha,
@@ -191,7 +198,7 @@ impl Indirme {
 
     pub fn aralik(&self) -> f64 {
         let g = self.inner.lock().unwrap();
-        (ISTEK_ARASI_SN * g.yavaslatma).min(YAVAS_EN_COK_SN.max(ISTEK_ARASI_SN))
+        (g.istek_arasi_sn * g.yavaslatma).min(g.yavas_en_cok_sn.max(g.istek_arasi_sn))
     }
 
     pub fn yavaslat(&self) {
@@ -248,6 +255,11 @@ static KAYITLAR: Lazy<StdMutex<HashMap<String, Arc<Indirme>>>> =
 static SON_ISTEK: Lazy<StdMutex<Option<Instant>>> = Lazy::new(|| StdMutex::new(None));
 static SIRA_KILIDI: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
+/// Toplu işlerin ortak sıra kilidi: Tüm Evrakı İndir ile Gerekçeli Kararlar UYAP'a aynı anda gitmez.
+pub fn sira_kilidi() -> &'static AsyncMutex<()> {
+    &SIRA_KILIDI
+}
+
 fn json_coz(headers: &HashMap<String, String>, body: &[u8]) -> Option<Value> {
     let ctype = headers
         .get("content-type")
@@ -260,7 +272,7 @@ fn json_coz(headers: &HashMap<String, String>, body: &[u8]) -> Option<Value> {
     serde_json::from_slice(body).ok()
 }
 
-fn eszamanli_mi(veri: &Value, derinlik: usize) -> bool {
+pub fn eszamanli_mi(veri: &Value, derinlik: usize) -> bool {
     if derinlik > 4 {
         return false;
     }
@@ -451,21 +463,83 @@ fn evraklar_dizisi(veri: &Value) -> Vec<Value> {
     Vec::new()
 }
 
+/// `ekEvrakListesi` alt evraklarını ayrı kayıt olarak katar; aynı evrakId bir kez alınır
+/// (`evrak_toplu.py::_duzlestir`).
+pub fn _duzlestir(evraklar: Vec<Value>) -> Vec<Value> {
+    fn kimlik(v: Option<&Value>) -> String {
+        match v {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+    fn metin(v: Option<&Value>) -> String {
+        match v {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+    let mut duz: Vec<Value> = Vec::new();
+    let mut gorulen: HashSet<String> = HashSet::new();
+    for e in evraklar {
+        if !e.is_object() {
+            continue;
+        }
+        let ekler: Vec<Value> = e
+            .get("ekEvrakListesi")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tur = metin(e.get("tur"));
+        let no = metin(e.get("birimEvrakNo"));
+        let tarih = e.get("onaylandigiTarih").cloned().unwrap_or(Value::Null);
+        let eid = kimlik(e.get("evrakId"));
+        if !eid.is_empty() && gorulen.insert(eid) {
+            duz.push(e);
+        }
+        for ek in ekler {
+            let ek_id = kimlik(ek.get("evrakId"));
+            if ek_id.is_empty() || !gorulen.insert(ek_id) {
+                continue;
+            }
+            duz.push(json!({
+                "evrakId": ek.get("evrakId").cloned().unwrap_or(Value::Null),
+                "tur": format!("{} (ek)", tur).trim().to_string(),
+                "birimEvrakNo": format!("{}-ek{}", no, metin(ek.get("sira"))),
+                "onaylandigiTarih": tarih.clone(),
+            }));
+        }
+    }
+    for (sira, e) in duz.iter_mut().enumerate() {
+        if let Some(o) = e.as_object_mut() {
+            o.insert("_sira".to_string(), json!(sira + 1));
+        }
+    }
+    duz
+}
+
+/// Dosyanın tüm evrakı (`evrak_toplu.py::_evrak_listesi`): önce sayfa sayısı, sonra her sayfanın
+/// `tumEvraklar` grupları. Eski biçimli (düz dizi) yanıt da kabul edilir.
 pub async fn _evrak_listesi(ind: &Indirme) -> Result<Vec<Value>, String> {
     let dosya_id = ind.inner.lock().unwrap().dosya_id.clone();
-    let (_, _, _, toplam_v) = _uyap(
+    let (_, _, toplam_bayt, toplam_v) = _uyap(
         ind,
         "POST",
         EVRAK_LISTESI_TOPLAM,
-        Some(&json!({"dosyaId": dosya_id})),
+        Some(&json!({"dosyaId": dosya_id, "pageNumber": 1})),
         None,
     )
     .await?;
-    let mut tum = Vec::new();
-    let mut gorulen = HashSet::new();
-    let mut sayfa = 1usize;
+    let toplam_sayfa = toplam_v
+        .as_ref()
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .or_else(|| String::from_utf8_lossy(&toplam_bayt).trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 200) as usize;
 
-    loop {
+    let mut tum = Vec::new();
+    for sayfa in 1..=toplam_sayfa {
         let (_, _, _, v_opt) = _uyap(
             ind,
             "POST",
@@ -475,46 +549,19 @@ pub async fn _evrak_listesi(ind: &Indirme) -> Result<Vec<Value>, String> {
         )
         .await?;
         let Some(v) = v_opt else {
-            break;
+            continue;
         };
-        let parca = evraklar_dizisi(&v);
-        if parca.is_empty() {
-            break;
-        }
-        let mut yeni_eklendi = 0usize;
-        for e in parca {
-            let eid = e
-                .get("evrakId")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            if eid.is_empty() || gorulen.contains(&eid) {
-                continue;
+        if let Some(gruplar) = v.get("tumEvraklar").and_then(|g| g.as_object()) {
+            for grup in gruplar.values() {
+                if let Some(arr) = grup.as_array() {
+                    tum.extend(arr.iter().filter(|e| e.is_object()).cloned());
+                }
             }
-            gorulen.insert(eid);
-            tum.push(e);
-            yeni_eklendi += 1;
-        }
-        if yeni_eklendi == 0 {
-            break;
-        }
-        if let Some(ref tv) = toplam_v {
-            let total = tv
-                .get("total")
-                .or_else(|| tv.get("toplam"))
-                .or_else(|| tv.get("pageTotal"))
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as usize;
-            if total > 0 && sayfa >= total {
-                break;
-            }
-        }
-        sayfa += 1;
-        if sayfa > 200 {
-            break;
+        } else {
+            tum.extend(evraklar_dizisi(&v).into_iter().filter(|e| e.is_object()));
         }
     }
-    Ok(tum)
+    Ok(_duzlestir(tum))
 }
 
 pub fn _guvenli_ad(metin: &str, en_cok: usize) -> String {
@@ -702,6 +749,15 @@ fn jpeg_dimensions(data: &[u8]) -> (u32, u32) {
 }
 
 pub fn _pdfe_cevir(bayt: &[u8], tur: &str, baslik: &str) -> Result<Vec<u8>, String> {
+    // Önce Python/PyMuPDF (eski sürümün dönüştürücüsü); yoksa ya da başaramazsa aşağıdaki Rust dönüştürücü.
+    if matches!(tur, "tiff" | "jpeg" | "png" | "udf" | "html") {
+        match crate::py_cevir::cevir(tur, bayt) {
+            Some(Ok(p)) if p.starts_with(b"%PDF") => return Ok(p),
+            Some(Ok(_)) => println!("[evrak] Python çıktısı PDF değil ({}); Rust deneniyor", baslik),
+            Some(Err(e)) => println!("[evrak] Python çeviremedi ({}): {}; Rust deneniyor", baslik, e),
+            None => {}
+        }
+    }
     match tur {
         "pdf" => Ok(bayt.to_vec()),
         "jpeg" => {
@@ -716,6 +772,13 @@ pub fn _pdfe_cevir(bayt: &[u8], tur: &str, baslik: &str) -> Result<Vec<u8>, Stri
                 stream.as_bytes(),
                 Some((iw, ih, bayt)),
             ))
+        }
+        "tiff" => crate::tiff_pdf::tiff_pdf(bayt),
+        "png" => crate::udf_pdf::decode_png_rgb(bayt)
+            .map(|(w, h, rgb)| crate::tiff_pdf::rgb_pdf(w, h, &rgb))
+            .ok_or_else(|| "PNG çözülemedi".to_string()),
+        "udf" if crate::udf_pdf::udf_zip_mi(bayt) => {
+            crate::udf_pdf::udf_pdf_uret(bayt).map_err(|e| format!("UDF cevrilemedi: {}", e))
         }
         "udf" => {
             let text = if bayt.starts_with(b"PK\x03\x04") {
@@ -781,7 +844,6 @@ pub fn _isaret_sayfasi(baslik: &str, aciklama: &str) -> Vec<u8> {
 }
 
 pub fn _birlestir(pdf_yollari: &[PathBuf], hedef: &Path) -> Result<(), String> {
-    // Tek PDF ise doğrudan kopyala; birden fazla PDF'i basitçe birleştir veya ilk geçerliyi yaz
     if pdf_yollari.is_empty() {
         return Err("Birleştirilecek PDF yok.".to_string());
     }
@@ -789,10 +851,19 @@ pub fn _birlestir(pdf_yollari: &[PathBuf], hedef: &Path) -> Result<(), String> {
         fs::copy(&pdf_yollari[0], hedef).map_err(|e| e.to_string())?;
         return Ok(());
     }
-    // Basit çoklu sayfa PDF birleştirici: her PDF'in sayfa sayısını koruyarak ham PDF'i yaz
-    // (ilk PDF'i baz alıp ek belgelerin varlığını korur)
-    let first = fs::read(&pdf_yollari[0]).map_err(|e| e.to_string())?;
-    fs::write(hedef, first).map_err(|e| e.to_string())
+    // Önce Python/PyMuPDF (eski sürüm); yoksa ya da başaramazsa Rust birleştirici (src/pdf_birlestir.rs).
+    match crate::py_cevir::birlestir(pdf_yollari, hedef) {
+        Some(Ok(())) if hedef.is_file() => return Ok(()),
+        Some(Ok(())) => println!("[evrak] Python birleşik PDF yazmadı; Rust deneniyor"),
+        Some(Err(e)) => println!("[evrak] Python birleştiremedi: {}; Rust deneniyor", e),
+        None => {}
+    }
+    // Her belgenin bütün sayfaları sırayla; okunamayan belgenin yerine açıklama sayfası.
+    crate::pdf_birlestir::birlestir(pdf_yollari, hedef, &|yol, hata| {
+        let ad = yol.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        _isaret_sayfasi(&ad, &format!("Bu belge birlestirilemedi: {}", hata))
+    })
+    .map(|_| ())
 }
 
 pub fn _zip_yap(klasor: &Path, zip_yol: &Path, ad: &str, tek_pdf: Option<&Path>) -> Result<(), String> {
@@ -943,8 +1014,12 @@ async fn calistir_ic(ind: &Indirme) -> Result<(), String> {
                 ardisik_hata = 0;
                 let ct = hdrs.get("content-type").map(|s| s.as_str()).unwrap_or("");
                 let tur = _tur_bul(&bytes, ct);
-                let pdf_bytes = _pdfe_cevir(&bytes, tur, &baslik)
-                    .unwrap_or_else(|e| _isaret_sayfasi(&baslik, &e));
+                // Çeviri (UDF/TIFF) ağır olabilir: ayrı iş parçacığında; bu sırada ilerleme sorguları yanıtlanır.
+                let baslik2 = baslik.clone();
+                let pdf_bytes = tokio::task::spawn_blocking(move || _pdfe_cevir(&bytes, tur, &baslik2))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("çeviri yarıda kaldı: {}", e)))
+                    .unwrap_or_else(|e| _isaret_sayfasi(&baslik, &format!("Bu belge PDF'e cevrilemedi: {}", e)));
                 let pdf_path = klasor.join(format!("{}.pdf", baslik));
                 if fs::write(&pdf_path, &pdf_bytes).is_ok() {
                     pdf_yollari.push(pdf_path);
@@ -976,7 +1051,10 @@ async fn calistir_ic(ind: &Indirme) -> Result<(), String> {
 
     let birlesik_yol = klasor.join(format!("{} - Birlesik.pdf", ad));
     if !pdf_yollari.is_empty() {
-        _birlestir(&pdf_yollari, &birlesik_yol)?;
+        let (y, h) = (pdf_yollari.clone(), birlesik_yol.clone());
+        tokio::task::spawn_blocking(move || _birlestir(&y, &h))
+            .await
+            .map_err(|e| format!("Birleştirme yarıda kaldı: {}", e))??;
     }
 
     let sonuc_yol = if cikti == CIKTI_TEK {
@@ -1170,7 +1248,8 @@ pub async fn handle_http(
         .trim_matches('/');
     let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
 
-    if parts == ["baslat"] && method == "POST" {
+    // Sayfa (uyap_proxy.rs "Belge indir" paneli) başlatmayı kökün kendisine POST eder.
+    if (parts.is_empty() || parts == ["baslat"]) && method == "POST" {
         let v: Value = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(e) => return json_resp(400, json!({"ok": false, "error": e.to_string()})),
@@ -1204,7 +1283,12 @@ pub async fn handle_http(
                         hdrs.insert("content-type".to_string(), ctype);
                         hdrs.insert(
                             "content-disposition".to_string(),
-                            format!("attachment; filename=\"{}\"", fname),
+                            // Türkçe ad: ASCII yedek + RFC 5987 (UTF-8) ad; aksi halde tarayıcı "Ä°zmir" yazıyordu.
+                            format!(
+                                "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+                                pdf_escape(&fname).replace(['"', '\\'], ""),
+                                percent_encoding::utf8_percent_encode(&fname, percent_encoding::NON_ALPHANUMERIC)
+                            ),
                         );
                         return (200, hdrs, veri);
                     }
@@ -1217,7 +1301,9 @@ pub async fn handle_http(
                 ("captcha", "POST") => {
                     let jeton = serde_json::from_slice::<Value>(body)
                         .ok()
-                        .and_then(|v| v.get("jeton").and_then(|j| j.as_str()).map(String::from))
+                        .and_then(|v| {
+                            v.get("jeton").or_else(|| v.get("token")).and_then(|j| j.as_str()).map(String::from)
+                        })
                         .unwrap_or_default();
                     ind.captcha_coz(&jeton);
                     return json_resp(200, json!({"ok": true, "indirme": ind.sozluk()}));
@@ -1228,4 +1314,30 @@ pub async fn handle_http(
     }
 
     json_resp(404, json!({"ok": false, "error": "Bulunamadı."}))
+}
+
+#[cfg(test)]
+mod duzlestir_testleri {
+    use super::*;
+
+    /// `evrak_toplu.py::_duzlestir`: ekler ayrı kayıt, aynı evrakId bir kez, sıra numarası tam listede.
+    #[test]
+    fn ekler_ayri_kayit_ve_tekrar_yok() {
+        let duz = _duzlestir(vec![
+            json!({"evrakId": "1", "tur": "Gerekçeli Karar", "birimEvrakNo": "2024/5", "onaylandigiTarih": "01.02.2024",
+                   "ekEvrakListesi": [{"evrakId": "1a", "sira": 1}, {"sira": 2}]}),
+            json!({"evrakId": "1", "tur": "yinelenen"}),
+            json!({"evrakId": 7, "tur": "Tensip"}),
+            json!("bozuk"),
+            json!({"tur": "kimliksiz"}),
+        ]);
+        assert_eq!(duz.len(), 3);
+        assert_eq!(duz[0]["evrakId"], "1");
+        assert_eq!(duz[1]["evrakId"], "1a");
+        assert_eq!(duz[1]["tur"], "Gerekçeli Karar (ek)");
+        assert_eq!(duz[1]["birimEvrakNo"], "2024/5-ek1");
+        assert_eq!(duz[1]["onaylandigiTarih"], "01.02.2024");
+        assert_eq!(duz[2]["evrakId"], 7);
+        assert_eq!(duz[2]["_sira"], 3);
+    }
 }

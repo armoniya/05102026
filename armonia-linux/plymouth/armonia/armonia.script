@@ -1,0 +1,111 @@
+# Armonia Plymouth temasi: kart + A logosu + "Armonia" basligi + kasa parola kutusu.
+# Tiklanabilir dugme yok (Enter ile acilir); klavye duzeni kurulumda sabitlenir.
+# Bilerek YAZILMAYANLAR: "AES-512", "Akis Hazir", "EROFS" (dogru olmayan / bu asamada bilinmeyen bilgiler).
+# Claude, 2026-11-14.
+
+Window.SetBackgroundTopColor(0.949, 0.929, 0.902);     # #F2EDE6
+Window.SetBackgroundBottomColor(0.937, 0.914, 0.882);
+
+ekran_w = Window.GetWidth();
+ekran_h = Window.GetHeight();
+ox = Window.GetX();
+oy = Window.GetY();
+koyu_r = 0.18; koyu_g = 0.18; koyu_b = 0.18;
+
+# --- Kart
+kart = Image("kart.png");
+kart_s = Sprite(kart);
+kart_x = ox + ekran_w / 2 - kart.GetWidth() / 2;
+kart_y = oy + ekran_h / 2 - kart.GetHeight() / 2;
+kart_s.SetPosition(kart_x, kart_y, 0);
+
+# --- Logo
+logo = Image("logo.png");
+logo_s = Sprite(logo);
+logo_y = kart_y + 58;
+logo_s.SetPosition(ox + ekran_w / 2 - logo.GetWidth() / 2, logo_y, 1);
+
+# --- Baslik ve alt baslik
+baslik = Image.Text("Armonia", koyu_r, koyu_g, koyu_b, 1, "Serif Bold 34");
+baslik_s = Sprite(baslik);
+baslik_y = logo_y + logo.GetHeight() + 18;
+baslik_s.SetPosition(ox + ekran_w / 2 - baslik.GetWidth() / 2, baslik_y, 1);
+
+alt = Image.Text("ÇOKLU UYAP İŞLETİM SİSTEMİ", 0.30, 0.30, 0.30, 1, "Sans 11");
+alt_s = Sprite(alt);
+alt_y = baslik_y + baslik.GetHeight() + 6;
+alt_s.SetPosition(ox + ekran_w / 2 - alt.GetWidth() / 2, alt_y, 1);
+
+# --- Parola alani (yalniz parola istenince gorunur)
+kutu = Image("kutu.png");
+kutu_s = Sprite(kutu);
+kutu_x = ox + ekran_w / 2 - kutu.GetWidth() / 2;
+kutu_y = alt_y + alt.GetHeight() + 30;
+kutu_s.SetPosition(kutu_x, kutu_y, 1);
+kutu_s.SetOpacity(0);
+
+ipucu_s = Sprite();
+ipucu_s.SetPosition(kutu_x, kutu_y + kutu.GetHeight() + 12, 1);
+
+nokta = Image("nokta.png");
+noktalar = [];
+NOKTA_EN_FAZLA = 24;
+for (i = 0; i < NOKTA_EN_FAZLA; i++) {
+    noktalar[i] = Sprite(nokta);
+    noktalar[i].SetPosition(kutu_x + 16 + i * 14, kutu_y + kutu.GetHeight() / 2 - nokta.GetHeight() / 2, 2);
+    noktalar[i].SetOpacity(0);
+}
+
+yer_tutucu_s = Sprite();
+yer_tutucu_s.SetPosition(kutu_x + 16, kutu_y + 13, 2);
+
+mesaj_s = Sprite();
+mesaj_s.SetPosition(kart_x, kart_y + kart.GetHeight() - 64, 1);
+
+fun metni_ortala(sprite, metin, r, g, b, y) {
+    # "Sans 10" Hyper-V testinde kutucuk (tofu) cizdi; ayni karede "Sans 11" duzgundu
+    img = Image.Text(metin, r, g, b, 1, "Sans 11");
+    sprite.SetImage(img);
+    sprite.SetPosition(ox + ekran_w / 2 - img.GetWidth() / 2, y, 1);
+}
+
+# Plymouth denemeler arasinda display_normal cagirmiyor (Hyper-V testi): nokta sayisi tek adimda >=2'den 0'a
+# inerse parola gonderilmis sayilir (Backspace birer birer azaltir).
+deneme = 0; onceki_adet = 0;
+fun parola_goster(istem, adet) {
+    if (adet == 0 && global.onceki_adet >= 2) global.deneme++;
+    global.onceki_adet = adet;
+    kutu_s.SetOpacity(1);
+    if (adet == 0) {
+        yer_tutucu_s.SetImage(Image.Text("Kasa parolasını yazıp Enter'a basın", 0.55, 0.55, 0.55, 1, "Sans 11"));
+        yer_tutucu_s.SetOpacity(1);
+    } else {
+        yer_tutucu_s.SetOpacity(0);
+    }
+    for (i = 0; i < NOKTA_EN_FAZLA; i++) {
+        if (i < adet) noktalar[i].SetOpacity(1); else noktalar[i].SetOpacity(0);
+    }
+    if (global.deneme > 0 && adet == 0) metni_ortala(ipucu_s, "Parola kabul edilmedi olabilir, tekrar deneyin.", 0.65, 0.20, 0.20, kutu_y + kutu.GetHeight() + 12);
+    else metni_ortala(ipucu_s, "Şifreli kasa (LUKS2)", 0.40, 0.40, 0.40, kutu_y + kutu.GetHeight() + 12);
+    ipucu_s.SetOpacity(1);
+}
+Plymouth.SetDisplayPasswordFunction(parola_goster);
+
+fun normal_goster() {
+    # onceki_adet bilerek sifirlanmaz: gonderimden sonra cagrilir, sonraki istem denemeyi saysin
+    kutu_s.SetOpacity(0);
+    yer_tutucu_s.SetOpacity(0);
+    ipucu_s.SetOpacity(0);
+    for (i = 0; i < NOKTA_EN_FAZLA; i++) noktalar[i].SetOpacity(0);
+}
+Plymouth.SetDisplayNormalFunction(normal_goster);
+
+# cryptsetup'tan gelen iletiler (ör. "No key available with this passphrase") Turkce karsiligiyla
+fun ileti_goster(metin) {
+    if (metin.SubString(0, 6) == "No key") metin = "Parola hatalı, lütfen tekrar deneyin.";
+    metni_ortala(mesaj_s, metin, 0.65, 0.20, 0.20, kart_y + kart.GetHeight() - 64);
+}
+Plymouth.SetMessageFunction(ileti_goster);
+
+fun cikis() { normal_goster(); }
+Plymouth.SetQuitFunction(cikis);

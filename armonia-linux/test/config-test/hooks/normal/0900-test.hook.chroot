@@ -1,0 +1,8 @@
+#!/bin/sh
+# YALNIZ TEST ISO'su: kasa bicimlendirme servisi. Claude, 2026-11-14.
+set -e
+chmod 0755 /opt/armonia/bin/kasa_test_kur.sh /opt/armonia/bin/kasa_test_dogrula.sh /opt/armonia/bin/tus_kaydi_test.sh
+systemctl enable armonia-kasa-test-kur.service
+systemctl enable armonia-lynis-test.service
+systemctl enable armonia-kasa-test-dogrula.service
+systemctl enable armonia-tus-kaydi-test.service

@@ -1,0 +1,1 @@
+slab_nomerge page_alloc.shuffle=1 debugfs=off lockdown=integrity ia32_emulation=0

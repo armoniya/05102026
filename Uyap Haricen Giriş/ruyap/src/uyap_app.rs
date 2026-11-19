@@ -1244,6 +1244,14 @@ impl UyapApp {
             });
             if let Err(e) = crate::veritabani::baslat(gunluk.clone()) {
                 gunluk(&format!("[VERİTABANI] Başlatılamadı: {e}"));
+            } else {
+                // Yeni kurulum: hazır şablon / süreç / etiket yoksa yüklenir (L7 olay bağları dahil).
+                // Kullanıcının sildiği hazır şablon geri gelmesin diye yalnız hiç hazır şablon yokken.
+                match crate::veritabani::baglanti().and_then(|mut c| crate::is_veri::hazir_verileri_ilk_kez(&mut *c)) {
+                    Ok(n) if n > 0 => gunluk(&format!("[VERİTABANI] Hazır İş Listesi verileri yüklendi ({n} kayıt).")),
+                    Ok(_) => {}
+                    Err(e) => gunluk(&format!("[VERİTABANI] Hazır İş Listesi verileri yüklenemedi: {e}")),
+                }
             }
         });
 

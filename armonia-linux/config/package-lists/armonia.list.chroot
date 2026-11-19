@@ -1,0 +1,62 @@
+# Armonia Faz 1 — asgari paket listesi (apt-recommends kapalı). Claude, 2026-11-13.
+# Oturum ve kabuk
+dbus
+libpam-systemd
+labwc
+# ÇokluUYAP (egui/glow) Wayland + yazılım GL (GPU yoksa llvmpipe)
+libegl1
+libegl-mesa0
+libgl1
+libgles2
+libgl1-mesa-dri
+libwayland-egl1
+libwayland-cursor0
+libxkbcommon0
+xkb-data
+fonts-dejavu-core
+# olcum betigi (pgrep, ps, free)
+procps
+# Ağ (DHCP) ve TLS kökleri
+systemd-resolved
+ca-certificates
+# Guvenlik duvari (Faz 3)
+nftables
+# Faz 2 kasa
+cryptsetup
+systemd-cryptsetup
+# Konsol/Plymouth klavye duzeni (TR)
+keyboard-configuration
+console-setup
+plymouth
+plymouth-label
+# Faz 2: zincirleme dosya verileri icin PostgreSQL (veri kasada, yalniz Sunucu rolunde calisir)
+postgresql
+# Faz 3: AppArmor (uyap_app profili sertlestirme/etc/apparmor.d)
+apparmor
+# Tarayici (kullanici karari 2026-11-14: Debian chromium + yonetilen politika). Ayri birim: armonia-tarayici@.service
+chromium
+# Turkce arayuz (--lang=tr) icin dil dosyalari
+chromium-l10n
+# xdg-open -> armonia-tarayici.sock istemcisi
+netcat-openbsd
+# USB aygit politikasi (kullanici karari 2026-11-14: A / sıkı)
+usbguard
+# Ses (E-Durusma mikrofon/kulaklik; kullanici karari 2026-11-14): PipeWire kiosk'un systemd --user oturumunda,
+# Chromium PulseAudio arayuzuyle /run/user/<uid>/pulse/native soketine baglanir
+pipewire
+pipewire-pulse
+wireplumber
+pipewire-alsa
+dbus-user-session
+# E-imza (Faz 4): Adalet E-imza istemcisi config/packages.chroot/ altindan kurulur; karti PC/SC ile okur
+pcscd
+libccid
+# Java smartcardio (gomulu JRE libj2pcsc) icin; apt-recommends kapali (guvenlik-denetci E-Y2)
+libpcsclite1
+# E-imza istemcisi ayarlar penceresini (Swing AyarlarUI) acilista kurar; ekransiz (headless) calisamiyor
+# (HeadlessException, Hyper-V 14 Kasim 11:40). Yalniz armonia-eimza.service icinde gorunmez X (Xvfb), xvfb-run icin
+# xauth, Xvfb klavye haritasi icin xkbcomp. Ekrana bagli X sunucusu YOK. NOT (guvenlik-denetci O-X1): xwayland
+# paketi labwc bagimliligi olarak KURULU (ikili var, calismiyor); kiosk X0 soketi olcum.sh ile denetleniyor.
+xvfb
+xauth
+x11-xkb-utils

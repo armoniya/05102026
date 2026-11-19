@@ -1,0 +1,15 @@
+# Faz 1 olcumu: acilis surelerini ve bellek kullanimini seri porta (COM1) yazar. Claude, 2026-11-13.
+# Type=exec: acilisin bitmesini bekletmez; betik kendisi acilisin bitmesini bekler.
+[Unit]
+Description=Armonia acilis olcumu (COM1)
+After=armonia-kiosk.service
+# guvenlik-denetci O2 (kullanici onayi 2026-11-14): yalniz test/olcum ISO'sunda (iso_derle.sh TEST=1 / OLCUM=1 /
+# OLCUM_TARAYICI=1 -> armonia.olcum=1). Uretimde COM1'e gunluk/disk bilgisi yazilmaz.
+ConditionKernelCommandLine=armonia.olcum=1
+
+[Service]
+Type=exec
+ExecStart=/opt/armonia/bin/olcum.sh
+
+[Install]
+WantedBy=graphical.target

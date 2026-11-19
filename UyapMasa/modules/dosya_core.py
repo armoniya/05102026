@@ -901,10 +901,8 @@ class DosyaSorgu:
                         # Burada başarısız/yavaş bir dosya HIZLI atlanır,
                         # tur devam eder; tek dosya ayrıntısını açan kullanıcı
                         # (dosya_detay_goster_ve_kaydet) hâlâ tam sabırla bekler.
-                        taraflar = dosya_taraf_getir(dosya_id, self.log_fn, timeout=20, denemeler=1,
-                                                      istek_sarici=self._istek_sarici)
-                        if taraflar:
-                            dosya_taraf_kaydet(dosya, taraflar, self.log_fn)
+                        taraflari_tazele(dosya, dosya_id, self.log_fn, self._istek_sarici,
+                                         timeout=20, denemeler=1)
                     except Exception as e:
                         self.log_fn(f"⚠️ Taraf bilgisi atlandı ({rec.get('dosyaNo','')}): {e}")
                     taraf_cekilen += 1
@@ -1168,11 +1166,119 @@ def _vekiller_kaydet(vekil_ham, Vekil, log_fn=None):
     return sonuc
 
 
-def dosya_taraf_kaydet(dosya, ham_liste, log_fn=None):
+def _dosya_tarafi_yaz(dosya, info, rol, sira, baglar, log):
+    """Bir UYAP taraf satırını bu dosyanın bağına yazar ve bağı döner
+    (2026-11-14). Önce dosyanın KENDİ bağları arasında aynı rol + aynı ad
+    aranır (dosya içinde ad tekildir); bulunursa:
+      • gelen kimlik (TCKN/MERSİS/vergi) bağın tarafında yoksa ve o taraf
+        YALNIZ bu dosyada kullanılıyorsa kimlik o tarafa yazılır;
+      • taraf başka dosyalarla paylaşılıyorsa ya da kimliği ÇELİŞİYORSA bağ,
+        kimliğin gerçek sahibine (yoksa yeni tarafa) TAŞINIR — bağ satırı aynı
+        kaldığından kesinleşme/tebliğ alanları ve tebligat→borçlu bağlantısı
+        korunur, sahte "UYAP'ta yok" uyarısı doğmaz.
+    Bulunmazsa genel eşleştirme (icra_core.save_taraf) + yeni bağ.
+    `baglar`: dosyanın DosyaTaraf listesi (yerinde güncellenir)."""
+    from icra_models.models import Taraf, DosyaTaraf
+    tur = info.get("tur") or "gercek"
+    tckn = _ic._kimlik_temizle(info.get("tckn"), (11,)) if tur == "gercek" else None
+    mersis = _ic._kimlik_temizle(info.get("mersis_no"), (16,)) if tur == "tuzel" else None
+    vergi = _ic._kimlik_temizle(info.get("vergi_no"), (10, 11)) if tur == "tuzel" else None
+    kimlikli = bool(tckn or mersis or vergi)
+    anahtar = _ic._ad_anahtari_taraf(tur, info.get("ad"), info.get("soyad"), info.get("unvan"))
+    es = [b for b in baglar if b.rol == rol and b.taraf.tur == tur and anahtar
+          and _ic._ad_anahtari_taraf(b.taraf.tur, b.taraf.ad, b.taraf.soyad, b.taraf.unvan) == anahtar]
+    if len(es) > 1:
+        es = [b for b in es if b.uyapta_gorulmedi is None] or es
+    if len(es) == 1:
+        bag, mevcut = es[0], es[0].taraf
+        kimliksiz = not (mevcut.tckn or mevcut.mersis_no or mevcut.vergi_no)
+        hedef = mevcut
+        if kimlikli and (kimliksiz or _ic._kimlik_celisir(mevcut, tckn, mersis, vergi)):
+            sahibi = None
+            for alan, deger in (("tckn", tckn), ("mersis_no", mersis), ("vergi_no", vergi)):
+                if deger and sahibi is None:
+                    sahibi = Taraf.objects.filter(**{alan: deger}).first()
+            if sahibi is not None:
+                hedef = sahibi
+            elif kimliksiz and not DosyaTaraf.objects.filter(taraf=mevcut).exclude(dosya=dosya).exists():
+                hedef = mevcut                       # yalnız bu dosyanın kaydı: kimlik ona yazılır
+            else:
+                hedef = None                         # paylaşılan ya da çelişen: yeni taraf
+        if hedef is None:
+            hedef = Taraf.objects.create(tur=tur, ad=info.get("ad") or "", soyad=info.get("soyad") or "",
+                                         unvan=info.get("unvan") or "", tckn=tckn, mersis_no=mersis,
+                                         vergi_no=vergi or "")
+        _ic._taraf_guncelle(hedef, {"tur": tur, "ad": info.get("ad") or "", "soyad": info.get("soyad") or "",
+                                    "unvan": info.get("unvan") or "", "tckn": tckn, "mersis_no": mersis,
+                                    "vergi_no": vergi})
+        if hedef.pk != mevcut.pk:
+            cakisan = DosyaTaraf.objects.filter(dosya=dosya, taraf=hedef, rol=rol).exclude(pk=bag.pk).first()
+            if cakisan is None:
+                log(f"  … {dosya}: {rol} '{mevcut}' kaydı kimliğiyle ayrıldı "
+                    f"({'TCKN' if tckn else 'vergi/MERSİS'} eşleşmesi).")
+                bag.taraf = hedef
+                bag.save(update_fields=["taraf"])
+                from icra_models.models import DurumOlayi, durum_olayi_yaz
+                durum_olayi_yaz(dosya, DurumOlayi.Tur.TARAF_KIMLIK, str(mevcut),
+                                f"{hedef} ({'TCKN ' + tckn if tckn else 'vergi/MERSİS'})",
+                                dosya_taraf=bag, kaynak=DurumOlayi.Kaynak.UYAP)
+            else:
+                bag = cakisan                        # doğru bağ zaten var
+        if bag.sira != sira:
+            bag.sira = sira
+            bag.save(update_fields=["sira"])
+        return bag
+    taraf = save_taraf(info, Taraf)
+    bag, _ = DosyaTaraf.objects.update_or_create(dosya=dosya, taraf=taraf, rol=rol, defaults={"sira": sira})
+    if bag not in baglar:
+        baglar.append(bag)
+    return bag
+
+
+def kaybolan_taraflari_isaretle(dosya, gorulen_bag_idleri, log_fn=None, roller=None, haric_roller=()):
+    """2026-11-14 kullanıcı kararı: UYAP'ın taraf listesinde artık görünmeyen
+    bağ SİLİNMEZ, `uyapta_gorulmedi` ile işaretlenir ve kullanıcı uyarılır;
+    yeniden görünen bağın işareti kalkar. Yalnız TAM listesi alınan roller
+    karşılaştırılır (`roller` None = hepsi; `haric_roller` listede olmayan roller).
+    Döner: bu çağrıda YENİ işaretlenen taraflar ("Rol: Ad")."""
+    log = log_fn or (lambda m: None)
+    from django.utils import timezone
+    from icra_models.models import DosyaTaraf
+    qs = DosyaTaraf.objects.filter(dosya=dosya)
+    if roller is not None:
+        qs = qs.filter(rol__in=list(roller))
+    if haric_roller:
+        qs = qs.exclude(rol__in=list(haric_roller))
+    from icra_models.models import DurumOlayi, durum_olayi_yaz
+    geri = list(qs.filter(pk__in=gorulen_bag_idleri, uyapta_gorulmedi__isnull=False).select_related("taraf"))
+    if geri:
+        DosyaTaraf.objects.filter(pk__in=[d.pk for d in geri]).update(uyapta_gorulmedi=None)
+        for d in geri:
+            durum_olayi_yaz(dosya, DurumOlayi.Tur.TARAF_GERI_GELDI, "UYAP'ta görülmedi", "UYAP'ta var",
+                            dosya_taraf=d, kaynak=DurumOlayi.Kaynak.UYAP)
+    yeni = list(qs.exclude(pk__in=gorulen_bag_idleri).filter(uyapta_gorulmedi__isnull=True)
+                .select_related("taraf"))
+    if yeni:
+        DosyaTaraf.objects.filter(pk__in=[d.pk for d in yeni]).update(uyapta_gorulmedi=timezone.now())
+        for d in yeni:
+            durum_olayi_yaz(dosya, DurumOlayi.Tur.TARAF_GORULMEDI, "UYAP'ta var", "UYAP'ta görülmedi",
+                            dosya_taraf=d, kaynak=DurumOlayi.Kaynak.UYAP,
+                            aciklama=f"{d.get_rol_display()} UYAP'ın taraf listesinde yok.")
+        log("⚠️ UYAP'ta artık görünmeyen taraf (kayıt silinmedi, işaretlendi): "
+            + "; ".join(f"{d.get_rol_display()}: {d.taraf}" for d in yeni)
+            + f" — {dosya}. UYAP'ta kontrol edin.")
+    return [f"{d.get_rol_display()}: {d.taraf}" for d in yeni]
+
+
+def dosya_taraf_kaydet(dosya, ham_liste, log_fn=None, roller=None, haric_roller=()):
     """`dosya_taraf_getir`'in ham yanıtını `DosyaTaraf`'a yazar. Rol, Türkçe
     metinden `tr_lower` ile koda çevrilir (Davacı→davaci, Davalı→davali,
-    Alacaklı→alacakli, Borçlu→borclu — bkz. models.DosyaTaraf.Rol). Döner:
-    kaydedilen_sayisi:int."""
+    Alacaklı→alacakli, Borçlu→borclu — bkz. models.DosyaTaraf.Rol). Taraf önce
+    dosyanın KENDİ tarafları arasında eşleştirilir (bkz. icra_core.save_taraf):
+    bu uç nokta TCKN vermediğinden, `dosya_borclu_list.ajx`'ten TCKN'siyle
+    yazılmış borçluya düşer. Liste `roller`/`haric_roller` kapsamında TAM
+    sayılır; kapsamda olup listede olmayan bağlar işaretlenir (bkz.
+    `kaybolan_taraflari_isaretle`). Döner: kaydedilen_sayisi:int."""
     log = log_fn or (lambda m: None)
     if not isinstance(ham_liste, list) or not ham_liste:
         return 0
@@ -1180,7 +1286,9 @@ def dosya_taraf_kaydet(dosya, ham_liste, log_fn=None):
     import django
     from icra_models.models import Taraf, Vekil, DosyaTaraf
     sayac = 0
+    gorulen = set()
     with django.db.transaction.atomic():
+        baglar = list(dosya.taraf_baglari.select_related("taraf"))
         for idx, item in enumerate(ham_liste):
             if not isinstance(item, dict):
                 continue
@@ -1188,27 +1296,94 @@ def dosya_taraf_kaydet(dosya, ham_liste, log_fn=None):
             # Kimliksiz kayıt KORUMASI (canlı DB denetimi, 2026-08-13): UYAP'ın
             # taraf_bilgileri yanıtı bazı istisnai dosya türlerinde (Merkezi
             # Takip Sistemi / Abonelik Sözleşmeleri İcra Daireleri gibi —
-            # görülen dosya.tur_kod: 35, 294) ad/soyad/tckn/unvan/mersis'i TAMAMEN
-            # boş bir satır döndürüyor. save_taraf bunu hiçbir önceki kayıtla
-            # eşleştiremediğinden (dedup anahtarı yok) her çağrıda YENİ bir
-            # boş Taraf+DosyaTaraf satırı oluşuyordu — 953 dosyada, çoğunda
-            # zaten adı dolu gerçek bir taraf VARKEN, sırf tekrar tekrar
-            # "Dosya Görüntüle" açıldıkça biriken 1799 hayalet kayıt tespit
-            # edildi. Kimliği olmayan satır hiçbir zaman kaydedilmez.
+            # görülen dosya.tur_kod: 35, 294) ad/soyad/tckn/unvan/mersis'i
+            # TAMAMEN boş bir satır döndürüyor; her çağrıda yeni hayalet Taraf
+            # oluşuyordu (953 dosyada 1799 kayıt). Kimliksiz satır kaydedilmez.
             if not (info.get("tckn") or info.get("mersis_no")
                     or (info.get("unvan") or "").strip()
                     or (info.get("ad") or "").strip() or (info.get("soyad") or "").strip()):
                 log(f"  ⚠️ Kimliksiz taraf kaydı atlandı (rol={item.get('rol', '')!r}).")
                 continue
-            taraf_obj = save_taraf(info, Taraf)
             vekil_objs = _vekiller_kaydet(item.get("vekil"), Vekil, log)
             rol_kod = tr_lower(item.get("rol", "")) or "diger"
-            dt, _ = DosyaTaraf.objects.update_or_create(
-                dosya=dosya, taraf=taraf_obj, rol=rol_kod,
-                defaults={"sira": idx})
+            dt = _dosya_tarafi_yaz(dosya, info, rol_kod, idx, baglar, log)
             dt.vekiller.set(vekil_objs)
+            gorulen.add(dt.pk)
             sayac += 1
+        if sayac:
+            kaybolan_taraflari_isaretle(dosya, gorulen, log, roller, haric_roller)
     return sayac
+
+
+BORCLU_LISTESI_ENDPOINT = "dosya_borclu_list.ajx"
+
+
+def dosya_borclu_kimlik_getir(dosya_id, log_fn=None, istek_sarici=None, timeout=60, denemeler=2):
+    """`dosya_borclu_list.ajx` — icra dosyasının borçluları KİMLİKLERİYLE
+    (kisiTumDVO.tcKimlikNo / kurumTumDVO vergiNo-mersisNo; bkz. icra_core.
+    parse_taraf_from_uyap, teblig_21_2_core._kisi_kurum_id_bul). Hata: []."""
+    log = log_fn or (lambda *a, **k: None)
+    motor = SorguMotoru(log)
+    try:
+        veri = _post_eszamanli_korumali(istek_sarici or _bireysel_istek, motor,
+                                         BORCLU_LISTESI_ENDPOINT, {"dosyaId": str(dosya_id)}, log,
+                                         timeout=timeout, denemeler=denemeler)
+    except Exception as e:
+        log(f"⚠️ Borçlu kimlikleri alınamadı: {e}")
+        return []
+    return veri if isinstance(veri, list) else []
+
+
+def borclu_kimliklerini_kaydet(dosya, borclu_ham, log_fn=None):
+    """`dosya_borclu_kimlik_getir` yanıtını rol=borclu bağlarına yazar: aynı
+    dosyadaki adı tutan kimliksiz borçluya TCKN/vergi no/MERSİS eklenir (yeni
+    Taraf açılmaz). Borçlu listesi TAM sayılır — listede olmayan borçlu
+    işaretlenir. Döner: kaydedilen sayı."""
+    log = log_fn or (lambda m: None)
+    if not isinstance(borclu_ham, list) or not borclu_ham:
+        return 0
+    _django_hazirla()
+    import django
+    from icra_models.models import Taraf, DosyaTaraf
+    sayac, gorulen = 0, set()
+    with django.db.transaction.atomic():
+        baglar = list(dosya.taraf_baglari.select_related("taraf"))
+        for idx, item in enumerate(borclu_ham):
+            if not isinstance(item, dict):
+                continue
+            info = _ic.parse_taraf_from_uyap(item)
+            if not (info.get("tckn") or info.get("mersis_no") or info.get("vergi_no")
+                    or (info.get("unvan") or "").strip() or (info.get("ad") or "").strip()):
+                continue
+            dt = _dosya_tarafi_yaz(dosya, info, "borclu", idx, baglar, log)
+            gorulen.add(dt.pk)
+            sayac += 1
+        if sayac:
+            kaybolan_taraflari_isaretle(dosya, gorulen, log, roller=["borclu"])
+    return sayac
+
+
+def borclu_kimligi_eksik_mi(dosya):
+    """Dosyada kimliği (TCKN / MERSİS / vergi no) olmayan borçlu var mı?"""
+    return dosya.taraf_baglari.filter(rol="borclu", taraf__tckn__isnull=True,
+                                      taraf__mersis_no__isnull=True, taraf__vergi_no="").exists()
+
+
+def taraflari_tazele(dosya, dosya_id, log_fn=None, istek_sarici=None, timeout=90, denemeler=3):
+    """Tarafları UYAP'tan okuyup yazar; icra dosyasında kimliği eksik borçlu
+    kalırsa `dosya_borclu_list.ajx` ile TCKN/vergi no tamamlanır (yalnız
+    gerektiğinde, +1 istek). Döner: taraf_bilgileri ham listesi (ekran için)."""
+    log = log_fn or (lambda m: None)
+    taraflar = dosya_taraf_getir(dosya_id, log, timeout=timeout, denemeler=denemeler,
+                                 istek_sarici=istek_sarici) if dosya_id else []
+    if taraflar:
+        dosya_taraf_kaydet(dosya, taraflar, log)
+    if dosya_id and dosya.yargi_turu == YARGI_TURU_ICRA and borclu_kimligi_eksik_mi(dosya):
+        borclular = dosya_borclu_kimlik_getir(dosya_id, log, istek_sarici,
+                                              timeout=min(timeout, 60), denemeler=min(denemeler, 2))
+        if borclular:
+            borclu_kimliklerini_kaydet(dosya, borclular, log)
+    return taraflar
 
 
 # ── Canlı sorgu başarısız olursa DB'ye düş (kullanıcı bulgusu, 2026-07-14:
@@ -1264,6 +1439,7 @@ def _taraflar_db_den_olustur(dosya):
             "rol": dt.get_rol_display(),
             "adi": str(dt.taraf),
             "vekil": f"[{vekiller}]" if vekiller else "",
+            "uyaptaYok": dt.uyapta_gorulmedi is not None,
         })
     return sonuc
 
@@ -1289,6 +1465,26 @@ def _taraflar_kesinlesme_bilgisi_ekle(dosya, taraflar):
         dt = borclular.get(tr_lower(t.get("adi", "")))
         t["kesinlesmeDurumu"] = kesinlesme_metni(dt) if dt else ""
         t["tebligatDurumu"] = tebligat_metni(dt) if dt else ""
+    # 2026-11-14: UYAP'ın listesinde artık olmayan (işaretli) bağlar canlı
+    # yanıtta hiç yok — kullanıcı görsün diye uyarı işaretiyle listeye eklenir.
+    try:
+        mevcut = {(tr_lower(t.get("rol", "")), tr_lower(t.get("adi", ""))) for t in taraflar}
+        for dt in (dosya.taraf_baglari.select_related("taraf")
+                   .filter(uyapta_gorulmedi__isnull=False)):
+            anahtar = (tr_lower(dt.get_rol_display()), tr_lower(str(dt.taraf)))
+            if anahtar in mevcut:
+                for t in taraflar:
+                    if (tr_lower(t.get("rol", "")), tr_lower(t.get("adi", ""))) == anahtar:
+                        t["uyaptaYok"] = True
+                continue
+            taraflar.append({
+                "rol": dt.get_rol_display(), "adi": str(dt.taraf), "vekil": "",
+                "kesinlesmeDurumu": kesinlesme_metni(dt) if dt.rol == "borclu" else "",
+                "tebligatDurumu": tebligat_metni(dt) if dt.rol == "borclu" else "",
+                "uyaptaYok": True,
+            })
+    except Exception:
+        pass
     return taraflar
 
 
@@ -1526,14 +1722,14 @@ def dosya_detay_goster_ve_kaydet(rec, log_fn=None, istek_sarici=None):
     # satırlarını da (ilk kez) ekliyor — DosyaTaraf.objects.update_or_create
     # hiçbir zaman silme yapmadığından en kötü ihtimalde kozmetik bir
     # yinelenen satır oluşur, mevcut kanıtlı veri kaybolmaz.
-    taraflar = dosya_taraf_getir(dosya_id, log, istek_sarici=istek_sarici) if dosya_id else []
+    try:
+        taraflar = taraflari_tazele(dosya, dosya_id, log, istek_sarici)
+    except Exception as e:
+        taraflar = []
+        log(f"⚠️ Taraf bilgileri kaydedilemedi: {e}")
     if taraflar:
         log(f"… {len(taraflar)} taraf canlı olarak alındı: "
             + ", ".join(f"{t.get('rol', '')}:{t.get('adi', '')}" for t in taraflar))
-        try:
-            dosya_taraf_kaydet(dosya, taraflar, log)
-        except Exception as e:
-            log(f"⚠️ Taraf bilgileri kaydedilemedi: {e}")
     elif dosya.taraf_baglari.exists():
         log("⚠️ Canlı taraf bilgisi alınamadı (boş yanıt) — yerel veritabanındaki önceki taraflar gösteriliyor.")
         taraflar = _taraflar_db_den_olustur(dosya)
@@ -2033,6 +2229,7 @@ def tebligat_barkod_gecmisi_listele(limit=TEBLIGAT_BARKOD_LIMIT, dosya_id=None,
                 # Borçlu başına listeleme (2026-09-24): tebligatın bağlı olduğu
                 # borçlu (DosyaTaraf.pk) + açıklamadaki muhatap metni.
                 "borcluId": t.borclu_id, "muhatap": tebligat_muhatabi(t.evrak_aciklama)[0],
+                "tbId": t.pk,
             })
         return out
     except Exception as e:
@@ -2040,6 +2237,32 @@ def tebligat_barkod_gecmisi_listele(limit=TEBLIGAT_BARKOD_LIMIT, dosya_id=None,
         # sorusunun cevabı hiç görünmüyordu.
         if log_fn:
             log_fn(f"⚠️ Barkod/tebligat kayıtları okunamadı: {e}")
+        return []
+
+
+def ptt_hareketleri_listele(tebligat_id):
+    """Bir tebligatın PTT hareketleri, eskiden yeniye: [{zaman, aciklama, yer, islemDetay}]."""
+    _django_hazirla()
+    from icra_models.models import PttHareket
+    return [{"zaman": h.zaman.strftime("%d.%m.%Y %H:%M") if h.zaman else "",
+             "aciklama": h.aciklama, "yer": h.yer, "islemDetay": h.islem_detay}
+            for h in PttHareket.objects.filter(tebligat_id=tebligat_id).order_by("zaman", "sira")]
+
+
+def durum_olaylari_listele(rec, log_fn=None):
+    """Dosyanın durum geçmişi, yeniden eskiye (dosya kartı "Geçmiş" sekmesi)."""
+    try:
+        dosya = _dosya_rec_ten_bul(rec, log_fn or (lambda m: None))
+        if dosya is None:
+            return []
+        return [{"zaman": o.zaman.strftime("%d.%m.%Y %H:%M") if o.zaman else "",
+                 "tur": o.get_tur_display(), "taraf": o.taraf_adi, "eski": o.eski, "yeni": o.yeni,
+                 "olayTarihi": o.olay_tarihi.strftime("%d.%m.%Y") if o.olay_tarihi else "",
+                 "kaynak": o.get_kaynak_display(), "aciklama": o.aciklama}
+                for o in dosya.durum_olaylari.all()[:500]]
+    except Exception as e:
+        if log_fn:
+            log_fn(f"⚠️ Durum geçmişi okunamadı: {e}")
         return []
 
 
@@ -2181,6 +2404,20 @@ def _teblig_tarihini_coz(deger):
         return None
 
 
+def _son_islem_gunu(k):
+    """TebligatBarkod'un son işlem (tebliğ/iade) günü — 2026-11-14'ten beri
+    tarih alanından (`son_islem_zamani`); eski/türetilmemiş kayıtta ham metinden."""
+    z = getattr(k, "son_islem_zamani", None)
+    if z:
+        return z.date() if isinstance(z, datetime.datetime) else z
+    return _teblig_tarihini_coz(k.son_islem_tarihi)
+
+
+def _evrak_gunu(k):
+    g = getattr(k, "evrak_gunu", None)
+    return g or _teblig_tarihini_coz(k.evrak_tarihi)
+
+
 # E-tebligatta tebliğ tarihi = evrak tarihi (`son_islem_tarihi`'nde o yazılır);
 # 5 günlük okuma süresi yalnız SÜRENİN BAŞLANGICINI öteler (kullanıcı, 2026-10-02:
 # "süre beş gün sonra başlıyor ama tebliğ tarihini 5 gün sonrasına yazman doğru değil").
@@ -2190,7 +2427,7 @@ E_TEBLIG_OKUMA_SURESI_GUN = 5
 def sure_baslangici(barkod_kaydi):
     """Kesinleşme süresinin hesaplandığı tebliğ günü: fizikide tebliğ tarihi,
     e-tebligatta tebliğ (evrak) tarihi + 5 gün. Tarih yoksa None."""
-    t = _teblig_tarihini_coz(barkod_kaydi.son_islem_tarihi)
+    t = _son_islem_gunu(barkod_kaydi)
     if t and barkod_kaydi.elektronik_tebligat:
         t += datetime.timedelta(days=E_TEBLIG_OKUMA_SURESI_GUN)
     return t
@@ -2223,7 +2460,8 @@ def _mazbatasi_dosyaya_dondu_mu(k):
                                             k.tebligat_mazbatasi_aciklama))
 
 
-def _borclu_kesinlesme_hesapla(dt, odeme_emirleri, tatiller, bugun, DosyaTarafCls, kc, durdurma=None):
+def _borclu_kesinlesme_hesapla(dt, odeme_emirleri, tatiller, bugun, DosyaTarafCls, kc, durdurma=None,
+                               sure_gun=7):
     """Tek bir borçlu `DosyaTaraf` satırı için kesinlesme_durumu hesaplar.
     2026-09-28 kullanıcı kuralı: ödeme emri gönderilmiş borçlu, Kesinleşti
     olana dek KESİNLEŞME BEKLİYOR'dur — dağıtımda, teslim edildi ama mazbata
@@ -2245,6 +2483,10 @@ def _borclu_kesinlesme_hesapla(dt, odeme_emirleri, tatiller, bugun, DosyaTarafCl
         return durdurma, None
     if not odeme_emirleri:
         return "", None
+    # 2026-11-14: itiraz süresi takip türünün kuralından (KesinlesmeKurali);
+    # kural "hesaplanmaz" diyorsa (gün boş) kesinleşme yazılmaz.
+    if sure_gun is None:
+        return "", None
     mazbatali_tarih = teblig_tarihi = None
     for k in odeme_emirleri:
         if not _tebligat_gerceklesti_mi(k) or _mazbata_sonucu(k.evrak_aciklama) == "edilemedi":
@@ -2257,12 +2499,12 @@ def _borclu_kesinlesme_hesapla(dt, odeme_emirleri, tatiller, bugun, DosyaTarafCl
         if _mazbatasi_dosyaya_dondu_mu(k) and (mazbatali_tarih is None or t > mazbatali_tarih):
             mazbatali_tarih = t
     if mazbatali_tarih is not None:
-        gun = kc.orn7_ilamsiz_genel_haciz_kesinlesme_hesapla(mazbatali_tarih, tatiller)["kesinlesebilir_tarihi"]
+        gun = kc.kesinlesme_hesapla(mazbatali_tarih, sure_gun, tatiller)["kesinlesebilir_tarihi"]
         if bugun >= gun:
             return K.KESINLESTI, gun
     if teblig_tarihi is not None:
         return (K.KESINLESME_BEKLIYOR,
-                kc.orn7_ilamsiz_genel_haciz_kesinlesme_hesapla(teblig_tarihi, tatiller)["kesinlesebilir_tarihi"])
+                kc.kesinlesme_hesapla(teblig_tarihi, sure_gun, tatiller)["kesinlesebilir_tarihi"])
     return K.KESINLESME_BEKLIYOR, None
 
 
@@ -2295,18 +2537,17 @@ def _borclu_tebligat_hesapla(odeme_emirleri, TebligatDurumu):
     en_yeni = en_yeni_k = None
     for k in odeme_emirleri:
         if _tebligat_gerceklesti_mi(k):
-            t = _teblig_tarihini_coz(k.son_islem_tarihi)
+            t = _son_islem_gunu(k)
             if t and (en_yeni is None or t > en_yeni):
                 en_yeni, en_yeni_k = t, k
     if en_yeni:
         return TebligatDurumu.TEBLIG_EDILDI, en_yeni, _teslim_sekli(en_yeni_k)
     if any(_mazbata_sonucu(k.evrak_aciklama) == "edildi" for k in odeme_emirleri):
         return TebligatDurumu.TEBLIG_EDILDI, None, ""
-    for k in sorted(odeme_emirleri, key=lambda k: _evrak_tarihi_siralama_anahtari(k.evrak_tarihi),
-                    reverse=True):
+    for k in sorted(odeme_emirleri, key=lambda k: _evrak_gunu(k) or datetime.date.min, reverse=True):
         ptt = tr_lower(k.ptt_durumu or "")
         if "iade" in ptt or _mazbata_sonucu(k.evrak_aciklama) == "edilemedi":
-            return TebligatDurumu.IADE, _teblig_tarihini_coz(k.son_islem_tarihi), _teslim_sekli(k)
+            return TebligatDurumu.IADE, _son_islem_gunu(k), _teslim_sekli(k)
         if k.elektronik_tebligat or (ptt and "kayit yok" not in ptt and "kayıt yok" not in ptt):
             return TebligatDurumu.DAGITIMDA, None, ""
     return "", None, ""
@@ -2668,7 +2909,8 @@ def kesinlesme_durumlarini_guncelle(dosya_obj=None, log_fn=None):
     try:
         _django_hazirla()
         from django.db.models import Q
-        from icra_models.models import DosyaTaraf, TebligatBarkod, ResmiTatil
+        from icra_models.models import DosyaTaraf, TebligatBarkod, ResmiTatil, KesinlesmeKurali
+        from icra_models.models import kesinlesme_kurali_sec, DurumOlayi, durum_olayi_yaz
         import kesinlesme_core as kc
     except Exception as e:
         log(f"⚠️ Kesinleşme hesabı için DB/modül hazırlanamadı: {e}")
@@ -2678,8 +2920,11 @@ def kesinlesme_durumlarini_guncelle(dosya_obj=None, log_fn=None):
 
     tatiller = set(ResmiTatil.objects.values_list("tarih", flat=True))
     bugun = datetime.date.today()
+    kurallar = list(KesinlesmeKurali.objects.filter(aktif=True))
+    kuralsiz = set()
+    olaylar = []
 
-    qs = DosyaTaraf.objects.filter(rol="borclu").select_related("dosya")
+    qs = DosyaTaraf.objects.filter(rol="borclu").select_related("dosya", "dosya__icra_detay")
     if dosya_obj is not None:
         qs = qs.filter(dosya=dosya_obj)
     else:
@@ -2708,27 +2953,102 @@ def kesinlesme_durumlarini_guncelle(dosya_obj=None, log_fn=None):
                     if dt.dosya.yargi_turu == 2 else None)
         if durdurma == "durd_tanimsiz":
             tanimsiz.add(dt.dosya.durum)
+        detay = getattr(dt.dosya, "icra_detay", None) if hasattr(dt.dosya, "icra_detay") else None
+        kod = ((detay.takibin_turu, detay.takibin_yolu, detay.takibin_sekli) if detay else ("", "", ""))
+        kural = kesinlesme_kurali_sec(kurallar, *kod)
+        if kural is None:
+            kuralsiz.add("/".join(x or "?" for x in kod))
+        sure_gun = kural.itiraz_suresi_gun if kural else None
         yeni, yeni_tarih = _borclu_kesinlesme_hesapla(dt, odeme_emirleri.get(dt.pk, []), tatiller, bugun,
-                                                      DosyaTaraf, kc, durdurma)
+                                                      DosyaTaraf, kc, durdurma, sure_gun)
         if dt.kesinlesme_durumu in elle and not dt.itiraz_edildi_mi:
             yeni, yeni_tarih = dt.kesinlesme_durumu, dt.kesinlesme_tarihi
         if (yeni, yeni_tarih) != (dt.kesinlesme_durumu, dt.kesinlesme_tarihi):
+            eski_metin = kesinlesme_metni(dt)
             dt.kesinlesme_durumu, dt.kesinlesme_tarihi = yeni, yeni_tarih
             alanlar += ["kesinlesme_durumu", "kesinlesme_tarihi"]
+            olaylar.append((dt, DurumOlayi.Tur.KESINLESME, eski_metin, kesinlesme_metni(dt), yeni_tarih))
         teb, teb_tarih, teb_sekli = _borclu_tebligat_hesapla(odeme_emirleri.get(dt.pk, []),
                                                              DosyaTaraf.TebligatDurumu)
         if (teb, teb_tarih, teb_sekli) != (dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli):
+            eski_metin = tebligat_metni(dt)
             dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli = teb, teb_tarih, teb_sekli
             alanlar += ["tebligat_durumu", "tebligat_durum_tarihi", "tebligat_sekli"]
+            olaylar.append((dt, DurumOlayi.Tur.TEBLIGAT, eski_metin, tebligat_metni(dt), teb_tarih))
         if alanlar:
             dt.save(update_fields=alanlar)
             guncellenen += 1
+    for dt_o, tur_o, eski_o, yeni_o, tarih_o in olaylar:
+        durum_olayi_yaz(dt_o.dosya, tur_o, eski_o, yeni_o, dosya_taraf=dt_o, olay_tarihi=tarih_o)
+    if kuralsiz:
+        log("⚠️ Kesinleşme kuralı tanımlı olmayan takip türü (kesinleşme hesaplanmadı; "
+            "Ayarlar > Kesinleşme Süreleri): " + ", ".join(sorted(kuralsiz)))
     if tanimsiz:
         log("⚠️ Tanımsız durdurma nedeni (kesinleşme 'Durdurulmuş: Tanımsız Neden' yazıldı, "
             "DURDURMA_NEDENLERI'ne eklenmeli): " + "; ".join(sorted(tanimsiz)))
     if guncellenen:
         log(f"… kesinleşme/tebliğ durumu güncellendi: {guncellenen} borçlu satırı.")
     return guncellenen
+
+
+# ── Kesinleşme kuralları (2026-11-14 kullanıcı kararı: süre takip türüne göre) ──
+def kesinlesme_kurallari_listele():
+    """[{id, takibin_turu, takibin_yolu, takibin_sekli, ad, gun, aktif, aciklama}]"""
+    _django_hazirla()
+    from icra_models.models import KesinlesmeKurali
+    return [{"id": k.pk, "takibin_turu": k.takibin_turu, "takibin_yolu": k.takibin_yolu,
+             "takibin_sekli": k.takibin_sekli, "ad": k.ad, "gun": k.itiraz_suresi_gun,
+             "aktif": k.aktif, "aciklama": k.aciklama}
+            for k in KesinlesmeKurali.objects.all()]
+
+
+def takip_turu_dagilimi():
+    """Veritabanındaki icra dosyalarının takip kodu kümeleri — kural girerken
+    hangi kodun kaç dosyada olduğunu görmek için. Döner: [{turu, yolu, sekli,
+    adet, ornek}] ve takip türü hiç okunmamış (IcraTakipDetay yok) dosya sayısı."""
+    _django_hazirla()
+    from django.db.models import Count, Min
+    from icra_models.models import Dosya, IcraTakipDetay
+    satirlar = []
+    for r in (IcraTakipDetay.objects.filter(dosya__yargi_turu=YARGI_TURU_ICRA)
+              .values("takibin_turu", "takibin_yolu", "takibin_sekli")
+              .annotate(adet=Count("id"), ornek=Min("dosya_id")).order_by("-adet")):
+        ornek = Dosya.objects.filter(pk=r["ornek"]).select_related("birim").first()
+        satirlar.append({"turu": r["takibin_turu"], "yolu": r["takibin_yolu"],
+                         "sekli": r["takibin_sekli"], "adet": r["adet"],
+                         "ornek": f"{ornek.birim.ad} {ornek.dosya_no}" if ornek else ""})
+    bilinmeyen = Dosya.objects.icra().filter(icra_detay__isnull=True).count()
+    return satirlar, bilinmeyen
+
+
+def kesinlesme_kurali_kaydet(kural_id, turu, yolu, sekli, ad, gun, aktif=True, aciklama=""):
+    """Ekler ya da günceller; `gun` None = o türde kesinleşme hesaplanmaz.
+    Aynı kod kümesi için ikinci kural açılmaz (ValueError)."""
+    _django_hazirla()
+    from icra_models.models import KesinlesmeKurali
+    turu, yolu, sekli = (str(x or "").strip() for x in (turu, yolu, sekli))
+    if gun not in (None, ""):
+        gun = int(gun)
+        if not 0 < gun <= 365:
+            raise ValueError("Süre 1–365 gün arasında olmalı.")
+    else:
+        gun = None
+    cakisan = KesinlesmeKurali.objects.filter(takibin_turu=turu, takibin_yolu=yolu, takibin_sekli=sekli)
+    if kural_id:
+        cakisan = cakisan.exclude(pk=kural_id)
+    if cakisan.exists():
+        raise ValueError("Bu takip kodu için zaten bir kural var; onu düzenleyin.")
+    k = KesinlesmeKurali.objects.get(pk=kural_id) if kural_id else KesinlesmeKurali()
+    k.takibin_turu, k.takibin_yolu, k.takibin_sekli = turu, yolu, sekli
+    k.ad, k.itiraz_suresi_gun, k.aktif, k.aciklama = (ad or "").strip(), gun, bool(aktif), aciklama or ""
+    k.save()
+    return k.pk
+
+
+def kesinlesme_kurali_sil(kural_id):
+    _django_hazirla()
+    from icra_models.models import KesinlesmeKurali
+    KesinlesmeKurali.objects.filter(pk=kural_id).delete()
 
 
 # ── Arka plan zamanlayıcı — hem Tkinter hem web SÜREÇ BAŞINA bir kez çağırır ──

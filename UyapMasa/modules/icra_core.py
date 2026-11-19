@@ -726,48 +726,104 @@ def parse_taraf_from_uyap(b):
         }
 
 
-def save_taraf(info, Taraf):
-    tckn = info.get("tckn")
-    mersis_no = info.get("mersis_no")
-    vergi_no = info.get("vergi_no")
-    unvan = info.get("unvan")
-    ad = info.get("ad")
-    soyad = info.get("soyad")
-    tur = info.get("tur")
-    
-    defaults = {
-        "tur": tur,
-        "ad": ad or "",
-        "soyad": soyad or "",
-        "unvan": unvan or "",
-        "vergi_no": vergi_no or "",
-        "mersis_no": mersis_no,
-    }
-    
-    taraf = None
-    if tckn:
-        taraf = Taraf.objects.filter(tckn=tckn).first()
-    elif mersis_no:
-        taraf = Taraf.objects.filter(mersis_no=mersis_no).first()
-    
-    if taraf:
-        for k, v in defaults.items():
-            setattr(taraf, k, v)
-        taraf.save()
-    else:
-        if tur == "tuzel" and unvan:
-            taraf = Taraf.objects.filter(tur="tuzel", unvan=unvan).first()
-        elif tur == "gercek" and ad and soyad:
-            taraf = Taraf.objects.filter(tur="gercek", ad=ad, soyad=soyad).first()
-            
-        if taraf:
-            for k, v in defaults.items():
-                setattr(taraf, k, v)
-            taraf.save()
-        else:
-            taraf = Taraf.objects.create(**defaults)
-            
+def _tam_ad(ad, soyad):
+    return " ".join(f"{ad or ''} {soyad or ''}".split())
+
+
+def _ad_anahtari_taraf(tur, ad, soyad, unvan):
+    """Karşılaştırma anahtarı: Türkçe-duyarsız, boşluk/noktalama farkı yok."""
+    metin = unvan if tur == "tuzel" else _tam_ad(ad, soyad)
+    return " ".join(_re.sub(r"[^0-9a-z]+", " ", tr_lower(metin or "")).split())
+
+
+def _kimlik_temizle(deger, uzunluklar):
+    """Yalnız rakam; beklenen uzunlukta değilse (ör. UYAP'ın '***********'
+    maskesi) None — maskeli/eksik kimlik ASLA kimlik sayılmaz."""
+    d = "".join(c for c in str(deger or "") if c.isdigit())
+    return d if len(d) in uzunluklar else None
+
+
+def _kimlik_celisir(taraf, tckn, mersis_no, vergi_no):
+    return bool((tckn and taraf.tckn and taraf.tckn != tckn)
+                or (mersis_no and taraf.mersis_no and taraf.mersis_no != mersis_no)
+                or (vergi_no and taraf.vergi_no and taraf.vergi_no != vergi_no))
+
+
+def _taraf_guncelle(taraf, alanlar):
+    """Yalnız DOLU gelen alanları yazar — dolu bir kimlik/ad sonraki kimliksiz
+    senkronla ASLA silinmez (docs/BORCLU_KARTI_PLANI.md §3.1 "boş ezmez")."""
+    degisen = []
+    for alan, deger in alanlar.items():
+        if deger in (None, ""):
+            continue
+        if getattr(taraf, alan) != deger:
+            setattr(taraf, alan, deger)
+            degisen.append(alan)
+    if degisen:
+        taraf.save(update_fields=degisen + ["guncelleme"])
     return taraf
+
+
+def save_taraf(info, Taraf, adaylar=None):
+    """Tarafı bulur/oluşturur ve döner (2026-11-14 yeniden yazıldı).
+
+    Sıra: (1) TCKN / MERSİS / vergi no ile birebir kayıt; (2) `adaylar` (aynı
+    dosyanın zaten bağlı tarafları) içinde ad eşleşmesi — dosya içinde ad
+    tekildir, böylece kimliksiz taraf_bilgileri yanıtı TCKN'li borçluya düşer;
+    (3) genel ad eşleşmesi YALNIZ tek ve kimliği çelişmeyen kayıtla. Kimlikli
+    gelen kişi, adı tutan TEK kimliksiz kayda kimliğini ekler (eski kod TCKN'yi
+    yalnız yeni kayıtta yazıyordu; ad eşleşmesiyle bulunan kayıt hiç TCKN
+    almıyordu, farklı TCKN'li adaşlar da birbirine yazılıyordu)."""
+    from django.db.models import Value
+    from django.db.models.functions import Concat, Trim
+
+    tur = info.get("tur") or "gercek"
+    tckn = _kimlik_temizle(info.get("tckn"), (11,)) if tur == "gercek" else None
+    mersis_no = _kimlik_temizle(info.get("mersis_no"), (16,)) if tur == "tuzel" else None
+    vergi_no = _kimlik_temizle(info.get("vergi_no"), (10, 11)) if tur == "tuzel" else None
+    ad, soyad, unvan = info.get("ad") or "", info.get("soyad") or "", info.get("unvan") or ""
+    alanlar = {"tur": tur, "ad": ad, "soyad": soyad, "unvan": unvan,
+               "tckn": tckn, "mersis_no": mersis_no, "vergi_no": vergi_no}
+
+    # (1) kimlikle
+    for alan, deger in (("tckn", tckn), ("mersis_no", mersis_no), ("vergi_no", vergi_no)):
+        if deger:
+            taraf = Taraf.objects.filter(**{alan: deger}).first()
+            if taraf:
+                return _taraf_guncelle(taraf, alanlar)
+
+    anahtar = _ad_anahtari_taraf(tur, ad, soyad, unvan)
+
+    # (2) aynı dosyanın tarafları
+    if adaylar is not None and anahtar:
+        es = [t for t in adaylar
+              if t.tur == tur and _ad_anahtari_taraf(t.tur, t.ad, t.soyad, t.unvan) == anahtar
+              and not _kimlik_celisir(t, tckn, mersis_no, vergi_no)]
+        if len(es) == 1:
+            return _taraf_guncelle(es[0], alanlar)
+
+    # (3) genel ad eşleşmesi
+    if anahtar:
+        if tur == "tuzel":
+            qs = Taraf.objects.filter(tur="tuzel", unvan=unvan) if unvan else Taraf.objects.none()
+        else:
+            qs = (Taraf.objects.filter(tur="gercek")
+                  .annotate(_tam=Trim(Concat("ad", Value(" "), "soyad")))
+                  .filter(_tam=_tam_ad(ad, soyad)))
+        kimliksiz = qs.filter(tckn__isnull=True, mersis_no__isnull=True, vergi_no="")
+        # Kimlikli gelen kişi, başka dosyalarda paylaşılan kimliksiz isim
+        # kaydına BAĞLANMAZ (o kayıt başka bir adaşı temsil ediyor olabilir) —
+        # kendi kaydı açılır. Kimliğin dosya içindeki kimliksiz bağa aktarılması
+        # dosya_core._dosya_tarafi_yaz'dadır.
+        if not (tckn or mersis_no or vergi_no):
+            adaylar_g = list(qs[:2])
+            if len(adaylar_g) > 1:                 # adaşlar var: tek kimliksiz kayıt varsa o
+                adaylar_g = list(kimliksiz[:2])
+            if len(adaylar_g) == 1:
+                return _taraf_guncelle(adaylar_g[0], alanlar)
+
+    return Taraf.objects.create(**{k: (v if v is not None or k in ("tckn", "mersis_no") else "")
+                                   for k, v in alanlar.items()})
 
 
 class IcraSorgu:
@@ -974,13 +1030,10 @@ class IcraSorgu:
                     # DB'ye borçlu bağlarını kaydet (künye yukarıda zaten yazıldı).
                     if dosya_obj is not None:
                         try:
-                            with django.db.transaction.atomic():
-                                for idx, item in enumerate(debt_veri if isinstance(debt_veri, list) else []):
-                                    info = parse_taraf_from_uyap(item)
-                                    taraf_obj = save_taraf(info, Taraf)
-                                    DosyaTaraf.objects.update_or_create(
-                                        dosya=dosya_obj, taraf=taraf_obj, rol="borclu",
-                                        defaults={"sira": idx})
+                            # TCKN'li borçlu listesi: dosyadaki kimliksiz borçluya
+                            # kimlik eklenir, listede olmayan borçlu işaretlenir.
+                            import dosya_core as _dc
+                            _dc.borclu_kimliklerini_kaydet(dosya_obj, debt_veri, self.log_fn)
                         except Exception as db_save_err:
                             self.log_fn(f"⚠️ Veritabanına kaydetme hatası: {db_save_err}")
                         alacaklilar = self._alacaklilari_kaydet(dosya_obj, dosya_id)
@@ -1078,7 +1131,8 @@ class IcraSorgu:
             borclu_disi = [t for t in (ham or []) if isinstance(t, dict)
                            and tr_lower(t.get("rol", "")) != "borclu"]
             if borclu_disi:
-                _dc.dosya_taraf_kaydet(dosya_obj, borclu_disi, self.log_fn)
+                # Liste borçlu DIŞI roller için tam — borçlular kaybolan kontrolüne girmez.
+                _dc.dosya_taraf_kaydet(dosya_obj, borclu_disi, self.log_fn, haric_roller=["borclu"])
             return [str(t.get("adi", "") or "").strip() for t in borclu_disi
                     if tr_lower(t.get("rol", "")) == "alacakli" and str(t.get("adi", "") or "").strip()]
         except OturumHatasi:

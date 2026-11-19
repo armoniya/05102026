@@ -1440,7 +1440,7 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
     enc.finish().unwrap_or_else(|_| data.to_vec())
 }
 
-fn decode_png_rgb(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+pub(crate) fn decode_png_rgb(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if bytes.len() < 33 || !bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
         return None;
     }

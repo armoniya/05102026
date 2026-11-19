@@ -24,7 +24,8 @@ use crate::uyap_proxy::{self, _looks_like_login_wall, UYAP_BASE};
 pub const JOBS_PREFIX: &str = "/__uyap_agent__/jobs";
 pub const SIGN_UDF_PATH: &str = "/__uyap_agent__/sign_udf";
 pub const TUM_EVRAK_PREFIX: &str = "/__uyap_agent__/tum_evrak";
-pub const GEREKCELI_PREFIX: &str = "/__uyap_agent__/gerekceli_karar";
+pub const GEREKCELI_PREFIX: &str = "/__uyap_agent__/gerekceli";
+pub const ICRA_GUNCELLE_PREFIX: &str = crate::icra_guncelle::ON_EK;
 pub const PTT_SORGU_PATH: &str = "/__uyap_agent__/ptt_sorgu";
 
 pub const QUEUED: &str = "queued";
@@ -649,8 +650,11 @@ pub async fn handle_control(
         };
         let pin = gw.login_args.pin.clone().unwrap_or_default();
         let cert_id = gw.cert_id.lock().clone();
+        // Sayfa dosya adını `name=` ile yollar (Python sürümü de onu okuyordu); okunmazsa Word/PDF
+        // UDF sanılıp "Geçersiz UDF" ile reddedilir.
         let filename = qp
-            .get("filename")
+            .get("name")
+            .or_else(|| qp.get("filename"))
             .or_else(|| qp.get("ext"))
             .cloned()
             .unwrap_or_else(|| ".udf".to_string());
@@ -688,12 +692,20 @@ pub async fn handle_control(
         return crate::evrak_toplu::handle_http(&m, &clean, &qp, body).await;
     }
 
-    // 4) /__uyap_agent__/gerekceli_karar/...
+    // 4) /__uyap_agent__/gerekceli/... (panel ve Python sürümüyle aynı adres)
     if clean == GEREKCELI_PREFIX || clean.starts_with(&format!("{}/", GEREKCELI_PREFIX)) {
         if !toplu_is_acik() && m == "POST" {
             return json_resp(403, json!({"ok": false, "error": "Toplu işlem şu anda kapalı."}));
         }
         return crate::gerekceli_karar::handle_http(&m, &clean, &qp, body).await;
+    }
+
+    // 4b) /__uyap_agent__/icra_guncelle/... (icra dosyalarını UYAP'tan güncelleme)
+    if clean == ICRA_GUNCELLE_PREFIX || clean.starts_with(&format!("{}/", ICRA_GUNCELLE_PREFIX)) {
+        if !toplu_is_acik() && m == "POST" {
+            return json_resp(403, json!({"ok": false, "error": "Toplu işlem şu anda kapalı."}));
+        }
+        return crate::icra_guncelle::handle_http(&m, &clean, &qp, body).await;
     }
 
     // 5) /__uyap_agent__/jobs...
