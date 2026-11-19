@@ -1,14 +1,31 @@
 #!/bin/bash
 # Armonia ISO'sunu live-build ile derler. Once derle_uyap.sh calismis olmali.
-# WSL Debian icinde root ile:  wsl -d Debian -u root -- bash /mnt/c/.../armonia-linux/iso_derle.sh
+# Root ile:  wsl -d Debian -u root -- bash /mnt/c/.../armonia-linux/iso_derle.sh   (ya da: sudo bash .../iso_derle.sh)
 #   TEST=1 ... iso_derle.sh  -> test katmani da eklenir (kasa bicimlendirme, lynis), cikti armonia_test_kasa.iso
-# Cikti: C:\dev\armonia.iso   Claude, 2026-11-13 (14'te sertlestirme + kasa + Plymouth eklendi).
+# Cikti: ISO_DIZIN/armonia.iso  (varsayilan: /mnt/c/dev varsa orasi = C:\dev, yoksa /root/armonia-cikti)
+# Yollar betigin kendi yerinden bulunur; ortam degiskeniyle degistirilebilir:
+#   KAYNAK=<armonia-linux dizini>  UYGULAMA=<derle_uyap.sh ciktisi .../cokluuyap>  ISO_DIZIN=<ISO hedef dizini>  IS=<lb calisma dizini>
+# Imaj amd64'tur: x86_64 olmayan makinede (or. Raspberry Pi) durur; ZORLA=1 ile gecilir.
+# Claude, 2026-11-13 (14'te sertlestirme + kasa + Plymouth; 19.11 yollar tasinabilir yapildi).
 set -euo pipefail
-KAYNAK="/mnt/c/Users/WİN10/Desktop/UYAP/cokluuyap/armonia-linux"
-UYGULAMA=/home/utku/armonia-cikti/cokluuyap
-IS=/root/armonia-iso
+KAYNAK="${KAYNAK:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
+# derle_uyap.sh normal kullanicida calisir: sudo ile cagrildiysa onun evi, yoksa WSL'deki 'utku'
+DERLEYEN_EVI="$(getent passwd "${SUDO_USER:-utku}" | cut -d: -f6 || true)"
+UYGULAMA="${UYGULAMA:-${DERLEYEN_EVI:-/home/utku}/armonia-cikti/cokluuyap}"
+IS="${IS:-/root/armonia-iso}"
+if [ -z "${ISO_DIZIN:-}" ]; then
+  if [ -d /mnt/c/dev ]; then ISO_DIZIN=/mnt/c/dev; else ISO_DIZIN=/root/armonia-cikti; fi
+fi
+mkdir -p "$ISO_DIZIN"
 TEST="${TEST:-0}"
-[ -x "$UYGULAMA/uyap_app" ] || { echo "HATA: once derle_uyap.sh"; exit 1; }
+[ "$(id -u)" = "0" ] || { echo "HATA: root ile calistirin (live-build root ister)"; exit 1; }
+if [ "$(uname -m)" != "x86_64" ] && [ "${ZORLA:-0}" != "1" ]; then
+  echo "HATA: bu makine $(uname -m); Armonia imaji amd64 (e-imza paketi ve uyap_app amd64). ZORLA=1 ile gecilir."; exit 1
+fi
+[ -d "$KAYNAK/config" ] || { echo "HATA: armonia-linux kaynagi yok: $KAYNAK"; exit 1; }
+[ -x "$UYGULAMA/uyap_app" ] || { echo "HATA: once derle_uyap.sh (aranan: $UYGULAMA/uyap_app)"; exit 1; }
+ls "$KAYNAK"/config/packages.chroot/adalet-eimza-tray_*_amd64.deb >/dev/null 2>&1 \
+  || echo "UYARI: e-imza paketi yok (depoda tutulmuyor): config/packages.chroot/ altina indirin, bkz. docs/GUNCEL_DURUM_2026-11-19.md"
 mkdir -p "$IS"; cd "$IS"
 # Paket onbellegi Faz 0 test derlemesinden devralinir (indirme suresi kisalir)
 [ -d cache ] || { [ -d /root/iso-test/cache ] && cp -a /root/iso-test/cache . || true; }
@@ -69,10 +86,10 @@ fi
 RESOLV_SATIR="$(unsquashfs -cat binary/live/filesystem.squashfs etc/tmpfiles.d/armonia-resolv.conf 2>/dev/null || true)"
 grep -q '^L+ /etc/resolv.conf .*stub-resolv.conf' <<<"$RESOLV_SATIR" \
   || { echo "HATA: armonia-resolv.conf (DNS) imajda yok veya bozuk"; exit 4; }
-if [ "$TEST" = "1" ]; then HEDEF=/mnt/c/dev/armonia_test_kasa.iso; else HEDEF=/mnt/c/dev/armonia.iso; fi
-[ "${OLCUM:-0}" = "1" ] && HEDEF=/mnt/c/dev/armonia_olcum.iso
-[ "${OLCUM_TARAYICI:-0}" = "1" ] && HEDEF=/mnt/c/dev/armonia_tarayici_olcum.iso
-[ "${SERI:-0}" = "1" ] && HEDEF=/mnt/c/dev/armonia_seri.iso
+if [ "$TEST" = "1" ]; then HEDEF="$ISO_DIZIN/armonia_test_kasa.iso"; else HEDEF="$ISO_DIZIN/armonia.iso"; fi
+[ "${OLCUM:-0}" = "1" ] && HEDEF="$ISO_DIZIN/armonia_olcum.iso"
+[ "${OLCUM_TARAYICI:-0}" = "1" ] && HEDEF="$ISO_DIZIN/armonia_tarayici_olcum.iso"
+[ "${SERI:-0}" = "1" ] && HEDEF="$ISO_DIZIN/armonia_seri.iso"
 # WSL bellegi ~2,9 GB: /mnt/c'ye (9p) cp sayfa onbellegini sisirip "Cannot allocate memory" verdi (14 Kasim 12:08)
 sync; echo 3 > /proc/sys/vm/drop_caches || true
 rm -f "$HEDEF"

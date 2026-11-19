@@ -1,19 +1,30 @@
 #!/bin/bash
 # Armonia imajı için ÇokluUYAP'ı (uyap_app) Linux'ta derler ve imaj dizinini hazırlar.
-# WSL Debian içinde 'utku' kullanıcısıyla çalışır:  bash /mnt/c/.../armonia-linux/derle_uyap.sh
-# Çıktı: ~/armonia-cikti/cokluuyap/  (uyap_app + uyap_core/enjekte + webapp + SURUM)
-# Claude, 2026-11-13.
+# Normal kullanıcıyla çalışır (WSL Debian'da 'utku', Raspberry Pi'de kendi kullanıcın):
+#   bash <depo>/armonia-linux/derle_uyap.sh
+# Çıktı: $ARMONIA_CIKTI/cokluuyap/  (varsayılan ~/armonia-cikti; uyap_app + uyap_core/enjekte + webapp + SURUM)
+# Yollar betiğin kendi yerinden bulunur; ortam değişkeniyle değiştirilebilir:
+#   REPO=<depo kökü>  ARMONIA_CIKTI=<çıktı kökü>  RUYAP_KOPYA=<derleme kopyası, varsayılan ~/ruyap>
+# DİKKAT: ikili, derlendiği makinenin mimarisinde çıkar (Pi'de aarch64). Armonia imajı amd64'tür.
+# Claude, 2026-11-13 (19.11: yollar taşınabilir yapıldı).
 set -euo pipefail
 
-REPO="/mnt/c/Users/WİN10/Desktop/UYAP/cokluuyap"
-ANA="$REPO/Uyap Haricen Giriş"          # enjekte/ ve webapp/ için tek doğru kaynak
-SRC="$ANA/ruyap"
-DST="$HOME/ruyap"
-OUT="$HOME/armonia-cikti/cokluuyap"
-LOG="$HOME/armonia-cikti/derle.log"
+BETIK_DIZINI="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+REPO="${REPO:-$(cd "$BETIK_DIZINI/.." && pwd)}"
+ANA="$REPO/Uyap Haricen Giriş"
+SRC="$ANA/ruyap"   # ruyap kaynağı; arayüzün asıl kopyası da burada (ruyap/uyap_core/enjekte, ruyap/webapp).
+                   # Üst dizindeki uyap_core/enjekte ve webapp eski Python kopyalarıdır (14.11'den beri güncellenmiyor).
+CIKTI_KOK="${ARMONIA_CIKTI:-$HOME/armonia-cikti}"
+DST="${RUYAP_KOPYA:-$HOME/ruyap}"
+OUT="$CIKTI_KOK/cokluuyap"
+LOG="$CIKTI_KOK/derle.log"
 
-. "$HOME/.cargo/env"
-mkdir -p "$DST" "$(dirname "$OUT")"
+[ -d "$SRC" ] || { echo "HATA: ruyap kaynağı yok: $SRC (REPO=... ile depo kökünü verin)"; exit 1; }
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+command -v cargo >/dev/null || { echo "HATA: cargo bulunamadı (rustup kurun)"; exit 1; }
+MIMARI="$(uname -m)"
+[ "$MIMARI" = "x86_64" ] || echo "UYARI: bu makine $MIMARI; çıkan uyap_app Armonia (amd64) imajına konamaz."
+mkdir -p "$DST" "$CIKTI_KOK"
 
 # 1) Kaynağı birebir eşitle (target/ korunur → artımlı derleme). Çalışma önbelleği ve .exe kopyalanmaz.
 find "$DST" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
@@ -41,8 +52,8 @@ echo "cargo cikis: $RC  sure: $(( $(date +%s) - BAS )) sn"
 
 # 3) Bilinen açık taraması (RustSec). Derlemeyi durdurmaz, raporu kaydeder.
 if cargo audit --version >/dev/null 2>&1; then
-  cargo audit >"$HOME/armonia-cikti/audit.txt" 2>&1 && echo "cargo audit: temiz" \
-    || echo "cargo audit: BULGU VAR -> ~/armonia-cikti/audit.txt"
+  cargo audit >"$CIKTI_KOK/audit.txt" 2>&1 && echo "cargo audit: temiz" \
+    || echo "cargo audit: BULGU VAR -> $CIKTI_KOK/audit.txt"
 else
   echo "cargo audit kurulu degil (cargo install cargo-audit --locked)"
 fi
@@ -50,8 +61,8 @@ fi
 # 4) İmaj dizini: ikili + güncel arayüz dosyaları + sürüm kaydı
 rm -rf "$OUT"; mkdir -p "$OUT/uyap_core"
 install -m 0755 target/release/uyap_app "$OUT/uyap_app"
-cp -r "$ANA/uyap_core/enjekte" "$OUT/uyap_core/enjekte"
-cp -r "$ANA/webapp" "$OUT/webapp"
+cp -r "$SRC/uyap_core/enjekte" "$OUT/uyap_core/enjekte"
+cp -r "$SRC/webapp" "$OUT/webapp"
 cat >"$OUT/SURUM" <<EOT
 surum=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 git=$GIT_HEAD (degismis dosya: $GIT_KIRLI)

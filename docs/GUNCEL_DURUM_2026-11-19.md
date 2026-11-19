@@ -70,6 +70,11 @@
 - `ruyap` Pi'de **ARM için** derlenip birim testleri çalıştırılabilir:
   `cargo test --lib` (Linux'ta Türkçe yol sorunu yok).
   Windows'a özgü parçalar (tepsi, `paylas_win.rs`) Linux'ta derlenmez; `cfg` korumaları vardır.
+- **Derleme betikleri (19.11):** `derle_uyap.sh` ve `iso_derle.sh` yollarını kendi yerlerinden bulur. Yollar
+  `REPO`, `ARMONIA_CIKTI`, `KAYNAK`, `UYGULAMA`, `ISO_DIZIN` ortam değişkenleriyle değiştirilebilir. WSL'deki
+  varsayılanlar aynı kaldı. `iso_derle.sh` x86_64 olmayan makinede durur; `ZORLA=1` ile geçilir.
+  Ayrıca imaja artık asıl arayüz kopyası (`ruyap/uyap_core/enjekte`, `ruyap/webapp`) giriyor. Eskiden Python
+  kopyası giriyordu ve `icra.js`, `isler.js`, `paylas.js` eksikti.
 - **Depoda olmayan dosya:** `armonia-linux/config/packages.chroot/adalet-eimza-tray_1.0.17_amd64.deb` (70 MB,
   `.gitignore`'da). ISO derlenecekse resmî kaynaktan yeniden indirilir:
   `https://cdn.uyap.gov.tr/framework/public/adalet-eimza-tray_1.0.17_amd64.deb`
