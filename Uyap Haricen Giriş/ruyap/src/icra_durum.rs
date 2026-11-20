@@ -2,12 +2,13 @@
 //!
 //! Yalnız büro veritabanındaki kayıtlardan hesaplar; UYAP'a ya da PTT'ye istek atmaz. Kurallar
 //! örnek koddan (UyapMasa `kesinlesme_core` / `dosya_core`) taşınmıştır:
-//!   • Kesinleşme: tebliğ günü sayılmaz; itiraz süresi (takip türüne göre `kesinlesme_kurali`)
-//!     kadar gün sonra son gün gelir; son gün hafta sonu / tatile denk gelirse ilk iş gününe
+//!   • Kesinleşme: tebliğ günü sayılmaz; kesinleşme süresi (takip türüne göre `kesinlesme_kurali`;
+//!     itiraz ve ödeme sürelerinden uzun olanı) kadar gün sonra son gün gelir; son gün hafta sonu / tatile denk gelirse ilk iş gününe
 //!     kayar; kesinleşme son günden sonraki ilk iş günüdür. Aradaki tatiller süreyi durdurmaz.
 //!   • Kesinleşti için bir ödeme emrinde üçü birden gerekir: tebliğ gerçekleşmiş, mazbatası
 //!     dosyaya dönmüş ve süre dolmuş. Ödeme emri gönderilmiş borçlu o güne dek Kesinleşme
-//!     Bekliyor'dur. Elle itiraz ve dosyanın "Durdurulmuş : X" durumu bunlardan önce gelir.
+//!     Bekliyor'dur. Elle itiraz (yalnız itirazın takibi durdurduğu türlerde; ilamlı ve kambiyo haciz
+//!     yolunda durdurmaz) ve dosyanın "Durdurulmuş : X" durumu (her türde) bunlardan önce gelir.
 //!   • E-tebligatta tebliğ tarihi evrak tarihidir; süre 5 gün sonra başlar.
 //!   • Tebliğ durumu borçlu başına ve ödeme emrine göredir.
 //!   • Takip aşaması bunlardan türetilir: Takip Talebi → Ödeme Emri → Tebligat Oluşturuluyor →
@@ -130,7 +131,7 @@ impl OdemeEmri {
     }
 
     /// Bu tebligatın kendi mazbatası dosyaya dönmüş mü? E-tebligatta ayrı dönüş beklenmez.
-    /// Fizikide yalnız bu barkoda ait kanıt sayılır; barkodsuz "Var" işareti sayılmaz.
+    /// Fizikide yalnız bu barkoda ait kanıt sayılır (başka barkodun mazbatası sayılmaz).
     pub fn mazbatasi_dondu_mu(&self) -> bool {
         self.elektronik_tebligat
             || mazbata_sonucu(&self.evrak_aciklama) == MazbataSonucu::Edildi
@@ -190,16 +191,21 @@ pub fn talimat_mi(tur_kod: i32, tur: &str) -> bool {
 /// Talimat dosyasındaki tebligatın ve borçlunun kesinleşme yerine gösterilen açıklama.
 pub const TALIMAT_KESINLESME_YOK: &str = "Talimat dosyasında kesinleşme yok";
 
+/// Borçlunun kesinleşmesini başlatan tebligat türleri: ödeme / icra emri ve kira süresi bitiminde tahliye emri
+/// (Örnek 14; 20.11.2026).
+pub const KESINLESME_TEBLIGATLARI: [&str; 2] = ["Ödeme Emri", "Tahliye Emri"];
+
 pub fn tebligat_kesinlesmesi(tebligat_turu: &str) -> TebligatKesinlesmesi {
     match tebligat_turu {
-        "Ödeme Emri" => TebligatKesinlesmesi::Borclu,
+        "Ödeme Emri" | "Tahliye Emri" => TebligatKesinlesmesi::Borclu,
         "103 Davetiyesi" | "Kıymet Takdiri Raporu" => TebligatKesinlesmesi::SabitGun(SABIT_KESINLESME_GUN),
         _ => TebligatKesinlesmesi::Yok,
     }
 }
 
 /// Borçlunun kesinleşme durumu ve günü. Borçluya bağlı ödeme emri yoksa ya da takip türü için
-/// süre tanımlı değilse boş döner.
+/// süre tanımlı değilse boş döner. `itiraz_edildi_mi`, çağıran tarafta takip türünün kuralına göre
+/// süzülmüş olmalı: itirazın takibi durdurmadığı türde `false` geçilir (bkz. [`itiraz_etkili_mi`]).
 pub fn borclu_kesinlesme_hesapla(
     itiraz_edildi_mi: bool,
     odeme_emirleri: &[OdemeEmri],
@@ -233,6 +239,17 @@ pub fn borclu_kesinlesme_hesapla(
         }
     }
     (K::KesinlesmeBekliyor.kod().into(), teblig.map(|t| kesinlesme_hesapla(t, i64::from(sure), tatiller).kesinlesebilir_tarihi))
+}
+
+/// Elle girilen kesinleşme gününün durumu: gün gelmişse Kesinleşti, gelmemişse Kesinleşme Bekliyor.
+pub fn elle_kesinlesme(gun: NaiveDate, bugun: NaiveDate) -> &'static str {
+    if bugun >= gun { K::Kesinlesti.kod() } else { K::KesinlesmeBekliyor.kod() }
+}
+
+/// Elle işaretlenen itiraz kesinleşmeyi durdurur mu: kural "itiraz durdurmaz" diyorsa hayır (ilamlıda icra
+/// mahkemesine başvuru İİK 33, kambiyo haciz yolunda İİK 169). Kural yoksa eskisi gibi durdurur.
+pub fn itiraz_etkili_mi(itiraz_edildi_mi: bool, kural: Option<&veri::KesinlesmeKurali>) -> bool {
+    itiraz_edildi_mi && kural.map_or(true, |k| k.itiraz_durdurur)
 }
 
 /// Borçlunun ödeme emri tebligatlarından (tebliğ durumu, günü, teslim şekli / iade nedeni):
@@ -396,6 +413,48 @@ pub fn tebligat_borclularini_duzelt<C: GenericClient>(c: &mut C, dosya: Option<i
     Ok(degisen)
 }
 
+/// Tebligatların türünü sabit gruba, eski ham türü `zarf_icerigi`ne taşır ve muhatabı (ad, tür) yazar. Ham tür: sabit
+/// türlerde ve kullanıcının eklediği türlerde olmayan, memurun yazdığı içerik. Önce kullanıcının eşleştirmesi, sonra
+/// yazılış kuralları ([`teb::icerik_turu`]); ikisi de tanımazsa ham tür kalır (Tür eşleştir'de sorulur). UYAP'a gitmez.
+/// Döner: değişen kayıt sayısı.
+pub fn tebligat_alanlarini_duzelt<C: GenericClient>(c: &mut C, dosya: Option<i64>) -> Result<usize, String> {
+    let bilinen: std::collections::HashSet<String> = kayit::tur_kategorileri(c)?.into_iter().collect();
+    let eslesmeler = kayit::tur_eslesmeleri(c)?;
+    let satirlar = c
+        .query(
+            "SELECT id, tebligat_turu, zarf_icerigi, evrak_aciklama, muhatap_adi, muhatap_turu FROM tebligat_barkod
+              WHERE $1::bigint IS NULL OR dosya_id = $1",
+            &[&dosya],
+        )
+        .map_err(hata)?;
+    let mut degisen = 0;
+    for s in satirlar {
+        let id: i64 = s.get(0);
+        let (eski_tur, eski_zarf, aciklama, eski_ad, eski_mt): (String, String, String, String, String) =
+            (s.get(1), s.get(2), s.get(3), s.get(4), s.get(5));
+        let (mut tur, mut zarf) = (eski_tur.clone(), eski_zarf.clone());
+        if !tur.is_empty() && tur != teb::BELIRSIZ && !bilinen.contains(&tur) {
+            if zarf.is_empty() {
+                zarf = tur.clone();
+            }
+            if let Some(t) = teb::tur_eslestir(&tur, &eslesmeler).or_else(|| teb::icerik_turu(&tur).map(String::from)) {
+                tur = t;
+            }
+        }
+        let ad = veri::kirp(&teb::muhatap_adi(&aciklama), 255);
+        let mt = teb::muhatap_turu(&aciklama).kod().to_string();
+        if (&tur, &zarf, &ad, &mt) != (&eski_tur, &eski_zarf, &eski_ad, &eski_mt) {
+            c.execute(
+                "UPDATE tebligat_barkod SET tebligat_turu = $2, zarf_icerigi = $3, muhatap_adi = $4, muhatap_turu = $5 WHERE id = $1",
+                &[&id, &veri::kirp(&tur, 120), &veri::kirp(&zarf, 500), &ad, &mt],
+            )
+            .map_err(hata)?;
+            degisen += 1;
+        }
+    }
+    Ok(degisen)
+}
+
 /// Dosyalardaki ödeme emri evrakının günü (evrak listesinden): dosya → en yeni gün. Evrak türü
 /// adının UYAP'taki tam yazılışı canlı doğrulanmadı; "Ödeme Emri" / "Ödeme İcra Emri" kabul edilir.
 fn odeme_emri_evraklari<C: GenericClient>(c: &mut C, dosya: Option<i64>) -> Result<HashMap<i64, Option<NaiveDate>>, String> {
@@ -432,6 +491,10 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
     if duzeltilen > 0 {
         log(&format!("… tebligat → borçlu eşlemesi güncellendi: {duzeltilen} tebligat kaydı."));
     }
+    let gruplanan = tebligat_alanlarini_duzelt(&mut tx, dosya)?;
+    if gruplanan > 0 {
+        log(&format!("… tebligat türü / muhatap güncellendi: {gruplanan} tebligat kaydı."));
+    }
     let tatiller = veri::resmi_tatiller(&mut tx)?;
     let kurallar = veri::kesinlesme_kurallari(&mut tx)?;
     let evraklar = odeme_emri_evraklari(&mut tx, dosya)?;
@@ -443,9 +506,9 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
                     ptt_durumu, son_islem_tarihi, son_islem_zamani::date, teslim_sekli, tebligat_mazbatasi_var,
                     tebligat_mazbatasi_aciklama
                FROM tebligat_barkod
-              WHERE tebligat_turu = 'Ödeme Emri' AND borclu_id IS NOT NULL AND ($1::bigint IS NULL OR dosya_id = $1)
+              WHERE tebligat_turu = ANY($2) AND borclu_id IS NOT NULL AND ($1::bigint IS NULL OR dosya_id = $1)
               ORDER BY id",
-            &[&dosya],
+            &[&dosya, &KESINLESME_TEBLIGATLARI.to_vec()],
         )
         .map_err(hata)?
     {
@@ -474,7 +537,8 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
             "SELECT dt.id, dt.dosya_id, dt.itiraz_edildi_mi, dt.itiraz_tarihi, dt.kesinlesme_durumu, dt.kesinlesme_tarihi,
                     dt.tebligat_durumu, dt.tebligat_durum_tarihi, dt.tebligat_sekli, dt.takip_asamasi,
                     dt.takip_asamasi_tarihi, d.durum, d.yargi_turu,
-                    COALESCE(i.takibin_turu, ''), COALESCE(i.takibin_yolu, ''), COALESCE(i.takibin_sekli, ''), d.tur_kod, d.tur
+                    COALESCE(i.takibin_turu, ''), COALESCE(i.takibin_yolu, ''), COALESCE(i.takibin_sekli, ''), d.tur_kod, d.tur,
+                    dt.kesinlesme_elle_tarihi
                FROM dosya_taraf dt JOIN dosya d ON d.id = dt.dosya_id
                LEFT JOIN icra_takip_detay i ON i.dosya_id = d.id
               WHERE dt.rol = 'borclu'
@@ -483,6 +547,7 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
                          AND (EXISTS (SELECT 1 FROM tebligat_barkod tb WHERE tb.dosya_id = d.id)
                               OR d.durum LIKE '%Durdurulmuş%'
                               OR dt.kesinlesme_durumu = 'itiraz' OR dt.kesinlesme_durumu LIKE 'durd\\_%'
+                              OR dt.kesinlesme_elle_tarihi IS NOT NULL
                               OR (d.yargi_turu = 2 AND dt.takip_asamasi = ''))))
               ORDER BY dt.id",
             &[&dosya],
@@ -521,14 +586,21 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
             let ya = |x: &str| if x.is_empty() { "?".to_string() } else { x.to_string() };
             kuralsiz.insert(format!("{}/{}/{}", ya(&turu), ya(&yolu), ya(&sekli)));
         }
+        // Kural bu türde kesinleşme yok diyor (ör. Örnek 3, "Diğer"): talimat gibi kesinleşme kontrol işi açılmaz.
+        let kesinlesme_yok = talimat || kural.is_some_and(|k| k.kesinlesme_suresi_gun.is_none());
+        let itiraz_etkili = itiraz_etkili_mi(itiraz, kural);
         let mut yeni = eski.clone();
         (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) =
-            borclu_kesinlesme_hesapla(itiraz, oe, &tatiller, bugun, durdurma, kural.and_then(|k| k.itiraz_suresi_gun));
+            borclu_kesinlesme_hesapla(itiraz_etkili, oe, &tatiller, bugun, durdurma, kural.and_then(|k| k.kesinlesme_suresi_gun));
         if talimat {
             // Talimat dosyasında kesinleşme yok (elle girilen konkordato / vefat / vasi korunur).
             (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) = (String::new(), None);
         }
-        if elle.contains(&eski.kesinlesme_durumu.as_str()) && (!itiraz || talimat) {
+        // Kullanıcının girdiği kesinleşme günü hesabı ezer (etkili itiraz ve durdurma hariç).
+        if let Some(t) = s.get::<_, Option<NaiveDate>>(18).filter(|_| !talimat && !itiraz_etkili && durdurma.is_none()) {
+            (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) = (elle_kesinlesme(t, bugun).into(), Some(t));
+        }
+        if elle.contains(&eski.kesinlesme_durumu.as_str()) && (!itiraz_etkili || talimat) {
             (yeni.kesinlesme_durumu, yeni.kesinlesme_tarihi) = (eski.kesinlesme_durumu.clone(), eski.kesinlesme_tarihi);
         }
         (yeni.tebligat_durumu, yeni.tebligat_durum_tarihi, yeni.tebligat_sekli) = borclu_tebligat_hesapla(oe, bugun);
@@ -621,8 +693,8 @@ pub fn durumlari_guncelle<C: GenericClient>(c: &mut C, dosya: Option<i64>, bugun
         let mut gecisler: Vec<(&str, OlayTur, Option<NaiveDate>, Option<NaiveDate>)> = Vec::new();
         if let Some(o) = otomatik::tebligat_olayi(&eski.tebligat_durumu, &yeni.tebligat_durumu) {
             let son_gun = if o == "tebligat:teblig_edildi" { yeni.kesinlesme_tarihi } else { None };
-            // Talimatta "kesinleşme tarihi kontrol" işi anlamsız.
-            if !(talimat && o == "tebligat:teblig_edildi") {
+            // Talimatta ve kesinleşmesi olmayan takip türünde "kesinleşme tarihi kontrol" işi anlamsız.
+            if !(kesinlesme_yok && o == "tebligat:teblig_edildi") {
                 gecisler.push((o, OlayTur::Tebligat, yeni.tebligat_durum_tarihi, son_gun));
             }
         }
@@ -783,6 +855,32 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     hesapla(c, g(2026, 10, 14));
     let s = durum(c);
     assert_eq!((s.0.as_str(), s.1, s.2.as_str(), s.3), ("itiraz", Some(g(2026, 10, 8)), "itiraz", None));
+    // İtirazın takibi durdurmadığı türde (ilamlı, kambiyo haciz yolu) elle itiraz kesinleşmeyi durdurmaz
+    c.batch_execute("UPDATE kesinlesme_kurali SET itiraz_durdurur = false").unwrap();
+    hesapla(c, g(2026, 10, 14));
+    let s = durum(c);
+    assert_eq!((s.0.as_str(), s.2.as_str(), s.3), ("kesinlesti", "kesinlesti", Some(g(2026, 10, 13))));
+    c.batch_execute("UPDATE kesinlesme_kurali SET itiraz_durdurur = true").unwrap();
+    hesapla(c, g(2026, 10, 14));
+    assert_eq!(durum(c).2, "itiraz");
+    // Tahliye emri (Örnek 14) de borçlunun kesinleşmesini başlatır
+    c.execute("UPDATE dosya_taraf SET itiraz_edildi_mi = false WHERE id = $1", &[&bag]).unwrap();
+    teb_guncelle(c, "tebligat_turu = 'Tahliye Emri'");
+    hesapla(c, g(2026, 10, 14));
+    assert_eq!(durum(c).2, "kesinlesti");
+    teb_guncelle(c, "tebligat_turu = 'Maaş'");
+    hesapla(c, g(2026, 10, 14));
+    assert_eq!(durum(c).2, "", "maaş zarfı kesinleşme başlatmaz");
+    teb_guncelle(c, "tebligat_turu = 'Ödeme Emri'");
+    // Kural "kesinleşme yok" diyorsa (Örnek 3, Diğer) hesaplanmaz, süre uyarısı da verilmez
+    c.batch_execute("UPDATE kesinlesme_kurali SET itiraz_suresi_gun = NULL").unwrap();
+    let uyarilar = std::cell::RefCell::new(Vec::new());
+    durumlari_guncelle(c, Some(d), g(2026, 10, 14), &|m: &str| uyarilar.borrow_mut().push(m.to_string())).unwrap();
+    assert_eq!(durum(c).2, "");
+    assert!(!uyarilar.borrow().iter().any(|m| m.contains("Kesinleşme süresi")), "{uyarilar:?}");
+    c.batch_execute("UPDATE kesinlesme_kurali SET itiraz_suresi_gun = 7").unwrap();
+    hesapla(c, g(2026, 10, 14));
+    assert_eq!(durum(c).2, "kesinlesti");
     // İade
     c.execute("UPDATE dosya_taraf SET itiraz_edildi_mi = false WHERE id = $1", &[&bag]).unwrap();
     teb_guncelle(c, "ptt_durumu = 'İADE EDİLDİ', son_islem_tarihi = '06/10/2026', teslim_sekli = 'ADRESTE TANINMIYOR', evrak_aciklama = 'Normal Tebligat[BORÇLU AHMET YILMAZ] - Tebliğ Edilemedi'");
@@ -915,6 +1013,28 @@ mod tests {
     }
 
     #[test]
+    fn itiraz_etkisi() {
+        let kural = |durdurur| veri::KesinlesmeKurali {
+            id: 1,
+            takibin_turu: String::new(),
+            takibin_yolu: String::new(),
+            takibin_sekli: String::new(),
+            ad: String::new(),
+            kesinlesme_suresi_gun: Some(7),
+            aktif: true,
+            aciklama: String::new(),
+            itiraz_gun: None,
+            itiraz_durdurur: durdurur,
+            dayanak: String::new(),
+            elle_degisti: false,
+        };
+        assert!(itiraz_etkili_mi(true, Some(&kural(true))));
+        assert!(!itiraz_etkili_mi(true, Some(&kural(false))), "ilamlı / kambiyo: itiraz durdurmaz");
+        assert!(itiraz_etkili_mi(true, None), "kural yoksa eskisi gibi durdurur");
+        assert!(!itiraz_etkili_mi(false, None));
+    }
+
+    #[test]
     fn durdurma_kodlari() {
         assert_eq!(durdurma_kesinlesme_kodu("Açık (Durdurulmuş : Takibe İtiraz)"), Some("itiraz"));
         assert_eq!(durdurma_kesinlesme_kodu("Açık (Durdurulmuş: İhtiyati  Tedbir )"), Some("durd_ihtiyati_tedbir"));
@@ -938,6 +1058,7 @@ mod tests {
     fn tebligat_turune_gore_kesinlesme() {
         use TebligatKesinlesmesi::*;
         assert_eq!(tebligat_kesinlesmesi("Ödeme Emri"), Borclu);
+        assert_eq!(tebligat_kesinlesmesi("Tahliye Emri"), Borclu);
         assert_eq!(tebligat_kesinlesmesi("103 Davetiyesi"), SabitGun(7));
         assert_eq!(tebligat_kesinlesmesi("Kıymet Takdiri Raporu"), SabitGun(7));
         for tur in ["Maaş", "Maaş (Haciz İhbarnamesi)", "Maaş (Haciz Müzekkeresi)", "Banka (Haciz İhbarnamesi)", "Haciz İhbarnamesi",
@@ -967,13 +1088,15 @@ mod tests {
         assert_eq!(h(false, &[teslim.clone()], g(2026, 11, 1), None, Some(7)), ("kesinlesme_bekliyor".into(), Some(g(2026, 10, 13))), "mazbata dönmeden kesinleşmez");
         assert_eq!(h(false, &[mazbatali.clone()], g(2026, 10, 12), None, Some(7)), ("kesinlesme_bekliyor".into(), Some(g(2026, 10, 13))));
         assert_eq!(h(false, &[mazbatali.clone()], g(2026, 10, 13), None, Some(7)), ("kesinlesti".into(), Some(g(2026, 10, 13))));
-        // Mazbata açıklamasındaki barkod da kanıttır; barkodsuz "Var" değildir
+        // Mazbata açıklamasındaki barkod da kanıttır; başka barkodlu mazbata değildir; bağlanmış barkodsuz "Var" kanıttır
         let mut barkodlu = teslim.clone();
         barkodlu.tebligat_mazbatasi_var = true;
         barkodlu.tebligat_mazbatasi_aciklama = "Ödeme Emri - [X] - Barkod Numarası: 4007663523293 - Tebliğ Edildi".into();
         assert_eq!(h(false, &[barkodlu.clone()], g(2026, 10, 13), None, Some(7)).0, "kesinlesti");
+        barkodlu.tebligat_mazbatasi_aciklama = "Ödeme Emri - [X] - Barkod Numarası: 4007000000000 - Tebliğ Edildi".into();
+        assert_eq!(h(false, &[barkodlu.clone()], g(2026, 10, 13), None, Some(7)).0, "kesinlesme_bekliyor", "başka barkodun mazbatası");
         barkodlu.tebligat_mazbatasi_aciklama = "Var".into();
-        assert_eq!(h(false, &[barkodlu], g(2026, 10, 13), None, Some(7)).0, "kesinlesme_bekliyor");
+        assert_eq!(h(false, &[barkodlu], g(2026, 10, 13), None, Some(7)).0, "kesinlesti", "2026/7574");
         // Tebliğ edilemedi dönmüşse PTT "teslim edildi" dese de sayılmaz
         let edilemedi = fiziki("TESLİM EDİLDİ", Some(g(2026, 10, 5)), "Normal Tebligat[BORÇLU X] - Tebliğ Edilemedi");
         assert_eq!(h(false, &[edilemedi], g(2026, 11, 1), None, Some(7)), ("kesinlesme_bekliyor".into(), None));

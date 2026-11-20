@@ -49,10 +49,16 @@ pub enum Sutun {
     Yeniden,
     Elektronik,
     Kesinlesme,
+    /// Tebligat grubu (bir bakışta sayım).
+    Grup,
+    /// Haciz ihbarnamesi sırası: "1" / "2" / "3", bilinmiyorsa "?", haciz ihbarnamesi değilse "".
+    Haciz,
 }
 
 impl Sutun {
-    pub const HEPSI: [Sutun; 15] = [
+    pub const HEPSI: [Sutun; 17] = [
+        Sutun::Grup,
+        Sutun::Haciz,
         Sutun::Birim,
         Sutun::DosyaNo,
         Sutun::DosyaTur,
@@ -86,10 +92,15 @@ impl Sutun {
             Sutun::Yeniden => "yeniden",
             Sutun::Elektronik => "elektronik",
             Sutun::Kesinlesme => "kesinlesme",
+            Sutun::Grup => "grup",
+            Sutun::Haciz => "haciz",
         }
     }
     fn kodlu(self) -> bool {
-        matches!(self, Sutun::DosyaTur | Sutun::Muhatap | Sutun::Mazbata | Sutun::Yeniden | Sutun::Elektronik | Sutun::Kesinlesme)
+        matches!(
+            self,
+            Sutun::DosyaTur | Sutun::Muhatap | Sutun::Mazbata | Sutun::Yeniden | Sutun::Elektronik | Sutun::Kesinlesme | Sutun::Grup | Sutun::Haciz
+        )
     }
     /// Seçenek listesi uzun olabilir (en çok `SECENEK_SINIRI`).
     fn sinirli(self) -> bool {
@@ -106,6 +117,9 @@ impl Sutun {
             (Sutun::Elektronik, "evet") => "E-tebligat".into(),
             (Sutun::Elektronik, _) => "Fiziki (PTT)".into(),
             (Sutun::Kesinlesme, d) => kesinlesme_etiketi(d),
+            (Sutun::Haciz, "?") => "89 sırası bilinmiyor".into(),
+            (Sutun::Haciz, "") => "(haciz ihbarnamesi değil)".into(),
+            (Sutun::Haciz, d) => format!("89/{d}"),
             (Sutun::Tur, "") => "(türü yok)".into(),
             (Sutun::Teblig, "") => "Henüz sorgulanmadı".into(),
             (Sutun::Teslim, "") => "(teslim / iade bilgisi yok)".into(),
@@ -121,6 +135,7 @@ pub fn muhatap_etiketi(kod: &str) -> &'static str {
     match kod {
         "borclu" => "Borçlu",
         "vekil" => "Borçlu vekili",
+        "temsilci" => "Borçlunun kanuni temsilcisi (vasi, veli, kayyum …)",
         "ucuncu" => "Üçüncü kişi (banka, işveren …)",
         _ => "Belirtilmemiş",
     }
@@ -251,6 +266,10 @@ pub struct Satir {
     pub kesinlesme_neden: String,
     pub talimat: bool,
     pub aciklama: String,
+    pub grup: &'static str,
+    pub zarf_icerigi: String,
+    pub haciz_sirasi: Option<i16>,
+    pub muhatap_adi: String,
 }
 
 impl Satir {
@@ -273,7 +292,16 @@ impl Satir {
             Sutun::Yeniden => evet(self.yeniden),
             Sutun::Elektronik => evet(self.elektronik),
             Sutun::Kesinlesme => bir(&self.kesinlesme_kod),
+            Sutun::Grup => bir(self.grup),
+            Sutun::Haciz => bir(&self.haciz_kodu()),
         }
+    }
+
+    fn haciz_kodu(&self) -> String {
+        if !teb::haciz_turu_mu(&self.tur) {
+            return String::new();
+        }
+        self.haciz_sirasi.map(|s| s.to_string()).unwrap_or_else(|| "?".into())
     }
 
     fn json(&self) -> Value {
@@ -286,6 +314,8 @@ impl Satir {
             "teslim_sekli": self.teslim_sekli, "mazbata_var": self.mazbata_var, "mazbata": self.mazbata, "yeniden": self.yeniden,
             "elektronik": self.elektronik, "kesinlesme": self.kesinlesme, "kesinlesme_kod": self.kesinlesme_kod,
             "kesinlesme_neden": self.kesinlesme_neden, "talimat": self.talimat,
+            "grup": self.grup, "zarf_icerigi": self.zarf_icerigi, "haciz_sirasi": self.haciz_sirasi,
+            "haciz_turu": teb::haciz_turu_mu(&self.tur), "muhatap_adi": self.muhatap_adi,
         })
     }
 
@@ -311,11 +341,14 @@ impl Satir {
             if self.yeniden { "Talep edildi".into() } else { String::new() },
             if self.elektronik { "E-tebligat".into() } else { "Fiziki".into() },
             if self.kesinlesme.is_empty() { self.kesinlesme_neden.clone() } else { self.kesinlesme.clone() },
+            self.grup.to_string(),
+            self.zarf_icerigi.clone(),
+            match self.haciz_kodu().as_str() { "" => String::new(), "?" => "Bilinmiyor".into(), d => format!("89/{d}") },
         ]
     }
 }
 
-const EXCEL_BASLIKLAR: [&str; 19] = [
+const EXCEL_BASLIKLAR: [&str; 22] = [
     "İcra Dairesi",
     "Dosya No",
     "Dosya Türü",
@@ -335,8 +368,11 @@ const EXCEL_BASLIKLAR: [&str; 19] = [
     "Yeniden Tebliğ Talebi",
     "E-tebligat",
     "Kesinleşme",
+    "Grup",
+    "Zarf İçeriği",
+    "89 Sırası",
 ];
-const EXCEL_GENISLIK: [u32; 19] = [28, 12, 14, 10, 11, 10, 30, 30, 18, 16, 24, 12, 24, 16, 30, 10, 14, 11, 26];
+const EXCEL_GENISLIK: [u32; 22] = [28, 12, 14, 10, 11, 10, 30, 30, 18, 16, 24, 12, 24, 16, 30, 10, 14, 11, 26, 22, 40, 10];
 
 /// Bütün icra tebligatları (süzgeçsiz), satır biçiminde. Tebligat başına kesinleşme listeyle aynı kuralla: ödeme emri
 /// → borçlunun hesabı; 103 / kıymet takdiri → sabit süre; diğer türler → yok; talimat dosyası → yok; üçüncü kişiye
@@ -352,7 +388,7 @@ pub fn satirlari_oku<C: GenericClient>(c: &mut C) -> Result<Vec<Satir>, String> 
                 tb.borclu_id, COALESCE({borclu_ad}, ''), tb.barkod, tb.tebligat_turu, tb.birim_evrak_no, tb.evrak_tarihi, tb.evrak_gunu,
                 tb.ptt_durumu, tb.son_islem_tarihi, tb.son_islem_zamani::date, tb.teslim_sekli, tb.tebligat_mazbatasi_var,
                 tb.tebligat_mazbatasi_aciklama, tb.yeniden_teblig_talep_edildi, tb.elektronik_tebligat, tb.evrak_aciklama,
-                COALESCE(dt.kesinlesme_durumu, ''), dt.kesinlesme_tarihi
+                COALESCE(dt.kesinlesme_durumu, ''), dt.kesinlesme_tarihi, tb.zarf_icerigi, tb.haciz_sirasi
            FROM tebligat_barkod tb JOIN dosya d ON d.id = tb.dosya_id JOIN birim b ON b.id = d.birim_id
            LEFT JOIN icra_takip_detay i ON i.dosya_id = d.id
            LEFT JOIN dosya_taraf dt ON dt.id = tb.borclu_id
@@ -372,6 +408,7 @@ pub fn satirlari_oku<C: GenericClient>(c: &mut C) -> Result<Vec<Satir>, String> 
         let muhatap: &'static str = match (mt, borclu_id) {
             (MuhatapTuru::Borclu, _) => "borclu",
             (MuhatapTuru::Vekil, _) => "vekil",
+            (MuhatapTuru::Temsilci, _) => "temsilci",
             (MuhatapTuru::Ucuncu, _) => "ucuncu",
             (MuhatapTuru::Yok, Some(_)) => "borclu",
             (MuhatapTuru::Yok, None) => "yok",
@@ -427,6 +464,7 @@ pub fn satirlari_oku<C: GenericClient>(c: &mut C) -> Result<Vec<Satir>, String> 
         } else {
             String::new()
         };
+        let grup = teb::tebligat_grubu(&tur);
         out.push(Satir {
             id: s.get(0),
             dosya: s.get(1),
@@ -459,7 +497,11 @@ pub fn satirlari_oku<C: GenericClient>(c: &mut C) -> Result<Vec<Satir>, String> 
             kesinlesme_kod: kod,
             kesinlesme_neden: neden,
             talimat,
+            muhatap_adi: teb::muhatap_adi(&aciklama),
             aciklama,
+            grup,
+            zarf_icerigi: s.get(32),
+            haciz_sirasi: s.get(33),
         });
     }
     Ok(out)
@@ -506,6 +548,8 @@ fn sirala_anahtari(s: &Satir, alan: &str) -> Option<Anahtar> {
         "yeniden" => Some(Anahtar::Sayi(i64::from(s.yeniden), 0)),
         "elektronik" => Some(Anahtar::Sayi(i64::from(s.elektronik), 0)),
         "kesinlesme" => metin(if s.kesinlesme.is_empty() { &s.kesinlesme_neden } else { &s.kesinlesme }),
+        "grup" => Some(Anahtar::Sayi(teb::GRUP_SIRASI.iter().position(|g| *g == s.grup).unwrap_or(99) as i64, 0)),
+        "haciz" => metin(&s.haciz_kodu()),
         _ => None,
     }
 }
@@ -539,7 +583,7 @@ fn sirala(satirlar: &mut Vec<Satir>, alan: &str, azalan: bool) {
 fn sirala_anahtari_gecerli(alan: &str) -> bool {
     [
         "birim", "dosya_no", "dosya_tur", "durum", "acilis", "takip", "alacakli", "borclu", "muhatap", "barkod", "tur", "evrak", "teblig",
-        "islem", "teslim", "mazbata", "yeniden", "elektronik", "kesinlesme",
+        "islem", "teslim", "mazbata", "yeniden", "elektronik", "kesinlesme", "grup", "haciz",
     ]
     .contains(&alan)
 }

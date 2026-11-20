@@ -559,6 +559,49 @@ pub fn dosya_taraf_kaydet_roller<C: GenericClient>(
     Ok(gorulen.len())
 }
 
+/// `dosya_taraf_bilgileri_brd` yanıtındaki BORÇLU satırlarının vekillerini, dosyada zaten kayıtlı (kimlikli) borçlulara
+/// yazar (20.11.2026). Taraf açılmaz, borçlunun kimliği değişmez: bu uç kimlik vermez, borçlu `dosya_borclu_list`ten
+/// gelir. Eşleşme adla (Türkçe küçük harf, boşluk farkı önemsiz). Döner: vekilleri yazılan borçlu sayısı.
+pub fn borclu_vekillerini_yaz<C: GenericClient>(c: &mut C, dosya: i64, taraf_ham: &[Value]) -> Result<usize, String> {
+    let anahtar = |s: &str| teb::tr_kucuk(s).split_whitespace().collect::<Vec<_>>().join(" ");
+    let ad = crate::icra_api::ad_sql("t");
+    let mut tx = c.transaction().map_err(hata)?;
+    let borclular: Vec<(i64, String)> = tx
+        .query(
+            &format!(
+                "SELECT dt.id, {ad} FROM dosya_taraf dt JOIN taraf t ON t.id = dt.taraf_id
+                  WHERE dt.dosya_id = $1 AND dt.rol = 'borclu' AND dt.uyapta_gorulmedi IS NULL"
+            ),
+            &[&dosya],
+        )
+        .map_err(hata)?
+        .iter()
+        .map(|r| (r.get(0), anahtar(&r.get::<_, String>(1))))
+        .collect();
+    let mut yazilan = 0;
+    for item in taraf_ham.iter().filter(|x| x.is_object() && teb::tr_kucuk(&teb::metin(x, "rol")) == Rol::Borclu.kod()) {
+        let aranan = anahtar(&teb::metin(item, "adi"));
+        let Some((bag, _)) = borclular.iter().find(|(_, a)| !aranan.is_empty() && *a == aranan) else { continue };
+        let vekiller = vekilleri_kaydet(&mut tx, &teb::metin(item, "vekil"))?;
+        tx.execute("DELETE FROM dosya_taraf_vekiller WHERE dosyataraf_id = $1 AND NOT (vekil_id = ANY($2))", &[bag, &vekiller])
+            .map_err(hata)?;
+        tx.execute(
+            "INSERT INTO dosya_taraf_vekiller (dosyataraf_id, vekil_id) SELECT $1, v FROM unnest($2::bigint[]) AS v ON CONFLICT DO NOTHING",
+            &[bag, &vekiller],
+        )
+        .map_err(hata)?;
+        yazilan += 1;
+    }
+    tx.commit().map_err(hata)?;
+    Ok(yazilan)
+}
+
+/// Dosyanın taraf bilgileri (vekiller dahil) UYAP'tan okundu: "Tarafları güncelle" bu dosyaya yeniden gitmez.
+pub fn taraf_bilgisi_okundu<C: GenericClient>(c: &mut C, dosya: i64) -> Result<(), String> {
+    c.execute("UPDATE dosya SET taraf_bilgisi_zamani = now() WHERE id = $1", &[&dosya]).map_err(hata)?;
+    Ok(())
+}
+
 /// `dosya_borclu_list` yanıtını borçlu bağlarına yazar: aynı dosyadaki adı tutan kimliksiz
 /// borçluya TCKN / vergi no / MERSİS eklenir (yeni taraf açılmaz). Borçlu listesi tam sayılır.
 pub fn borclu_kimliklerini_kaydet<C: GenericClient>(c: &mut C, dosya: i64, borclu_ham: &[Value], log: Gunluk) -> Result<usize, String> {
@@ -790,6 +833,10 @@ pub struct TebligatKaydi {
     /// Tebligatın ait olduğu borçlu bağı. Boşsa kayıtlı bağlantıya dokunulmaz.
     pub borclu: Option<i64>,
     pub yeniden_teblig_talep_edildi: bool,
+    /// Belgedeki "BU ZARFTA … VARDIR" içeriği (memurun yazdığı hâliyle). Boşsa kayıtlıya dokunulmaz.
+    pub zarf_icerigi: String,
+    /// Belgede yazan haciz ihbarnamesi sırası (89/1-2-3). Boşsa ya da kullanıcı elle girdiyse kayıtlıya dokunulmaz.
+    pub haciz_sirasi: Option<i16>,
 }
 
 /// Daha önce kaydedilmiş tebligat (barkod bir kez atanır, değişmez).
@@ -836,11 +883,20 @@ pub fn tebligat_kaydet<C: GenericClient>(c: &mut C, dosya: i64, birim_evrak_no: 
         )
         .map_err(hata)?
         .get(0);
+    // E-tebliğ mazbatası evrak listesinde açıklamasız gelir; elle işlenmişse ("Kapalı E-Tebliğ Mazbatası …") listede
+    // görünmüyor diye silinmez.
     tx.execute(
         "UPDATE tebligat_barkod SET evrak_aciklama = $2, evrak_tarihi = $3, barkod = $4, elektronik_tebligat = $5,
-                tebligat_turu = $6, tebligat_mazbatasi_var = $7, tebligat_mazbatasi_aciklama = $8,
+                tebligat_turu = $6,
+                tebligat_mazbatasi_var = $7 OR (tebligat_mazbatasi_var AND tebligat_mazbatasi_aciklama LIKE 'Kapalı E-Tebliğ Mazbatası%'),
+                tebligat_mazbatasi_aciklama = CASE WHEN NOT $7 AND tebligat_mazbatasi_var
+                                                        AND tebligat_mazbatasi_aciklama LIKE 'Kapalı E-Tebliğ Mazbatası%'
+                                                   THEN tebligat_mazbatasi_aciklama ELSE $8 END,
                 kapali_tebligat_mazbatasi_var = $9, borclu_id = COALESCE($10, borclu_id),
-                yeniden_teblig_talep_edildi = $11, sorgu_zamani = now()
+                yeniden_teblig_talep_edildi = $11, sorgu_zamani = now(),
+                zarf_icerigi = CASE WHEN $12 = '' THEN zarf_icerigi ELSE $12 END,
+                haciz_sirasi = CASE WHEN haciz_sirasi_elle THEN haciz_sirasi ELSE COALESCE($13, haciz_sirasi) END,
+                muhatap_adi = $14, muhatap_turu = $15
           WHERE id = $1",
         &[
             &id,
@@ -854,6 +910,10 @@ pub fn tebligat_kaydet<C: GenericClient>(c: &mut C, dosya: i64, birim_evrak_no: 
             &k.kapali_tebligat_mazbatasi_var,
             &k.borclu,
             &k.yeniden_teblig_talep_edildi,
+            &kirp(&k.zarf_icerigi, 500),
+            &k.haciz_sirasi,
+            &kirp(&teb::muhatap_adi(&k.evrak_aciklama), 255),
+            &teb::muhatap_turu(&k.evrak_aciklama).kod(),
         ],
     )
     .map_err(hata)?;

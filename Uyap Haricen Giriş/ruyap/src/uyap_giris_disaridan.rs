@@ -654,6 +654,8 @@ pub fn perform_login(
     submit_signature(&mut session, &signed_data, &tx_id)?;
     confirm_login(&mut session)?;
     verify_login_success(&mut session)?;
+    // Giriş yapan e-imza avukatı: Dosya Listesi "Rolüm" sütunu için büro ayarına (20.11.2026).
+    crate::icra_dosyalar::eimza_avukatini_kaydet(selected_cert.get("subject").and_then(|v| v.as_str()).unwrap_or(""));
     Ok((session, used_cert_id))
 }
 

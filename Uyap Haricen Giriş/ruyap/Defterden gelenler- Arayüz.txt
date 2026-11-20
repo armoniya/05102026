@@ -1,0 +1,25 @@
+1) İcra takip süreçleri ve iş listesi de bir dosya ya da yapılacak iş listesi gibi pencere. Açılıp kapanabilsin. 
+Başka bir pencere açıldığında üstünde dominant olmasın.
+2) Dosya penceresi açıldığında dönen daire animasyonu iki yerde çıkıyor. Çift animasyon istemiyorum.      
+3) Dosya penceresinden sağ tıklayarak açılan 121 gönder penceresi yerinden oynamıyor ve dışarıda bir yere tıklandığında
+anında kapanıyor. Bu pencerenin yerinden oynatılabilir bir hale gelmesi ve bu pencerenin dışında dosya penceresi içinde
+tıklama yapıldığında kapanmaması, transparanlaşması gerekiyor. Pencere açıkken pencere dışındaki dosya görüntüleme
+penceresinde işlem yapılabilsin. (kendi dosya penceremizi yazdığımız zaman gerek kalmayacak, bu aşamada gerek olmayabilir)            
+4) Sağdaki çokluuyap sütununu açan buton sayfanın okunurluğunu etkiliyor. Görev çubuğunda sağ alta küçük bir buton olarak koyalım.
+5) Programın ilk giriş ekranında entryboxlarda yazım imleci (yanıp sönen) çıkmıyor, enter tuşu ile giriş yapmıyor, enter işlevsiz.
+6) Simge tepsisinde açılan menünün köşeleri yuvarlak ama yuvarlağın dışı siyah. Eğer kodu çok yormayacaksa
+o siyahlığı kaldır, yoracaksa köşeli olsun.
+7) Sağdaki iş listesi menüsünde dosya penceresini aç butonu sıkışmış. İşin altındaki butonları düzenlemen lazım.
+8) Ana arama çubuğunda fareyi entryboxa götürdüğünde bir yazı belirsin "Yapıştırmak için silmeniz gerekmemektedir." gibi. 
+Kullanıcı gereksiz tıklamadan korunduğunu öğrensin.
+9) Dosya penceresi başka bir yerden açılırsa evrak sekmesi açıkmış gibi ızgara açılıyor sonra ilk sekmeye geçiyor. 
+Bu da ekrana bakan kullanıcının gözünü yoran bir şey. Bu kaymaları çözmemiz lazım (kendi dosya penceremizi yazdığımız 
+zaman gerek kalmayacak, bu aşamada yapmamıza gerek olmayabilir)
+10) Şimdi hala var mı bilmiyorum ama iş listesi penceresi açıldığında sol üst köşeye tıklayıp simge durumuna düşür-
+düğümüzde anasayfaya geçmiyordu.
+11) Görev çubuğunda çok fazla dosya olunca şişme halinde görev çbuğu, iş listesi görev çubuğu sekmesi ve ana menü butonu 
+üst üste binebiliyor.
+12) ctrl+1, ctrl+2 gibi yapıştırma seçenekleri chrome gibi tarayıcıda ctrl+1 in ilk, ctrl+2 nin ikinci sekmeyi açması
+nedeniyle işlevsiz kalıyor.
+13) Dosya bilgilerini kopyala butonu ile önce dosya numarası sonra icra müdürlüğü verisi kopyalanıyor. Önce müdürlük sonra
+dosya numarası.

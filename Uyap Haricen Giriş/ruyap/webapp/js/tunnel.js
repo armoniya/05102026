@@ -7,7 +7,7 @@
 //
 // Satıcı sunucusu yalnızca bu statik dosyaları + SDP'yi taşır; UYAP verisi P2P akar.
 
-import { encodeFrames, Reassembler, finalize } from "./wire.js";
+import { encodeFrames, Reassembler, finalize, relayIstemciAnahtari } from "./wire.js";
 
 const REQUEST_TIMEOUT = 120000; // ms — büyük UDF/PDF indirmeleri
 const READY_TIMEOUT = 30000;    // ms — kanal açılması için bekleme
@@ -263,8 +263,11 @@ let authRejected = false;  // kimlik reddedildiyse otomatik yeniden bağlanma ya
 // --------------------------------------------------------------------------------------
 // WS-relay fallback: P2P kurulamazsa (TURN yok + CGNAT/simetrik NAT) aynı signaling
 // WebSocket'i veri kanalı olarak kullanılır. Ofis ajanı relay_hello/relay protokolünü
-// zaten konuşur; çerçeveler base64'lenip {"type":"relay","b64":...} olarak taşınır.
-// Veri bu modda satıcı sunucusundan GEÇER (yalnızca son çare) ama her ağda çalışır.
+// zaten konuşur. Veri bu modda satıcı sunucusundan GEÇER (yalnızca son çare) ama her ağda çalışır.
+// 20.11.2026: uçtan uca şifreli — relay_hello tek kullanımlık ECDH açık anahtarını taşır, ofis relay_ready ile
+// kendininkini döner; çerçeveler AES-256-GCM ile {"type":"relay","e":...} (wire.js relayIstemciAnahtari,
+// ofiste src/relay_sifre.rs). Sunucu yalnız açık anahtarları görür; WebRTC (DTLS) ile aynı seviye.
+// Ofis programı eskiyse (relay_ready'de pub yok) geçiş süresince eski şifresiz {"b64":...} aktarma kullanılır.
 // --------------------------------------------------------------------------------------
 let relay = null;
 let fallbackTimer = null;
@@ -296,9 +299,46 @@ class RelayChannel {
     this.onopen = null;
     this.onclose = null;
     this.onmessage = null;
+    this.anahtar = null;   // el sıkışma (relayIstemciAnahtari)
+    this.sifre = null;     // { gonder, al } — uçtan uca şifreli tünel
+    this.sifresiz = false; // ofis programı eski: geçiş dönemi şifresiz aktarma
+    this.gidenKuyruk = Promise.resolve();
+    this.gelenKuyruk = Promise.resolve();
+    this.bekleyen = 0;     // şifrelenmeyi bekleyen bayt (geri-basınca dahil)
   }
-  get bufferedAmount() { return this.ws.bufferedAmount; } // drain() geri-basıncı ws'ten okur
-  send(frame) { this.ws.send(JSON.stringify({ type: "relay", b64: b64FromBytes(frame) })); }
+  // drain() geri-basıncı ws'ten okur; şifrelenmeyi bekleyenler de sayılır.
+  get bufferedAmount() { return this.ws.bufferedAmount + this.bekleyen; }
+  send(frame) {
+    if (this.sifresiz) { this.ws.send(JSON.stringify({ type: "relay", b64: b64FromBytes(frame) })); return; }
+    if (!this.sifre) throw new Error("Aktarma şifresi kurulmadı.");
+    // Sayaç sifrele() çağrısında ilerler; gönderim aynı sırayla (kuyruk) yapılır.
+    const uzunluk = frame.byteLength || frame.length || 0;
+    this.bekleyen += uzunluk;
+    const sifreli = this.sifre.gonder.sifrele(frame);
+    this.gidenKuyruk = this.gidenKuyruk
+      .then(() => sifreli)
+      .then((c) => {
+        this.bekleyen -= uzunluk;
+        if (this.readyState !== "closed") this.ws.send(JSON.stringify({ type: "relay", e: b64FromBytes(c) }));
+      })
+      .catch((e) => { console.warn("[relay] şifreleme hatası:", e); this.close(); });
+  }
+  // Ofisten gelen çerçeve: şifreli tünelde yalnız "e", eski tünelde yalnız "b64" kabul edilir.
+  gelen(msg) {
+    if (this.sifre) {
+      if (!msg.e) { console.warn("[relay] şifreli tünelde şifresiz çerçeve yok sayıldı"); return; }
+      const sifreli = bytesFromB64(msg.e);
+      this.gelenKuyruk = this.gelenKuyruk
+        .then(() => this.sifre.al.coz(sifreli))
+        .then((acik) => { if (this.onmessage) this.onmessage({ data: acik.buffer }); })
+        .catch(() => {
+          status("Aktarma çerçevesi doğrulanamadı; bağlantı yenileniyor…", "err");
+          this.close();
+        });
+      return;
+    }
+    if (this.sifresiz && msg.b64) { if (this.onmessage) this.onmessage({ data: bytesFromB64(msg.b64).buffer }); }
+  }
   markOpen() {
     if (this.readyState === "open") return;
     this.readyState = "open";
@@ -325,10 +365,21 @@ function startRelay() {
   p2pFailed = true;
   if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
   if (pc) { try { pc.close(); } catch (_) {} pc = null; }
-  relay = new RelayChannel(ws);
-  attachChannel(relay);
-  ws.send(JSON.stringify({ type: "relay_hello" }));
+  const r = new RelayChannel(ws);
+  relay = r;
+  attachChannel(r);
   status("P2P kurulamadı; sunucu üzerinden aktarma deneniyor…", "warn");
+  relayIstemciAnahtari()
+    .then((a) => {
+      if (relay !== r || ws.readyState !== WebSocket.OPEN) return;
+      r.anahtar = a;
+      ws.send(JSON.stringify({ type: "relay_hello", pub: b64FromBytes(a.pub), v: 1 }));
+    })
+    .catch((e) => {
+      // WebCrypto yoksa (güvenli olmayan bağlam): eski şifresiz el sıkışma; ofis geçiş süresince kabul eder.
+      console.warn("[relay] şifreleme kullanılamıyor:", e);
+      if (relay === r && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "relay_hello" }));
+    });
 }
 
 async function startOffer() {
@@ -405,15 +456,27 @@ function connectSignaling() {
           await pc.setRemoteDescription({ sdp: msg.sdp, type: msg.sdptype || "answer" });
         }
       } else if (msg.type === "relay_ready") {
-        // Ofis relay el sıkışmasını kabul etti; kanal artık açık.
+        // Ofis relay el sıkışmasını kabul etti; anahtarlar kurulunca kanal açılır.
         if (relay && channel === relay) {
-          relay.markOpen();
-          status("Sunucu üzerinden aktarma kuruldu — UYAP açılıyor.", "ok");
+          const r = relay;
+          if (msg.pub && r.anahtar) {
+            const k = await r.anahtar.tamamla(bytesFromB64(msg.pub));
+            if (relay !== r) return;
+            r.sifre = k;
+            r.anahtar = null;
+            r.markOpen();
+            status("Sunucu üzerinden aktarma kuruldu (uçtan uca şifreli) — UYAP açılıyor.", "ok");
+          } else {
+            r.sifresiz = true;
+            r.markOpen();
+            console.warn("[relay] ofis programı şifreli aktarmayı desteklemiyor; şifresiz aktarma (geçiş dönemi).");
+            status("Sunucu üzerinden aktarma kuruldu (şifresiz: ofis programı güncel değil) — UYAP açılıyor.", "warn");
+          }
           document.title = "UYAP — sunucu aktarımı";
         }
       } else if (msg.type === "relay") {
-        // Ofisten gelen bir cevap çerçevesi (base64 ikili) — kanal işleyicisine ver.
-        if (relay && relay.onmessage) relay.onmessage({ data: bytesFromB64(msg.b64).buffer });
+        // Ofisten gelen bir cevap çerçevesi — şifre çözülüp (sırayla) kanal işleyicisine verilir.
+        if (relay) relay.gelen(msg);
       } else if (msg.type === "peer_left") {
         if (typeof window.__uyapOfficeState === "function") window.__uyapOfficeState(false);
         status("Ofis ayrıldı, bekleniyor…", "warn");

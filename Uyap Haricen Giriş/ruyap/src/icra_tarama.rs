@@ -12,6 +12,7 @@
 //!   • tebliğ tarihi kayıtlı elektronik tebligat için hiçbir şey indirilmez
 //!   • MTS dosyalarında aynı barkodu taşıyan ikinci evrak ayrı satır açmaz, sonraki turda atlanır
 
+use crate::icra_durum as durum;
 use crate::icra_kayit::{self as kayit, BilinenTebligat, TebligatKaydi};
 use crate::icra_tebligat::{self as teb, Mazbatalar};
 use postgres::GenericClient;
@@ -61,9 +62,11 @@ pub fn dosya_baglami<C: GenericClient>(c: &mut C, dosya: i64, evraklar: &[Value]
         // Talep evrakı listede artık görünmese de bir kez görüldüyse işaret kalır.
         talep |= s.get::<_, bool>(3);
     }
+    let mut mazbatalar = Mazbatalar::kur(evraklar);
+    mazbatalar.barkodlulari_dus(dosya_barkodlari.iter().map(|(b, (no, _))| (b, *no)));
     Ok(DosyaBaglami {
         dosya,
-        mazbatalar: Mazbatalar::kur(evraklar),
+        mazbatalar,
         kapali_mazbata_var: evraklar.iter().any(|e| teb::tur_anahtar(&teb::metin(e, "tur")) == ktm),
         yeniden_teblig_talebi: talep,
         borclular: kayit::dosya_borclulari(c, dosya)?,
@@ -100,7 +103,7 @@ fn mts_anahtari(ctx: &DosyaBaglami, evrak: &Value, no: i32) -> Option<String> {
 
 fn taslak(ctx: &DosyaBaglami, evrak: &Value, no: i32, barkod: &str, elektronik: bool, tur: String) -> Taslak {
     let aciklama = teb::metin(evrak, "aciklama");
-    let mazbata = ctx.mazbatalar.bul(barkod);
+    let mazbata = ctx.mazbatalar.bul(barkod, no);
     Taslak {
         birim_evrak_no: no,
         kayit: TebligatKaydi {
@@ -119,11 +122,21 @@ fn taslak(ctx: &DosyaBaglami, evrak: &Value, no: i32, barkod: &str, elektronik: 
     }
 }
 
-/// Barkod PTT'ye sorulmamalı mı: sonuç kesin ya da mazbatası dönmüş.
-fn ptt_gereksiz(ctx: &DosyaBaglami, bilinen: Option<&BilinenTebligat>, aciklama: &str, barkod: &str) -> bool {
-    bilinen.is_some_and(|b| teb::ptt_sonuclandi(&b.ptt_durumu))
-        || teb::teblig_sonucu_aciklamada_mi(aciklama)
-        || ctx.mazbatalar.bul(barkod).is_some()
+/// Barkod PTT'ye sorulmamalı mı: sonuç kesin ya da mazbatası dönmüş. İSTİSNA: kesinleşme hesabına giren türde (ödeme /
+/// tahliye emri, 103, kıymet takdiri) PTT'den tebliğ TARİHİ alınmamışsa mazbata dönmüş olsa da sorulur — mazbata
+/// "Tebliğ Edildi" der ama tarihi vermez, süre sayılamaz ve dosya süresiz "Kesinleşme Bekliyor"da kalıyordu
+/// (kullanıcı bulgusu 20.11.2026, İzmir 10. İcra 2026/8645; açık dosyalarda 4.667 ödeme emri).
+fn ptt_gereksiz(bilinen: Option<&BilinenTebligat>, aciklama: &str, mazbata_var: bool, tur: &str) -> bool {
+    if bilinen.is_some_and(|b| teb::ptt_sonuclandi(&b.ptt_durumu)) {
+        return true;
+    }
+    let mazbata = teb::teblig_sonucu_aciklamada_mi(aciklama) || mazbata_var;
+    mazbata && !tarih_gerekli(tur)
+}
+
+/// Kesinleşme bu tebligatın tebliğ tarihinden sayılıyor mu.
+fn tarih_gerekli(tur: &str) -> bool {
+    durum::tebligat_kesinlesmesi(tur) != durum::TebligatKesinlesmesi::Yok
 }
 
 fn e_teblig(t: &mut Taslak, evrak_tarihi: &str) {
@@ -164,7 +177,7 @@ pub fn evrak_baslat<C: GenericClient>(c: &mut C, ctx: &DosyaBaglami, evrak: &Val
         t.kayit.ham_yanit = Some(teb::ptt_atlandi());
         return Ok(Adim::Kaydet(t));
     }
-    if ptt_gereksiz(ctx, Some(&b), &aciklama, &b.barkod) {
+    if ptt_gereksiz(Some(&b), &aciklama, t.kayit.tebligat_mazbatasi_var, &t.kayit.tebligat_turu) {
         t.kayit.ham_yanit = Some(teb::ptt_sonuclanmis());
         return Ok(Adim::Kaydet(t));
     }
@@ -194,7 +207,7 @@ pub fn pdf_geldi<C: GenericClient>(
     let mut tur = teb::tebligat_turunu_belirle(&aciklama, Some(&govde), &ctx.eslesmeler);
     if tur == teb::BELIRSIZ {
         // Zarf içeriği okunamadıysa kendi mazbatasındaki belge adına bakılır.
-        let belge = teb::mazbata_belge_adi(&ctx.mazbatalar.bul(&barkod).unwrap_or_default());
+        let belge = teb::mazbata_belge_adi(&ctx.mazbatalar.bul(&barkod, no).unwrap_or_default());
         tur = teb::tur_eslestir(&belge, &ctx.eslesmeler).unwrap_or(tur);
     }
 
@@ -234,11 +247,13 @@ pub fn pdf_geldi<C: GenericClient>(
 
     let elektronik = aciklama.contains(teb::ELEKTRONIK_ANAHTAR);
     let mut t = taslak(ctx, evrak, no, &barkod, elektronik, tur);
+    t.kayit.zarf_icerigi = teb::zarf_icerigi_oku(&govde).unwrap_or_default();
+    t.kayit.haciz_sirasi = teb::haciz_sirasi_bul(&govde);
     if elektronik {
         e_teblig(&mut t, &teb::metin(evrak, "onaylandigiTarih"));
         return Ok(Adim::Kaydet(t));
     }
-    if ptt_gereksiz(ctx, bilinen.as_ref(), &aciklama, &barkod) {
+    if ptt_gereksiz(bilinen.as_ref(), &aciklama, t.kayit.tebligat_mazbatasi_var, &t.kayit.tebligat_turu) {
         t.kayit.ham_yanit = Some(teb::ptt_sonuclanmis());
         return Ok(Adim::Kaydet(t));
     }
@@ -479,6 +494,16 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     evraklar.pop();
     ornekle_isle(c, d1, &evraklar, &pdf, &|_| panic!("PTT sorulmamalı"), true);
     assert_eq!(say(c, "SELECT count(*) FROM tebligat_barkod WHERE yeniden_teblig_talep_edildi"), 2);
+    // Mazbata döndü ama PTT'den tebliğ tarihi hiç alınmamış ödeme emri: kesinleşme tarihten sayıldığı için PTT'ye sorulur
+    // (İzmir 10. İcra 2026/8645 hatası); kesinleşmeye girmeyen türde sorulmaz.
+    c.batch_execute("UPDATE tebligat_barkod SET ptt_durumu = '', son_islem_tarihi = '', ham_yanit = NULL WHERE birim_evrak_no = 10").unwrap();
+    let tur10: String = c.query_one("SELECT tebligat_turu FROM tebligat_barkod WHERE birim_evrak_no = 10", &[]).unwrap().get(0);
+    assert_eq!(tur10, "Ödeme Emri");
+    let (_, ptt_n, _) = ornekle_isle(c, d1, &evraklar, &pdf, &teslim, true);
+    assert_eq!(ptt_n, 1, "tarihi olmayan ödeme emri PTT'ye sorulur");
+    assert_eq!(say(c, "SELECT count(*) FROM tebligat_barkod WHERE birim_evrak_no = 10 AND ptt_durumu = 'TESLİM EDİLDİ' AND son_islem_zamani::date = '2026-10-05'"), 1);
+    c.batch_execute("UPDATE tebligat_barkod SET tebligat_turu = 'Banka', ptt_durumu = '', son_islem_tarihi = '', ham_yanit = NULL WHERE birim_evrak_no = 10").unwrap();
+    ornekle_isle(c, d1, &evraklar, &pdf, &|_| panic!("kesinleşmeye girmeyen türde mazbata dönmüşse PTT sorulmaz"), true);
 
     // ── MTS: aynı barkodu taşıyan iki evrak tek satır olur; boş tür dolu olanla tamamlanır ──
     let barkod_m = "4100131175175";

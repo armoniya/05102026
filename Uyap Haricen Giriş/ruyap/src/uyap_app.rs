@@ -1252,6 +1252,21 @@ impl UyapApp {
                     Ok(_) => {}
                     Err(e) => gunluk(&format!("[VERİTABANI] Hazır İş Listesi verileri yüklenemedi: {e}")),
                 }
+                // Hazır kesinleşme kuralları (takip türüne göre süreler); kullanıcının değiştirdiği kurala dokunulmaz.
+                let bugun = chrono::Local::now().date_naive();
+                let g2 = gunluk.clone();
+                if let Err(e) = crate::veritabani::baglanti()
+                    .and_then(|mut c| crate::icra_api::varsayilan_kurallari_uygula(&mut *c, bugun, &move |m: &str| g2(m)))
+                {
+                    gunluk(&format!("[VERİTABANI] Hazır kesinleşme kuralları yazılamadı: {e}"));
+                }
+                // Tebligat grupları: eski ham türler (memurun yazdığı zarf içeriği) sabit gruplara, muhatap alanlara.
+                let g3 = gunluk.clone();
+                if let Err(e) = crate::veritabani::baglanti()
+                    .and_then(|mut c| crate::icra_api::tebligat_gruplarini_uygula(&mut *c, bugun, &move |m: &str| g3(m)))
+                {
+                    gunluk(&format!("[VERİTABANI] Tebligat grupları uygulanamadı: {e}"));
+                }
             }
         });
 

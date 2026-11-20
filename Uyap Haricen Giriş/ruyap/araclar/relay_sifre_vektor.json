@@ -1,0 +1,28 @@
+{
+ "sir": "da6bb830e12ee014c3ec4bc5fe58cb415fce2ea975cbf3408d7709836c465084",
+ "istemci_pub": "046536ed7166f4e3f2fbb147e835f3e8cc2c73e90415603b21ebdcf3f990331dc7535a6bf69d6a8c7495116a052dc32777f44ee1119e67a1ccd161ba345dc823bb",
+ "ofis_pub": "04fe98606422dfe7044e08883d950db7f1837a8808d7298759f3420b49dc80aab4fbc4653ece25083838678d5ce541377a125ee40e3174c12b518078ad67995c21",
+ "istemci_gizli": "c229ce57c2a460bec8665bcb9cb16a92fbe900c45dc6174ba3ea40565c9b5ef1",
+ "c2o": "923a5a2d03b4aaa572bba4505ab56fd9b5284f5fef0ff3ddbd3b32d7136397aa",
+ "o2c": "1c78476e25a35ce184da1df13bd261d8d433f3986b138ae21171b8a865b51dda",
+ "istemci_cerceveleri": [
+  {
+   "acik": "istek 1: GET /",
+   "sifreli": "40c7f115121aa96db6e7f37c188439a365d92a942f04969d0606721a74a8"
+  },
+  {
+   "acik": "istek 2: büro verisi (Türkçe ğüşıöç)",
+   "sifreli": "b4061aa52de77d2a1a1ee34f1b30930b2aab395e91cd142e38be19a096f6fbeee636a79f2a55de4743628014f02f797cc9f68a2108f1efe9f11f723e49"
+  }
+ ],
+ "ofis_cerceveleri": [
+  {
+   "acik": "cevap 1",
+   "sifreli": "7a34c535ac7c2aa78964fbaa234ae543dc2817b0096b71"
+  },
+  {
+   "acik": "cevap 2: ödeme emri",
+   "sifreli": "0c2849b8ecd982e942561505c570d14057f3c1d40a79d44e0c84818e95cb4f3cbe2aec2b"
+  }
+ ]
+}

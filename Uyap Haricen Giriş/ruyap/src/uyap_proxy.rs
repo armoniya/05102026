@@ -3562,7 +3562,9 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     // Görüntülenen belgedeki PTT barkodu: Code-39 yazısıyla "*4007770084489*" (13 hane).
     function belgedekiBarkod(kart) {
-        const l = kart ? kart.querySelectorAll('.rpv-core__text-layer-text') : [];
+        // İki görüntüleyici: rpv-core ve react-pdf (canlı 20.11.2026: Kapalı Tebligat PDF'i react-pdf'te, barkod
+        // yazı katmanında "*5003049769049*" diye ayrı bir span).
+        const l = kart ? kart.querySelectorAll('.rpv-core__text-layer-text, .react-pdf__Page__textContent span') : [];
         for (let i = 0; i < l.length; i++) {
             const m = /^\*\s*((?:\d\s*){13})\*$/.exec(l[i].textContent.trim());
             if (m) return m[1].replace(/\s/g, '');
@@ -5216,6 +5218,26 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const s = kart && kart.querySelector('.dx-treeview-node.dx-state-selected');
         return s ? s.textContent.trim() : '';
     }
+    // Evrak ağacında seçili belgenin birim evrak numarası (ek belgede ana belgenin numarası); yoksa null.
+    function acikBelgeNo(kart) {
+        const A = window.__uyapEvrakAgaci;
+        const tv = kart && A && kart.querySelector('.evrak-treeview');
+        const koklar = tv && A.veri(tv);
+        const node = tv && tv.querySelector('.dx-treeview-node.dx-state-selected');
+        const g = koklar && node ? A.harita(koklar)[node.getAttribute('data-item-id')] : null;
+        if (!g || !g.x.evrak) return null;
+        const no = parseInt(String(A.ozet(g.x, g.ebeveyn).birimEvrakNo || ''), 10);
+        return no > 0 ? no : null;
+    }
+    // Evrak ağacında seçili belgenin onay tarihi ("16/09/2026"); yoksa ''.
+    function acikBelgeTarihi(kart) {
+        const A = window.__uyapEvrakAgaci;
+        const tv = kart && A && kart.querySelector('.evrak-treeview');
+        const koklar = tv && A.veri(tv);
+        const node = tv && tv.querySelector('.dx-treeview-node.dx-state-selected');
+        const g = koklar && node ? A.harita(koklar)[node.getAttribute('data-item-id')] : null;
+        return g && g.x.evrak ? String(A.ozet(g.x, g.ebeveyn).onaylandigiTarih || '').slice(0, 10) : '';
+    }
     function barkodMenusu(h, secili) {
         const m = /^\*?\s*((?:\d\s*){13})\*?$/.exec(secili);
         if (!m || !/^kapalı tebligat/.test(kucukHarf(acikBelgeAdi(h)))) return null;
@@ -5224,11 +5246,218 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                    ['PTT barkod sorgula', function() { pttSorgula(barkod); }]];
         const kart = h.closest('.dosya-sorgula-popup');
         const d = kart && window.__uyapKartVerisi ? window.__uyapKartVerisi(kart) : null;
+        // Gözle görülen tebligatı tek tıkla büro veritabanına yaz (İcra Süreçleri'ne girmeden): bu belge + PTT durumu.
+        const evrakNo = kart ? acikBelgeNo(kart) : null;
+        if (d && d.dosyaId && evrakNo) g.push(['Dosya tebligatlarına kaydet', function() { tebligatEkle(d, evrakNo, barkod); }]);
         if (d) g.push([PTT_SABLONU + ' işi ata', function() {
             const b = acikBelge(kart);
             pencereAc(d, kart, b ? b.evrakId : null, { sablon: PTT_SABLONU, barkod: barkod });
         }]);
         return [g];
+    }
+    // Belge görüntüleyicide açık "Kapalı Tebligat (tarih)" belgesinin üstünde sağ tık (seçim gerekmez): tebligatı büro
+    // veritabanına kaydet (belge dosya olarak saklanmaz; tür, borçlu, barkod, PTT durumu yazılır) ve belgedeki barkodu
+    // PTT'de sorgula (görüntüleyicide barkoda tıklamayla aynı işlev). Evrak ağacında değil, yalnız görüntüleyicide.
+    // Görüntüleyicinin kökü: .documentViewerHeader'ı DOĞRUDAN çocuk olarak taşıyan kap (canlı 20.11.2026: yalnız
+    // [.documentViewerHeader, .documentViewerBody]). Başlığı içeren daha üst kaplar dosya penceresinin çoğudur; onlar
+    // sayılırsa pencerenin her yerinde bu menü çıkıp dosya menüsünü örtüyordu.
+    function goruntuleyiciKoku(h, kart) {
+        for (let a = h; a && a !== kart; a = a.parentElement) {
+            const c = a.children;
+            for (let i = 0; c && i < c.length; i++) if (c[i].classList && c[i].classList.contains('documentViewerHeader')) return a;
+        }
+        return null;
+    }
+    function tebligatBelgesiMenusu(h) {
+        const kart = h.closest('.dosya-sorgula-popup');
+        if (!kart || h.closest('.evrak-treeview')) return null;
+        const kok = goruntuleyiciKoku(h, kart);
+        const bas = kok && kok.querySelector(':scope > .documentViewerHeader h6');
+        const ad = (bas ? bas.textContent : '').trim() || acikBelgeAdi(h);
+        const kucuk = kucukHarf(ad);
+        const mazbataMi = /^kapalı (e-)?tebliğ mazbatası/.test(kucuk);
+        if (!kok || !(mazbataMi || /^kapalı tebligat/.test(kucuk))) return null;
+        const barkod = belgedekiBarkod(kok);   // kartın gizli sekmelerindeki başka görüntüleyiciler karışmasın
+        const d = window.__uyapKartVerisi ? window.__uyapKartVerisi(kart) : null;
+        const evrakNo = acikBelgeNo(kart);
+        const g = [[ad + (barkod ? ' · ' + barkod : ''), null]];
+        if (mazbataMi) {
+            // E-tebliğ mazbatası: evrak listesinde açıklaması yok, barkod yalnız belgede. Ekrandaki yazıdan okunur, UYAP'a gidilmez.
+            if (d && d.birimId && d.dosyaNo) g.push(['Mazbatayı tebligata işle', function() { mazbataIsle(d, kok, ad, acikBelgeTarihi(kart), null); }]);
+            if (barkod) g.push(['Barkod sorgula', function() { pttSorgula(barkod); }]);
+            return g.length > 1 ? [g] : null;
+        }
+        if (d && d.dosyaId && evrakNo) g.push(['Dosya tebligatlarına kaydet', function() { tebligatEkle(d, evrakNo, barkod); }]);
+        if (barkod) g.push(['Barkod sorgula', function() { pttSorgula(barkod); }]);
+        return g.length > 1 ? [g] : null;
+    }
+    // "Mazbatayı tebligata işle": görüntülenen mazbatanın yazısı sunucuya gider (barkod, hesap sahibi, UETS olayları);
+    // barkod → muhatap + gün → kullanıcı seçimi. UYAP'a istek yok.
+    async function mazbataIsle(d, kok, ad, tarih, tebligatId) {
+        kur();
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', 'Mazbatayı tebligata işle'));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', kapat);
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        const govde = el('div', 'margin-top:10px;color:#cbd5e1;', 'İşleniyor…');
+        kutu.appendChild(govde);
+        const satirlar = [...kok.querySelectorAll('.react-pdf__Page__textContent span, .rpv-core__text-layer-text')].map(function(s) { return s.textContent; });
+        const satir = function(a, deger, renk) {
+            if (!deger) return;
+            const s = el('div', 'display:flex;gap:8px;margin-top:3px;');
+            s.appendChild(el('div', 'flex:none;width:110px;color:#9ca3af;', a));
+            s.appendChild(el('div', 'color:' + (renk || '#f3f4f6') + ';font-weight:600;word-break:break-word;', deger));
+            govde.appendChild(s);
+        };
+        let j = null;
+        try {
+            const r = await window.fetch('/__cu__/veri/mazbata_isle', { method: 'POST', cache: 'no-store', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ birim_id: String(d.birimId || ''), dosya_no: String(d.dosyaNo || ''),
+                                       dosya_tur_kod: d.dosyaTurKod != null ? Number(d.dosyaTurKod) : null,
+                                       belge: ad + (tarih ? ' ' + tarih : ''), metin: satirlar, tebligat: tebligatId }) });
+            try { j = await r.json(); } catch (e) {}
+            if (!j) throw new Error('Ofis bilgisayarından beklenmeyen yanıt (HTTP ' + r.status + '). Program güncel olmayabilir.');
+            if (j.ok === false || j.error || j.detail) throw new Error(j.error || j.detail || 'İşlem yapılamadı.');
+            j = j.veri || j;
+        } catch (e) {
+            govde.replaceChildren(el('div', 'color:#fca5a5;word-break:break-word;', e.message), dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+            return;
+        }
+        govde.innerHTML = '';
+        if (j.secim_gerekli) {
+            govde.appendChild(el('div', 'color:#fde68a;font-weight:600;', j.neden || 'Tebligat belirlenemedi.'));
+            govde.appendChild(el('div', 'margin-top:6px;', 'Bu mazbata hangi tebligatın? (' + ((j.mazbata && j.mazbata.hesap_sahibi) || 'muhatap okunamadı') +
+                (j.mazbata && j.mazbata.ilk_olay ? ', UETS ' + j.mazbata.ilk_olay.split('-').reverse().join('.') : '') + ')'));
+            (j.adaylar || []).forEach(function(a) {
+                govde.appendChild(dugme([a.evrak_tarihi ? a.evrak_tarihi.split('-').reverse().join('.') : '', a.tur, a.muhatap, a.barkod].filter(Boolean).join(' · '),
+                    'rgba(255,255,255,0.12)', function() { mazbataIsle(d, kok, ad, tarih, a.id); }));
+            });
+            if (!(j.adaylar || []).length) govde.appendChild(el('div', 'margin-top:6px;', 'Dosyada e-tebligat kaydı yok. Önce "Kapalı Tebligat" belgesini dosya tebligatlarına kaydedin.'));
+            govde.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+            return;
+        }
+        const t = j.tebligat || {};
+        govde.appendChild(el('div', 'color:#86efac;font-weight:600;', 'Mazbata tebligata işlendi.'));
+        if (j.eslesme === 'muhatap_tarih') govde.appendChild(el('div', 'margin-top:4px;color:#fde68a;', 'Barkod uyuşmadı; muhatap ve tarihle eşleştirildi. Lütfen kontrol edin.'));
+        satir('Tebligat', [t.evrak_tarihi ? t.evrak_tarihi.split('-').reverse().join('.') : '', t.tur].filter(Boolean).join(' · '));
+        satir('Muhatap', t.muhatap);
+        satir('Barkod', t.barkod + (j.mazbata && j.mazbata.barkod && j.mazbata.barkod !== t.barkod ? ' (mazbatada ' + j.mazbata.barkod + ')' : ''));
+        if (j.mazbata && j.mazbata.son_olay) satir('Son UETS olayı', j.mazbata.son_olay.tarih.split('-').reverse().join('.') + ' · ' + j.mazbata.son_olay.metin);
+        govde.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+    }
+    // "Dosya tebligatlarına kaydet": ofisteki tek dosya işi (yalnız bu tebligat belgesi + PTT; dosya UYAP'ta yeniden aranmaz).
+    async function tebligatEkle(d, evrakNo, barkod) {
+        kur();
+        kutu.innerHTML = '';
+        ort.style.display = 'flex';
+        const ust = el('div', 'display:flex;align-items:center;justify-content:space-between;gap:8px;');
+        ust.appendChild(el('div', 'font-size:14px;font-weight:700;', 'Dosya tebligatlarına kaydet' + (barkod ? ' · ' + barkod : '')));
+        const x = el('span', 'font-size:18px;color:#9ca3af;cursor:pointer;padding:0 4px;', '×');
+        x.addEventListener('click', kapat);
+        ust.appendChild(x);
+        kutu.appendChild(ust);
+        const govde = el('div', 'margin-top:10px;color:#cbd5e1;', 'Tebligat belgesi alınıyor ve PTT\'ye soruluyor…');
+        kutu.appendChild(govde);
+        const hata = function(m) {
+            govde.replaceChildren(el('div', 'color:#fca5a5;word-break:break-word;', m),
+                                  dugme('Yeniden dene', 'var(--cu-vurgu)', function() { tebligatEkle(d, evrakNo, barkod); }),
+                                  dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
+        };
+        const istek = async function(yol, govdeVeri) {
+            const r = await window.fetch('/__uyap_agent__/icra_guncelle/dosya' + yol, govdeVeri === undefined
+                ? { cache: 'no-store', credentials: 'same-origin' }
+                : { method: 'POST', cache: 'no-store', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(govdeVeri) });
+            let j = null;
+            try { j = await r.json(); } catch (e) {}
+            if (!j) throw new Error('Ofis bilgisayarından beklenmeyen yanıt (HTTP ' + r.status + '). Program güncel olmayabilir.');
+            if (j.error) throw new Error(j.error);
+            return j.tarama;
+        };
+        let t;
+        try {
+            t = await istek('', { uyap_dosya_id: String(d.dosyaId), evraklar: [evrakNo], ptt: true,
+                                  birim_id: String(d.birimId || ''), dosya_no: String(d.dosyaNo || ''),
+                                  dosya_tur_kod: d.dosyaTurKod != null ? Number(d.dosyaTurKod) : null });
+        }
+        catch (e) { hata(e.message); return; }
+        for (let i = 0; i < 300 && t && ['bitti', 'hata', 'iptal'].indexOf(t.durum) < 0; i++) {
+            govde.textContent = t.durum === 'captcha' ? 'UYAP güvenlik doğrulaması istiyor: İcra Süreçleri panelinden doğrulayın.'
+                : (t.mesaj || 'İşleniyor…');
+            await new Promise(function(r) { setTimeout(r, 1500); });
+            try { t = await istek('/' + encodeURIComponent(t.id)); } catch (e) { hata(e.message); return; }
+        }
+        if (!t || t.durum !== 'bitti') { hata((t && t.mesaj) || 'İşlem tamamlanamadı.'); return; }
+        govde.innerHTML = '';
+        const satir = function(ad, deger, renk) {
+            if (!deger) return;
+            const s = el('div', 'display:flex;gap:8px;margin-top:3px;');
+            s.appendChild(el('div', 'flex:none;width:110px;color:#9ca3af;', ad));
+            s.appendChild(el('div', 'color:' + (renk || '#f3f4f6') + ';font-weight:600;word-break:break-word;', deger));
+            govde.appendChild(s);
+        };
+        let kayit = null, neden = '', kes = '';
+        try {
+            const r = await window.fetch('/__cu__/veri/dosya?id=' + encodeURIComponent(t.dosya), { cache: 'no-store', credentials: 'same-origin' });
+            const j = await r.json();
+            const v = j && (j.veri || j);
+            kayit = ((v && v.tebligatlar) || []).find(function(x) { return x.evrak_no === evrakNo; }) || null;
+            const a = ((v && v.alinamayan) || []).find(function(x) { return x.evrak_no === evrakNo; });
+            neden = a ? (a.neden || a.tebligat_notu || '') : '';
+            const b = kayit && kayit.borclu_bag ? ((v && v.taraflar) || []).find(function(x) { return x.bag === kayit.borclu_bag; }) : null;
+            kes = b ? b.kesinlesme : '';
+        } catch (e) {}
+        if (kayit) {
+            govde.appendChild(el('div', 'color:#86efac;font-weight:600;', 'Tebligat dosyanın tebligatlarına kaydedildi.'));
+            satir('Grup', kayit.grup);
+            satir('Tebligat türü', kayit.tur || 'Belirsiz', kayit.tur && kayit.tur !== 'Belirsiz' ? null : '#fde68a');
+            if (kayit.zarf_icerigi && kayit.zarf_icerigi !== kayit.tur) satir('Zarf içeriği', kayit.zarf_icerigi);
+            if (kayit.haciz_turu) {
+                if (kayit.haciz_sirasi) satir('89 sırası', '89/' + kayit.haciz_sirasi);
+                else {
+                    // Belgede 89/1-2-3 yazmıyor: tahmin yok, kullanıcıya sorulur.
+                    const s89 = el('div', 'display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;');
+                    s89.appendChild(el('div', 'flex:none;width:110px;color:#fde68a;', '89 sırası?'));
+                    [1, 2, 3].forEach(function(n) {
+                        s89.appendChild(dugme('89/' + n, 'rgba(255,255,255,0.12)', async function() {
+                            try {
+                                const r = await window.fetch('/__cu__/veri/haciz_sirasi', { method: 'POST', cache: 'no-store', credentials: 'same-origin',
+                                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tebligat: kayit.id, sira: n }) });
+                                const j = await r.json();
+                                if (j && (j.ok === false || j.error)) throw new Error(j.error || 'Kaydedilemedi.');
+                                s89.replaceChildren(el('div', 'flex:none;width:110px;color:#9ca3af;', '89 sırası'), el('div', 'color:#86efac;font-weight:600;', '89/' + n + ' kaydedildi'));
+                            } catch (e) { kisaBildirim(e.message); }
+                        }));
+                    });
+                    govde.appendChild(s89);
+                }
+            }
+            // Muhatap üçüncü kişi olabilir (89/1 haciz ihbarnamesi): borçluya bağlı olsa da muhatap ayrıca gösterilir.
+            satir('Muhatap', kayit.muhatap);
+            if (kayit.borclu && kucukHarf(kayit.borclu) !== kucukHarf(kayit.muhatap || '')) satir('Dosyadaki borçlu', kayit.borclu);
+            satir('Barkod', kayit.barkod);
+            satir('PTT durumu', kayit.ptt_durumu || (kayit.elektronik ? 'E-tebligat' : 'Sorgulanamadı'));
+            satir('Mazbata', kayit.mazbata_var ? 'Dosyaya döndü'
+                : kayit.elektronik ? 'Henüz işlenmedi ("Kapalı E-Tebliğ Mazbatası" gelince sağ tık › Mazbatayı tebligata işle)' : 'Henüz dönmedi');
+            // Kesinleşme yalnız ödeme / tahliye emrinde (borçlunun) ve 103 / kıymet takdirinde (sabit süre) vardır.
+            const kesTur = /^(ödeme emri|tahliye emri|103 davetiyesi|kıymet takdiri raporu)$/.test(kucukHarf(kayit.tur || ''));
+            satir(kesTur ? 'Borçlunun kesinleşmesi' : 'Kesinleşme', kesTur ? kes : 'Bu tebligat türünde kesinleşme yok');
+            if (!kayit.tur || kayit.tur === 'Belirsiz') govde.appendChild(el('div', 'margin-top:6px;color:#fde68a;',
+                'Tür belgeden anlaşılamadı. İcra Süreçleri › Tebligatlar › "Tür eşleştir" ile türünü seçebilirsiniz.'));
+        } else {
+            govde.appendChild(el('div', 'color:#fde68a;font-weight:600;', 'Tebligat kaydedilemedi.'));
+            if (neden) satir('Neden', neden);
+        }
+        (t.rapor || []).forEach(function(r) { govde.appendChild(el('div', 'margin-top:3px;color:#9ca3af;font-size:11px;', r)); });
+        (t.uyarilar || []).slice(0, 5).forEach(function(u) {
+            govde.appendChild(el('div', 'margin-top:3px;color:#fde68a;word-break:break-word;', typeof u === 'string' ? u : (u.metin || JSON.stringify(u))));
+        });
+        govde.appendChild(dugme('Kapat', 'rgba(255,255,255,0.15)', kapat));
     }
     async function pttSorgula(barkod) {
         kur();
@@ -5466,6 +5695,14 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
                 sagMenuGoster(ev.clientX, ev.clientY, gruplar);
             };
             const kopyala = secili ? [[['Seçili metni kopyala', function() { panoya(secili); }]]] : [];
+            let tebG = null;
+            try { tebG = tebligatBelgesiMenusu(h); } catch (e) {}
+            if (alan && tebG) {
+                let dosyaG = null;
+                try { dosyaG = sagMenuMaddeleri(h); } catch (e) {}
+                goster(kopyala.concat(tebG, dosyaG || [], panoGruplari(alan, secili)));
+                return;
+            }
             if (alan) {
                 // Yazı alanı: seçim ya da dolu çoklu pano varsa bizim menü (Kes / Yapıştır için Shift + sağ tık).
                 const g = panoGruplari(alan, secili);
@@ -5477,6 +5714,11 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
             // çoklu pano. Kartta seçimsiz sağ tıkta pano sırası son kopyalananı kaydeder.
             let kartG = null;
             if (secili) { try { kartG = barkodMenusu(h, secili); } catch (e) {} }
+            if (!kartG && tebG) {
+                let dosyaG = null;
+                try { dosyaG = sagMenuMaddeleri(h); } catch (e) {}
+                kartG = tebG.concat(dosyaG || []);
+            }
             if (!kartG) { try { kartG = sagMenuMaddeleri(h); } catch (e) {} }   // beklenmeyen sayfa yapısı: menüsüz
             // Ek betiklerin satırları (ör. paylas.js: belge üzerinde "Belgeyi paylaş")
             let ekG = [];

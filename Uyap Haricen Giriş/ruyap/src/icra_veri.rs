@@ -710,8 +710,10 @@ pub fn ptt_hareketlerini_yaz<C: GenericClient>(c: &mut C, tebligat: i64, ham_yan
 
 // ── Kesinleşme kuralları ve resmî tatiller ──────────────────────────────────────────────────────
 
-/// Takip türüne göre itiraz süresi. Boş kod "hepsi" demektir; üç kodu da boş kural
-/// varsayılandır. `itiraz_suresi_gun` boşsa o türde kesinleşme hesaplanmaz.
+/// Takip türüne göre kesinleşme süresi. Boş kod "hepsi" demektir; üç kodu da boş kural
+/// varsayılandır. `kesinlesme_suresi_gun` boşsa o türde kesinleşme yoktur (hesaplanmaz).
+/// Kesinleşme süresi itiraz ve ödeme sürelerinden uzun olanıdır (kullanıcı kuralı 20.11.2026);
+/// veritabanında `itiraz_suresi_gun` sütunundadır (bkz. sema/0009).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KesinlesmeKurali {
     pub id: i64,
@@ -719,9 +721,128 @@ pub struct KesinlesmeKurali {
     pub takibin_yolu: String,
     pub takibin_sekli: String,
     pub ad: String,
-    pub itiraz_suresi_gun: Option<i16>,
+    pub kesinlesme_suresi_gun: Option<i16>,
     pub aktif: bool,
     pub aciklama: String,
+    /// İtiraz / başvuru süresi; yalnız bilgi.
+    pub itiraz_gun: Option<i16>,
+    /// Elle işaretlenen itiraz kesinleşmeyi durdurur mu.
+    pub itiraz_durdurur: bool,
+    pub dayanak: String,
+    /// Kullanıcı hazır değeri değiştirdi; açılışta varsayılan yazılmaz.
+    pub elle_degisti: bool,
+}
+
+/// Programda sabit duran hazır kural (takip türü / yolu / şekli UYAP kodlarıyla).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VarsayilanKural {
+    pub turu: &'static str,
+    pub yolu: &'static str,
+    pub sekli: &'static str,
+    pub ad: &'static str,
+    /// Kesinleşme süresi; `None`: bu türde kesinleşme yok.
+    pub kesinlesme: Option<i16>,
+    pub itiraz: Option<i16>,
+    pub itiraz_durdurur: bool,
+    pub dayanak: &'static str,
+}
+
+const fn vk(
+    turu: &'static str,
+    yolu: &'static str,
+    sekli: &'static str,
+    ad: &'static str,
+    kesinlesme: Option<i16>,
+    itiraz: Option<i16>,
+    itiraz_durdurur: bool,
+    dayanak: &'static str,
+) -> VarsayilanKural {
+    VarsayilanKural { turu, yolu, sekli, ad, kesinlesme, itiraz, itiraz_durdurur, dayanak }
+}
+
+/// Hazır kesinleşme kuralları (20.11.2026; İİK metni ve Yargıtay 12. HD kararlarına göre araştırıldı, kullanıcı
+/// onayladı). Kesinleşme = itiraz ve ödeme sürelerinden uzun olanın bitişi, yani icra işleminin yapılabileceği gün.
+/// İlamlı takipte icra mahkemesine başvuru (İİK 33) ve kambiyo haciz yolunda itiraz (İİK 169) takibi kendiliğinden
+/// durdurmaz. Kodlar UYAP takip açılış listesindendir (`takip_turu_listesi`).
+pub const VARSAYILAN_KURALLAR: &[VarsayilanKural] = &[
+    vk("", "", "", "Varsayılan (tüm takipler)", Some(7), Some(7), true, ""),
+    // İlamlı (0)
+    vk("0", "0", "0", "İlamlı · Teslim / tahliye · Örnek 2", Some(7), Some(7), false, "İİK 24, 26, 33"),
+    vk("0", "0", "1", "İlamlı · Çocuk teslimi · Örnek 3", None, None, false, "İİK 25 mülga (7343); 5395 s. K. 41/A"),
+    vk("0", "1", "0", "İlamlı · Para, teminat, iş, irtifak · Örnek 4-5", Some(7), Some(7), false, "İİK 30–33, 37"),
+    vk("0", "1", "1", "İlamlı · İpotek · Örnek 6", Some(30), Some(7), false, "İİK 149, 149/a"),
+    vk("0", "2", "", "İlamlı · Diğer (ihtiyati haciz, tedbir, satış)", None, None, false, "İcra emri gönderilmez"),
+    vk("0", "3", "0", "İlamlı · Taşınır rehni · Örnek 44", Some(7), Some(7), false, "İİK 150/h, 32, 33"),
+    // İlamsız (1)
+    vk("1", "0", "0", "İlamsız · Genel haciz · Örnek 7", Some(7), Some(7), true, "İİK 60, 62, 66"),
+    vk("1", "1", "0", "İlamsız · İflas, adi · Örnek 11", Some(7), Some(7), true, "İİK 155, 156"),
+    vk("1", "1", "1", "İlamsız · Kambiyo, iflas yolu · Örnek 12", Some(5), Some(5), true, "İİK 171–174"),
+    vk("1", "2", "0", "İlamsız · İpotek · Örnek 9", Some(30), Some(7), true, "İİK 149/b, 150"),
+    vk("1", "2", "1", "İlamsız · Taşınır rehni · Örnek 8", Some(15), Some(7), true, "İİK 146, 147"),
+    vk("1", "3", "0", "İlamsız · Kambiyo, haciz yolu · Örnek 10", Some(10), Some(5), false, "İİK 168–170"),
+    vk("1", "4", "0", "İlamsız · Tahliye emri · Örnek 14", Some(15), Some(7), true, "İİK 272–274"),
+    vk("1", "4", "1", "İlamsız · Kira ödeme emri · Örnek 13", Some(30), Some(7), true, "İİK 269; TBK 315"),
+    vk("1", "5", "", "İlamsız · Diğer (aciz belgesi, hapis hakkı vb.)", None, None, true, "Ödeme emri gönderilmez"),
+];
+
+/// Takip kodları için hazır kural (tam kod eşleşmesi).
+pub fn varsayilan_kural(turu: &str, yolu: &str, sekli: &str) -> Option<&'static VarsayilanKural> {
+    VARSAYILAN_KURALLAR.iter().find(|v| v.turu == turu && v.yolu == yolu && v.sekli == sekli)
+}
+
+impl VarsayilanKural {
+    /// Kayıtlı kuralın değerleri bu hazır kuralla aynı mı (ad dahil).
+    pub fn ayni_mi(&self, ad: &str, kesinlesme: Option<i16>, itiraz: Option<i16>, durdurur: bool, dayanak: &str) -> bool {
+        self.ad == ad && self.kesinlesme == kesinlesme && self.itiraz == itiraz && self.itiraz_durdurur == durdurur && self.dayanak == dayanak
+    }
+}
+
+/// Hazır kuralları yazar: olmayanı ekler, kullanıcının değiştirmediği (`elle_degisti` değil) ve değeri farklı olanı
+/// günceller; elle değiştirilmiş kurala dokunmaz. Döner: eklenen + güncellenen satır sayısı.
+pub fn varsayilan_kurallari_yaz<C: GenericClient>(c: &mut C) -> Result<usize, String> {
+    let mut n = 0;
+    for v in VARSAYILAN_KURALLAR {
+        let mevcut = c
+            .query_opt(
+                "SELECT id, elle_degisti, ad, itiraz_suresi_gun, itiraz_gun, itiraz_durdurur, dayanak, aktif FROM kesinlesme_kurali
+                  WHERE takibin_turu = $1 AND takibin_yolu = $2 AND takibin_sekli = $3",
+                &[&v.turu, &v.yolu, &v.sekli],
+            )
+            .map_err(hata)?;
+        match mevcut {
+            None => {
+                c.execute(
+                    "INSERT INTO kesinlesme_kurali (takibin_turu, takibin_yolu, takibin_sekli, ad, itiraz_suresi_gun, itiraz_gun,
+                                                    itiraz_durdurur, dayanak, aktif, elle_degisti)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, false)",
+                    &[&v.turu, &v.yolu, &v.sekli, &v.ad, &v.kesinlesme, &v.itiraz, &v.itiraz_durdurur, &v.dayanak],
+                )
+                .map_err(hata)?;
+                n += 1;
+            }
+            Some(s) => {
+                let (id, elle): (i64, bool) = (s.get(0), s.get(1));
+                let ayni = v.ayni_mi(&s.get::<_, String>(2), s.get(3), s.get(4), s.get(5), &s.get::<_, String>(6)) && s.get::<_, bool>(7);
+                if elle || ayni {
+                    continue;
+                }
+                varsayilana_dondur(c, id, v)?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// Kuralı hazır değerlerine döndürür (etkin, `elle_degisti` = false).
+pub fn varsayilana_dondur<C: GenericClient>(c: &mut C, id: i64, v: &VarsayilanKural) -> Result<(), String> {
+    c.execute(
+        "UPDATE kesinlesme_kurali SET ad = $2, itiraz_suresi_gun = $3, itiraz_gun = $4, itiraz_durdurur = $5, dayanak = $6,
+                aktif = true, elle_degisti = false, guncelleme = now() WHERE id = $1",
+        &[&id, &v.ad, &v.kesinlesme, &v.itiraz, &v.itiraz_durdurur, &v.dayanak],
+    )
+    .map_err(hata)?;
+    Ok(())
 }
 
 impl KesinlesmeKurali {
@@ -757,7 +878,8 @@ pub fn kesinlesme_kurali_sec<'a>(
 pub fn kesinlesme_kurallari<C: GenericClient>(c: &mut C) -> Result<Vec<KesinlesmeKurali>, String> {
     let satirlar = c
         .query(
-            "SELECT id, takibin_turu, takibin_yolu, takibin_sekli, ad, itiraz_suresi_gun, aktif, aciklama
+            "SELECT id, takibin_turu, takibin_yolu, takibin_sekli, ad, itiraz_suresi_gun, aktif, aciklama,
+                    itiraz_gun, itiraz_durdurur, dayanak, elle_degisti
                FROM kesinlesme_kurali ORDER BY takibin_turu, takibin_yolu, takibin_sekli",
             &[],
         )
@@ -770,9 +892,13 @@ pub fn kesinlesme_kurallari<C: GenericClient>(c: &mut C) -> Result<Vec<Kesinlesm
             takibin_yolu: s.get(2),
             takibin_sekli: s.get(3),
             ad: s.get(4),
-            itiraz_suresi_gun: s.get(5),
+            kesinlesme_suresi_gun: s.get(5),
             aktif: s.get(6),
             aciklama: s.get(7),
+            itiraz_gun: s.get(8),
+            itiraz_durdurur: s.get(9),
+            dayanak: s.get(10),
+            elle_degisti: s.get(11),
         })
         .collect())
 }
@@ -960,8 +1086,9 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     .unwrap();
     let kurallar = kesinlesme_kurallari(c).unwrap();
     assert_eq!(kurallar.len(), 3);
-    assert_eq!(kesinlesme_kurali_sec(&kurallar, "0", "5", "9").unwrap().itiraz_suresi_gun, Some(5));
-    assert_eq!(kesinlesme_kurali_sec(&kurallar, "1", "2", "").unwrap().itiraz_suresi_gun, None);
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "0", "5", "9").unwrap().kesinlesme_suresi_gun, Some(5));
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "1", "2", "").unwrap().kesinlesme_suresi_gun, None);
+    assert!(kurallar.iter().all(|k| k.itiraz_durdurur && !k.elle_degisti), "yeni alanların varsayılanı");
     assert_eq!(kesinlesme_kurali_sec(&kurallar, "", "", "").unwrap().ad, "Varsayılan");
     assert!(resmi_tatiller(c).unwrap().contains(&NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()));
 
@@ -976,6 +1103,30 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
         assert_eq!(say(c, &format!("SELECT count(*) FROM {t}")), 0, "{t} dosyayla birlikte silinmeli");
     }
     assert_eq!(say(c, "SELECT count(*) FROM taraf"), 1);
+
+    // Hazır kurallar: hepsi eklenir; ikinci çağrı bir şey yapmaz; elle değişene dokunulmaz; elle değişmemiş ama
+    // farklı olan varsayılana döner; kodu varsayılandaki kural (ör. eski "Varsayılan") güncellenir.
+    c.batch_execute("DELETE FROM kesinlesme_kurali; INSERT INTO kesinlesme_kurali (itiraz_suresi_gun, ad) VALUES (7, 'Varsayılan')").unwrap();
+    assert_eq!(varsayilan_kurallari_yaz(c).unwrap(), VARSAYILAN_KURALLAR.len());
+    assert_eq!(varsayilan_kurallari_yaz(c).unwrap(), 0);
+    assert_eq!(say(c, "SELECT count(*) FROM kesinlesme_kurali"), VARSAYILAN_KURALLAR.len() as i64);
+    let kurallar = kesinlesme_kurallari(c).unwrap();
+    let kambiyo = kesinlesme_kurali_sec(&kurallar, "1", "3", "0").unwrap();
+    assert_eq!((kambiyo.kesinlesme_suresi_gun, kambiyo.itiraz_gun, kambiyo.itiraz_durdurur), (Some(10), Some(5), false));
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "1", "4", "1").unwrap().kesinlesme_suresi_gun, Some(30), "kira");
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "0", "2", "7").unwrap().kesinlesme_suresi_gun, None, "ilamlı diğer: kesinleşme yok");
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "", "", "").unwrap().ad, "Varsayılan (tüm takipler)");
+    c.batch_execute(
+        "UPDATE kesinlesme_kurali SET itiraz_suresi_gun = 8, elle_degisti = true WHERE takibin_turu = '1' AND takibin_yolu = '0';
+         UPDATE kesinlesme_kurali SET itiraz_suresi_gun = 9 WHERE takibin_turu = '1' AND takibin_yolu = '3';
+         UPDATE kesinlesme_kurali SET aktif = false WHERE takibin_turu = '0' AND takibin_yolu = '3';",
+    )
+    .unwrap();
+    assert_eq!(varsayilan_kurallari_yaz(c).unwrap(), 2);
+    let kurallar = kesinlesme_kurallari(c).unwrap();
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "1", "0", "0").unwrap().kesinlesme_suresi_gun, Some(8), "elle değişen korunur");
+    assert_eq!(kesinlesme_kurali_sec(&kurallar, "1", "3", "0").unwrap().kesinlesme_suresi_gun, Some(10));
+    assert!(kesinlesme_kurali_sec(&kurallar, "0", "3", "0").unwrap().aktif);
     c.batch_execute("DELETE FROM taraf; DELETE FROM birim; DELETE FROM kesinlesme_kurali; DELETE FROM resmi_tatil").unwrap();
 }
 
@@ -1071,6 +1222,25 @@ mod tests {
     }
 
     #[test]
+    fn varsayilan_kurallar_tutarli() {
+        // Kodlar tekrar etmez; kesinleşme itiraz süresinden kısa olamaz (kesinleşme = uzun olanın bitişi);
+        // kademe kuralı: yolsuz şekil, türsüz yol yok.
+        let mut gorulen = std::collections::HashSet::new();
+        for v in VARSAYILAN_KURALLAR {
+            assert!(gorulen.insert((v.turu, v.yolu, v.sekli)), "tekrar: {}", v.ad);
+            if let (Some(k), Some(i)) = (v.kesinlesme, v.itiraz) {
+                assert!(k >= i, "{}", v.ad);
+            }
+            assert!(!(v.turu.is_empty() && !v.yolu.is_empty()) && !(v.yolu.is_empty() && !v.sekli.is_empty()), "{}", v.ad);
+            assert!(v.ad.chars().count() <= 160 && v.dayanak.chars().count() <= 200);
+        }
+        assert_eq!(varsayilan_kural("1", "3", "0").map(|v| (v.kesinlesme, v.itiraz_durdurur)), Some((Some(10), false)));
+        assert_eq!(varsayilan_kural("1", "4", "1").and_then(|v| v.kesinlesme), Some(30));
+        assert!(varsayilan_kural("", "", "").is_some());
+        assert!(varsayilan_kural("9", "", "").is_none());
+    }
+
+    #[test]
     fn kural_secimi() {
         let k = |id, t: &str, y: &str, s: &str, gun, aktif| KesinlesmeKurali {
             id,
@@ -1078,9 +1248,13 @@ mod tests {
             takibin_yolu: y.into(),
             takibin_sekli: s.into(),
             ad: String::new(),
-            itiraz_suresi_gun: gun,
+            kesinlesme_suresi_gun: gun,
             aktif,
             aciklama: String::new(),
+            itiraz_gun: None,
+            itiraz_durdurur: true,
+            dayanak: String::new(),
+            elle_degisti: false,
         };
         let kurallar = vec![
             k(1, "", "", "", Some(7), true),

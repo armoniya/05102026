@@ -11,7 +11,7 @@
 use regex::bytes::Regex as BaytRegex;
 use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::sync::OnceLock;
 
@@ -43,8 +43,16 @@ pub const E_TEBLIG_TARIHSIZ_METNI: &str = "Elektronik Tebligat (evrak tarihi yok
 /// Artık değişmeyecek PTT sonuçları: bu durumdaki barkod yeniden sorgulanmaz.
 pub const SONUCLANMIS_PTT_DURUMLARI: [&str; 2] = ["TESLİM EDİLDİ", "İADE"];
 /// Sabit tebligat türleri; dışındakiler zarf içeriği metni ya da "Belirsiz"dir.
-pub const TEMEL_TURLER: [&str; 10] = [
+pub const TEMEL_TURLER: [&str; 18] = [
     "Ödeme Emri",
+    "Tahliye Emri",
+    "Satış İlanı",
+    "Sıra Cetveli ve Derece Kararı",
+    "Muhtıra",
+    "Borca İtiraz",
+    "Bankadan Gelen Cevap Yazısı",
+    "Tensip Zaptı",
+    "İcra Dairesi Genel Yazı",
     "103 Davetiyesi",
     "Kıymet Takdiri Raporu",
     "Bilirkişi Raporu",
@@ -147,9 +155,11 @@ pub fn mazbata_barkodu(aciklama: &str) -> Option<String> {
     m.get(1).or(m.get(2)).map(|x| x.as_str().to_string())
 }
 
-/// Bu barkodun kendi mazbatası dosyaya dönmüş mü (açıklamadaki barkod = bu barkod)?
+/// Bu barkodun kendi mazbatası dosyaya dönmüş mü? Açıklamada barkod varsa bu barkod olmalı; yoksa
+/// (barkodsuz mazbata, "Var") kabul edilir: `Mazbatalar::bul` barkodsuz mazbatayı yalnız PTT ile giden tek
+/// tebligata bağlar, yani bağlandıysa o tebligatındır (2026/7574: bağlanıyor ama hesap saymıyordu).
 pub fn kendi_mazbatasi_dondu_mu(barkod: &str, mazbata_var: bool, mazbata_aciklama: &str) -> bool {
-    mazbata_var && !barkod.is_empty() && mazbata_barkodu(mazbata_aciklama).as_deref() == Some(barkod)
+    mazbata_var && !barkod.is_empty() && mazbata_barkodu(mazbata_aciklama).map_or(true, |b| b == barkod)
 }
 
 /// UYAP, mazbata dönünce tebligat evrakının açıklamasına sonucu ekler:
@@ -168,18 +178,26 @@ pub fn mazbatasi_dondu_mu(barkod: &str, evrak_aciklama: &str, mazbata_var: bool,
 #[derive(Debug, Default, Clone)]
 pub struct Mazbatalar {
     barkodlu: HashMap<String, String>,
-    barkodsuz: Vec<String>,
-    tebligat_sayisi: usize,
+    /// Açıklamasında barkod olmayan mazbatalar: (açıklama, evrak günü).
+    barkodsuz: Vec<(String, Option<chrono::NaiveDate>)>,
+    /// PTT ile giden (elektronik olmayan) tebligat evrakları: birim evrak no → evrak günü. Barkodsuz fiziki
+    /// "Tebliğ Mazbatası" yalnız bunlardan birine ait olabilir; e-tebligatın mazbatası "Kapalı E-Tebliğ
+    /// Mazbatası"dır (ayrı tür). 2026/7574: bir ödeme emri + 15 banka e-tebligatı varken mazbata bağlanmıyordu.
+    fiziki: BTreeMap<String, Option<chrono::NaiveDate>>,
+}
+
+/// Evrak listesindeki gün ("28/08/2026 10:12", "01.02.2024").
+fn evrak_gunu(e: &Value) -> Option<chrono::NaiveDate> {
+    teblig_tarihini_coz(&metin(e, "onaylandigiTarih").replace('.', "/"))
 }
 
 impl Mazbatalar {
     pub fn kur(evraklar: &[Value]) -> Self {
         let mut m = Mazbatalar::default();
-        let mut tebligatlar = BTreeSet::new();
         for e in evraklar {
             let tur = metin(e, "tur");
-            if tur == HEDEF_TUR || tur == MTS_TEBLIGAT_TUR {
-                tebligatlar.insert(metin(e, "birimEvrakNo"));
+            if (tur == HEDEF_TUR || tur == MTS_TEBLIGAT_TUR) && !metin(e, "aciklama").contains(ELEKTRONIK_ANAHTAR) {
+                m.fiziki.insert(metin(e, "birimEvrakNo"), evrak_gunu(e));
             }
             if tur != TEBLIG_MAZBATASI_TUR && tur != MTS_TEBLIG_MAZBATASI_TUR {
                 continue;
@@ -189,24 +207,44 @@ impl Mazbatalar {
                 Some(b) => {
                     m.barkodlu.entry(b).or_insert(aciklama);
                 }
-                None => m.barkodsuz.push(aciklama),
+                None => m.barkodsuz.push((aciklama, evrak_gunu(e))),
             }
         }
-        m.tebligat_sayisi = tebligatlar.len();
         m
+    }
+
+    /// Kendi barkodlu mazbatası olan tebligatlar barkodsuz mazbataya aday değildir. `bilinen`: dosyanın
+    /// kayıtlı (barkod, birim evrak no) çiftleri.
+    pub fn barkodlulari_dus<'a>(&mut self, bilinen: impl Iterator<Item = (&'a String, i32)>) {
+        for (barkod, no) in bilinen {
+            if self.barkodlu.contains_key(barkod) {
+                self.fiziki.remove(&no.to_string());
+            }
+        }
+    }
+
+    /// Barkodsuz mazbatanın sahibi: mazbata kendi tebligatından önce dönemez; günü mazbatadan sonra olmayan
+    /// PTT tebligatlarından TEK aday kalırsa odur, birden çok kalırsa `None` (tahmin yok). Gün bilinmiyorsa aday sayılır.
+    fn barkodsuz_sahibi(&self, mazbata_gunu: Option<chrono::NaiveDate>) -> Option<&str> {
+        let mut adaylar = self.fiziki.iter().filter(|(_, g)| match (g, mazbata_gunu) {
+            (Some(t), Some(m)) => *t <= m,
+            _ => true,
+        });
+        let ilk = adaylar.next()?;
+        adaylar.next().is_none().then_some(ilk.0.as_str())
     }
 
     pub fn sayi(&self) -> usize {
         self.barkodlu.len() + self.barkodsuz.len()
     }
 
-    /// Barkodun mazbata açıklaması (boşsa "Var"); mazbata yoksa `None`. Açıklamasında barkod
-    /// olmayan tek mazbata, yalnız dosyada tek tebligat varsa ona bağlanır (tahmin yok).
-    pub fn bul(&self, barkod: &str) -> Option<String> {
+    /// Barkodun mazbata açıklaması (boşsa "Var"); mazbata yoksa `None`. Açıklamasında barkod olmayan
+    /// mazbata, [`Self::barkodsuz_sahibi`] bu evrakı TEK aday olarak gösteriyorsa bağlanır (e-tebligatlar sayılmaz).
+    pub fn bul(&self, barkod: &str, evrak_no: i32) -> Option<String> {
+        let no = evrak_no.to_string();
         let ac = match self.barkodlu.get(barkod) {
             Some(a) => a,
-            None if self.tebligat_sayisi == 1 && self.barkodsuz.len() == 1 => &self.barkodsuz[0],
-            None => return None,
+            None => &self.barkodsuz.iter().find(|(_, g)| self.barkodsuz_sahibi(*g) == Some(no.as_str()))?.0,
         };
         Some(if ac.is_empty() { "Var".to_string() } else { ac.clone() })
     }
@@ -331,6 +369,123 @@ fn tekrari_tekille(s: &str) -> String {
 
 const MAAS_KELIMELERI: [&str; 5] = ["maas", "ucret", "isveren", "is yeri", "hizmet"];
 
+/// Zarf içeriğinden (memurun elle yazdığı "BU ZARFTA … VARDIR" metni ya da tanınmamış eski tür) sabit tür. Yazım
+/// farkları (büyük-küçük harf, Türkçe karakter, bitişik yazım: "SATIŞİLANI", "VEDERECE"), baştaki tarih ve tekrar yok
+/// sayılır. Bir zarfta birden çok belge varsa öncelik: icra / ödeme emri › borca itiraz › sıra cetveli › satış ilanı ›
+/// muhtıra › tahliye emri › diğerleri ("satış ilanı ve yediemin muhtırası" → Satış İlanı). 20.11.2026, Tür eşleştir'de
+/// bekleyen 186 yazılış (7.167 tebligat) incelenerek; tanınmayan yazılış Tür eşleştir'de kalır.
+pub fn icerik_turu(icerik: &str) -> Option<&'static str> {
+    let k: String = tr_kucuk(icerik).chars().filter(|c| c.is_alphanumeric() || *c == '/').collect();
+    let var = |x: &str| k.contains(x);
+    if k.is_empty() {
+        return None;
+    }
+    // İlamlı icra emri ("4-5 ÖRNEK İCRA EMRİ", "ÖRNEK 6 İCRA EMRİ", "13 ÖRNEK İCRA EMRİ") ödeme emri grubundadır
+    // (kullanıcı kararı 20.11.2026: kesinleşme bundan hesaplanır).
+    if var("odemeemri") || var("odemeicraemri") || (var("icraemri") && !var("tahliye")) {
+        return Some("Ödeme Emri");
+    }
+    if var("borcaitiraz") || var("itirazdilekce") || var("itirazininkaldirilmasi") {
+        return Some("Borca İtiraz");
+    }
+    if var("siracetvel") || var("derecekarar") || var("siraderece") || var("paylastirmakarar") {
+        return Some("Sıra Cetveli ve Derece Kararı");
+    }
+    if var("satisilan") || var("satislan") {
+        return Some("Satış İlanı");
+    }
+    if var("muhtira") {
+        return Some("Muhtıra");
+    }
+    // İİK 135 tahliye emri ihale sonrasıdır, kesinleşme başlatmaz: tanınmaz, Tür eşleştir'e kalır.
+    if var("tahliyeemri") && !var("135") {
+        return Some("Tahliye Emri");
+    }
+    if var("103") && (var("davet") || var("malbeyan")) {
+        return Some("103 Davetiyesi");
+    }
+    if var("kiymettakdir") {
+        return Some("Kıymet Takdiri Raporu");
+    }
+    if var("bilirkisi") {
+        return Some("Bilirkişi Raporu");
+    }
+    if var("bankadangelen") || var("bankacevap") {
+        return Some("Bankadan Gelen Cevap Yazısı");
+    }
+    if var("bankahaciz") {
+        return Some("Banka (Haciz İhbarnamesi)");
+    }
+    if var("hacizihbarname") || var("haciztebligyazisi") {
+        return Some("Haciz İhbarnamesi");
+    }
+    if var("maashaciz") {
+        return Some("Maaş (Haciz Müzekkeresi)");
+    }
+    if var("tensip") {
+        return Some("Tensip Zaptı");
+    }
+    if var("icradairesigenelyazi") {
+        return Some("İcra Dairesi Genel Yazı");
+    }
+    None
+}
+
+/// Tebligatlar sekmesindeki grup (bir bakışta sayım ve süzgeç). Banka ve maaş türleri tek grupta; tanınmayan
+/// içerik ve "Belirsiz" "Diğer"de.
+pub fn tebligat_grubu(tur: &str) -> &'static str {
+    match tur {
+        "Ödeme Emri" => "Ödeme / İcra Emri",
+        "Tahliye Emri" => "Tahliye Emri",
+        "Haciz İhbarnamesi" => "Haciz İhbarnamesi (89)",
+        "Banka" | "Banka (Haciz İhbarnamesi)" => "Banka",
+        "Bankadan Gelen Cevap Yazısı" => "Bankadan Gelen Cevap",
+        "Maaş" | "Maaş (Haciz İhbarnamesi)" | "Maaş (Haciz Müzekkeresi)" => "Maaş",
+        "103 Davetiyesi" => "103 Davetiyesi",
+        "Kıymet Takdiri Raporu" => "Kıymet Takdiri",
+        "Bilirkişi Raporu" => "Bilirkişi Raporu",
+        "Satış İlanı" => "Satış İlanı",
+        "Sıra Cetveli ve Derece Kararı" => "Sıra Cetveli / Derece Kararı",
+        "Muhtıra" => "Muhtıra",
+        "Borca İtiraz" => "Borca İtiraz",
+        "Tensip Zaptı" => "Tensip Zaptı",
+        "İcra Dairesi Genel Yazı" => "İcra Dairesi Genel Yazı",
+        _ => "Diğer",
+    }
+}
+
+/// Grupların ekrandaki sırası.
+pub const GRUP_SIRASI: [&str; 16] = [
+    "Ödeme / İcra Emri", "Tahliye Emri", "Haciz İhbarnamesi (89)", "Banka", "Bankadan Gelen Cevap", "Maaş", "103 Davetiyesi",
+    "Kıymet Takdiri", "Satış İlanı", "Sıra Cetveli / Derece Kararı", "Muhtıra", "Borca İtiraz", "Bilirkişi Raporu", "Tensip Zaptı",
+    "İcra Dairesi Genel Yazı", "Diğer",
+];
+
+/// 89/1-2-3 sorulacak türler (haciz ihbarnamesi; bankaya ve işverene gidenler dahil).
+pub fn haciz_turu_mu(tur: &str) -> bool {
+    matches!(tur, "Haciz İhbarnamesi" | "Banka" | "Banka (Haciz İhbarnamesi)" | "Maaş (Haciz İhbarnamesi)")
+}
+
+/// Belge metnindeki haciz ihbarnamesi sırası ("89/1. Haciz ihbarnamesi vardır." → 1). Yazmıyorsa `None`: tahmin
+/// edilmez, kullanıcıya sorulur (kullanıcı kararı 20.11.2026).
+pub fn haciz_sirasi_bul(metin: &str) -> Option<i16> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let m = re(&R, r"(?:^|[^0-9])89\s*/\s*([123])(?:[^0-9]|$)").captures(metin)?;
+    m[1].parse().ok()
+}
+
+/// PDF gövdesindeki "BU ZARFTA <X> VARDIR" içeriği (sadeleştirilmiş, tekrarı tekillenmiş); yoksa `None`.
+pub fn zarf_icerigi_oku(govde: &str) -> Option<String> {
+    static ZARF: OnceLock<Regex> = OnceLock::new();
+    let govde_l = tr_kucuk(govde);
+    let m = re(&ZARF, r"bu zarfta\s+(.*?)\s+vardir").captures(&govde_l).and_then(|m| m.get(1))?;
+    let ham = ozgun_dilim(govde, &govde_l, m.start(), m.end());
+    let ham = ham.split_whitespace().collect::<Vec<_>>().join(" ");
+    let ham = tekrari_tekille(ham.trim_matches(|c: char| " .,:;\"'()[]".contains(c)));
+    let uz = ham.chars().count();
+    (uz > 2 && uz <= 120).then_some(ham)
+}
+
 /// Evrak açıklaması ve (varsa) PDF gövde metninden tebligat türü. Döner: sabit türlerden biri,
 /// zarfın beyan ettiği içerik ("BU ZARFTA <X> VARDIR"; kullanıcı eşleştirdiyse o tür),
 /// "Belirsiz" (PDF okundu, ipucu yok) ya da boş (PDF yok, ipucu yok).
@@ -346,6 +501,11 @@ pub fn tebligat_turunu_belirle(aciklama: &str, pdf_govde: Option<&str>, eslesmel
     // "Ödeme İcra Emri" de ödeme emridir (ilamsız ödeme emri ile ilamlı icra emrinin çatı adı).
     if birlesik.contains("odeme emri") || birlesik.contains("odeme icra emri") {
         return "Ödeme Emri".into();
+    }
+    // Kira süresi bitiminde tahliye emri (Örnek 14): ödeme emri değil ama borçlunun kesinleşmesini başlatır.
+    // "Tahliye emri muhtırası" ve İİK 135 (ihale sonrası) tahliye emri değildir: zarf içeriğine bırakılır.
+    if birlesik.contains("tahliye emri") && !birlesik.contains("muhtira") && !birlesik.contains("135") {
+        return "Tahliye Emri".into();
     }
     if birlesik.contains("kiymet takdir") {
         return "Kıymet Takdiri Raporu".into();
@@ -396,7 +556,8 @@ pub fn tebligat_turunu_belirle(aciklama: &str, pdf_govde: Option<&str>, eslesmel
             let ham = tekrari_tekille(ham);
             let uz = ham.chars().count();
             if uz > 2 && uz <= 120 {
-                return tur_eslestir(&ham, eslesmeler).unwrap_or(ham);
+                // Önce kullanıcının eşleştirmesi, sonra yazılış kuralları; ikisi de yoksa ham içerik (Tür eşleştir'e kalır).
+                return tur_eslestir(&ham, eslesmeler).or_else(|| icerik_turu(&ham).map(String::from)).unwrap_or(ham);
             }
         }
         return BELIRSIZ.into();
@@ -677,6 +838,22 @@ pub fn tebligat_muhatabi(aciklama: &str) -> (String, Option<String>) {
     (gorunen, None)
 }
 
+/// Muhatabın yalnız adı (rol etiketi ayıklanmış): "[ÜÇÜNCÜ ŞAHIS SALİH GÜNDÜZ]" → "SALİH GÜNDÜZ". Rol ayrıca
+/// [`muhatap_turu`] ile tutulur.
+pub fn muhatap_adi(aciklama: &str) -> String {
+    let gorunen = tebligat_muhatabi(aciklama).0;
+    let kucuk = tr_kucuk(&gorunen);
+    for etiket in [
+        "borclu ve muflis ", "borclu ", "ucuncu sahis ", "ucuncu sahs ", "ucuncu taraf ", "3. taraf ", "3.taraf ", "vekil ",
+        "alacakli ", "aracikisikurum ", "vasi ", "veli ", "kayyim ", "kayyum ", "kanuni temsilci ", "tasfiye memuru ",
+    ] {
+        if kucuk.starts_with(etiket) {
+            return gorunen.chars().skip(etiket.chars().count()).collect::<String>().trim().to_string();
+        }
+    }
+    gorunen.trim().to_string()
+}
+
 fn tek<T: Copy>(adaylar: &[T]) -> Option<T> {
     if adaylar.len() == 1 { Some(adaylar[0]) } else { None }
 }
@@ -711,11 +888,33 @@ pub enum MuhatapTuru {
     Borclu,
     /// "[Vekil …]" — borçlu vekiline tebliğ borçluya tebliğ sayılır.
     Vekil,
+    /// "[VASİ …]", veli, kayyum, kanuni temsilci, tasfiye memuru, iflas idaresi: borçlunun kanuni temsilcisine
+    /// tebliğ borçluya tebliğdir (Tebligat K. 11, 12, 13). Eskiden üçüncü kişi sayılıp kesinleşmeye girmiyordu
+    /// (kullanıcı bulgusu 20.11.2026, İzmir 12. İcra 2023/21213; 15 borçlu).
+    Temsilci,
     /// "[Tebligat Yapılacak 3. Taraf …]", "[ARACIKISIKURUM …]" vb.: borçlunun kendisi değil.
     Ucuncu,
     /// Açıklamada muhatap yok (MTS: "PTT MTS Tebligat Belgesi").
     Yok,
 }
+
+impl MuhatapTuru {
+    /// Veritabanındaki `muhatap_turu` değeri.
+    pub fn kod(self) -> &'static str {
+        match self {
+            MuhatapTuru::Borclu => "borclu",
+            MuhatapTuru::Vekil => "vekil",
+            MuhatapTuru::Temsilci => "temsilci",
+            MuhatapTuru::Ucuncu => "ucuncu",
+            MuhatapTuru::Yok => "",
+        }
+    }
+}
+
+/// Kanuni temsilci etiketleri (`tr_kucuk` biçiminde, sonda boşlukla: "veli" "velibey" gibi adlara uymasın).
+const TEMSILCI_ETIKETLERI: [&str; 9] = [
+    "vasi ", "veli ", "kayyim ", "kayyum ", "kanuni temsilci", "yasal temsilci", "tasfiye memuru", "iflas idaresi", "iflas idare memuru",
+];
 
 pub fn muhatap_turu(aciklama: &str) -> MuhatapTuru {
     let Some(ic) = muhatap_parantezi(aciklama) else { return MuhatapTuru::Yok };
@@ -724,6 +923,8 @@ pub fn muhatap_turu(aciklama: &str) -> MuhatapTuru {
         MuhatapTuru::Borclu
     } else if k.starts_with("vekil") {
         MuhatapTuru::Vekil
+    } else if TEMSILCI_ETIKETLERI.iter().any(|e| k.starts_with(e)) {
+        MuhatapTuru::Temsilci
     } else {
         MuhatapTuru::Ucuncu
     }
@@ -845,6 +1046,8 @@ mod tests {
         assert!(kendi_mazbatasi_dondu_mu("3000120018142", true, a));
         assert!(!kendi_mazbatasi_dondu_mu("3000120018143", true, a));
         assert!(!kendi_mazbatasi_dondu_mu("", true, a));
+        assert!(kendi_mazbatasi_dondu_mu("4007703326778", true, "Var"), "bağlanmış barkodsuz mazbata sayılır");
+        assert!(!kendi_mazbatasi_dondu_mu("4007703326778", false, "Var"));
         assert!(teblig_sonucu_aciklamada_mi("Normal Tebligat[BORÇLU AHMET YILMAZ] - Tebliğ Edildi"));
         assert!(teblig_sonucu_aciklamada_mi("Normal Tebligat[BORÇLU X] -  TEBLİĞ EDİLEMEDİ "));
         assert!(!teblig_sonucu_aciklamada_mi("Normal Tebligat[BORÇLU AHMET YILMAZ]"));
@@ -858,11 +1061,40 @@ mod tests {
         ];
         let m = Mazbatalar::kur(&evraklar);
         assert_eq!(m.sayi(), 2);
-        assert_eq!(m.bul("3000120018142").as_deref(), Some(a));
-        assert_eq!(m.bul("999").as_deref(), Some("Var"), "tek tebligat + tek barkodsuz mazbata");
+        assert_eq!(m.bul("3000120018142", 99).as_deref(), Some(a));
+        assert_eq!(m.bul("999", 10).as_deref(), Some("Var"), "tek tebligat + tek barkodsuz mazbata");
+        assert_eq!(m.bul("999", 77), None, "başka evrak");
+        // E-tebligatlar fiziki mazbatayı paylaşmaz (2026/7574: ödeme emri + 15 banka e-tebligatı)
+        let mut e = evraklar.clone();
+        for no in 20..35 {
+            e.push(json!({"tur": HEDEF_TUR, "birimEvrakNo": no, "aciklama": "Elektronik Tebligat[Tebligat Yapılacak 3. Taraf X BANKASI]"}));
+        }
+        let me = Mazbatalar::kur(&e);
+        assert_eq!(me.bul("999", 10).as_deref(), Some("Var"), "e-tebligatlar sayılmaz");
+        assert_eq!(me.bul("5003157276484", 20), None, "e-tebligata fiziki mazbata bağlanmaz");
         let mut iki = evraklar.clone();
         iki.push(json!({"tur": MTS_TEBLIGAT_TUR, "birimEvrakNo": 11}));
-        assert_eq!(Mazbatalar::kur(&iki).bul("999"), None, "iki tebligat varken tahmin yok");
+        assert_eq!(Mazbatalar::kur(&iki).bul("999", 10), None, "iki fiziki tebligat, gün yok: tahmin yok");
+        // Tarih sırası (Çeşme 2026/984: ödeme emri 10/08, mazbata 04/09, 103 davetiyesi 13/11 → mazbata ödeme emrinin)
+        let cesme = vec![
+            json!({"tur": HEDEF_TUR, "birimEvrakNo": 10, "aciklama": "Normal Tebligat[BORÇLU X]", "onaylandigiTarih": "10/08/2026 09:12"}),
+            json!({"tur": TEBLIG_MAZBATASI_TUR, "birimEvrakNo": 12, "aciklama": "", "onaylandigiTarih": "04/09/2026"}),
+            json!({"tur": HEDEF_TUR, "birimEvrakNo": 13, "aciklama": "Normal Tebligat[BORÇLU X]", "onaylandigiTarih": "13.11.2026"}),
+            json!({"tur": HEDEF_TUR, "birimEvrakNo": 14, "aciklama": "Elektronik Tebligat[3. Taraf Y BANK]", "onaylandigiTarih": "30/08/2026"}),
+        ];
+        let mc = Mazbatalar::kur(&cesme);
+        assert_eq!(mc.bul("400", 10).as_deref(), Some("Var"), "mazbatadan önceki tek PTT tebligatı");
+        assert_eq!(mc.bul("401", 13), None, "mazbatadan sonra çıkan tebligat aday değil");
+        // İki ödeme emri mazbatadan önce: tahmin yok; biri kendi barkodlu mazbatasına sahipse diğerine bağlanır
+        let mut cift = cesme.clone();
+        cift.push(json!({"tur": HEDEF_TUR, "birimEvrakNo": 9, "aciklama": "Normal Tebligat[BORÇLU X]", "onaylandigiTarih": "01/07/2026"}));
+        cift.push(json!({"tur": TEBLIG_MAZBATASI_TUR, "birimEvrakNo": 8, "aciklama": "Ödeme Emri - [X] - Barkod Numarası: 40090000 - Tebliğ Edildi", "onaylandigiTarih": "15/07/2026"}));
+        let mut m2 = Mazbatalar::kur(&cift);
+        assert_eq!(m2.bul("400", 10), None, "iki aday: tahmin yok");
+        let b9 = "40090000".to_string();
+        m2.barkodlulari_dus([(&b9, 9)].into_iter());
+        assert_eq!(m2.bul("400", 10).as_deref(), Some("Var"), "9'un kendi mazbatası var, aday 10 kalır");
+        assert!(m2.bul("40090000", 9).unwrap().contains("Barkod Numarası: 40090000"));
     }
 
     #[test]
@@ -886,6 +1118,10 @@ mod tests {
         let t = |a: &str, g: Option<&str>| tebligat_turunu_belirle(a, g, &b);
         assert_eq!(t("Normal Tebligat[BORÇLU X]", Some("BU ZARFTA Ödeme İcra Emri VARDIR")), "Ödeme Emri");
         assert_eq!(t("Ödeme Emri", None), "Ödeme Emri");
+        assert_eq!(t("Normal Tebligat[BORÇLU X]", Some("BU ZARFTA TAHLİYE EMRİ VARDIR")), "Tahliye Emri");
+        assert_eq!(t("Normal Tebligat[BORÇLU X]", Some("BU ZARFTA 4-5 ÖRNEK İCRA EMRİ VE İLAM SURETİ VARDIR")), "Ödeme Emri");
+        assert_eq!(t("Normal Tebligat[BORÇLU X]", Some("BU ZARFTA TAŞINMAZ SATIŞİLANI VARDIR")), "Satış İlanı");
+        assert_eq!(t("Normal Tebligat[BORÇLU X]", Some("BU ZARFTA TAHLİYE EMRİ MUHTIRASI VARDIR")), "Muhtıra");
         assert_eq!(t("x", Some("Kıymet Takdiri raporu")), "Kıymet Takdiri Raporu");
         assert_eq!(t("Bilirkişi raporu tebliği", None), "Bilirkişi Raporu");
         assert_eq!(t("103 davetiyesi", None), "103 Davetiyesi");
@@ -910,6 +1146,54 @@ mod tests {
             tebligat_turunu_belirle("x", Some("BU ZARFTA 05.02.2026 TARİHLİ DERECE KARARI VE SIRA CETVELİ VARDIR"), &e),
             "Sıra Cetveli"
         );
+    }
+
+    #[test]
+    fn icerik_kurallari() {
+        let k = |x: &str| icerik_turu(x);
+        // Tür eşleştir'de bekleyen gerçek yazılışlar (20.11.2026)
+        for (y, t) in [
+            ("Satış İlanı", "Satış İlanı"),
+            ("GAYRİMENKUL SATIŞ İLANI", "Satış İlanı"),
+            ("TAŞINMAZSATIŞ İLANI", "Satış İlanı"),
+            ("SATIŞ LANI", "Satış İlanı"),
+            ("Satış İlanı Takbis Takyidat Raporu", "Satış İlanı"),
+            ("araç satış ilanı ve yediemin muhtırası", "Satış İlanı"),
+            ("İHTARATLI MUHTIRA VE SATIŞ İLANI", "Satış İlanı"),
+            ("12/09/2023 TARİHLİ SIRA CETVELİ VEDERECE KARARI", "Sıra Cetveli ve Derece Kararı"),
+            ("07/01/2025 TARİHLİ SIRA CETVELİ (PAYLAŞTIRMA) KARARI", "Sıra Cetveli ve Derece Kararı"),
+            ("03/07/2025 TARİHLİ SIRADERECE KARARI", "Sıra Cetveli ve Derece Kararı"),
+            ("Derece kararı", "Sıra Cetveli ve Derece Kararı"),
+            ("Muhtıra yazısı", "Muhtıra"),
+            ("İİK 94 MD GEREĞİ MUHTIRA", "Muhtıra"),
+            ("TAHLİYE EMRİ MUHTIRASI", "Muhtıra"),
+            ("Tensip zaptı Borca İtiraz Talebi", "Borca İtiraz"),
+            ("BORCA İTİRAZ DİLEKÇESİ VE TENSİP ZAPTI", "Borca İtiraz"),
+            ("AV. X'İN İTİRAZ DİLEKÇESİ İLE KARAR TENSİPTUTANAĞI", "Borca İtiraz"),
+            ("4-5 ÖRNEK İCRA EMRİ VE İLAM SURETİ", "Ödeme Emri"),
+            ("*ÖRNEK 6 İCRA EMRİ", "Ödeme Emri"),
+            ("14 ÖRNEK TAHLİYE EMRİ VE DAYANAK SURETLERİ", "Tahliye Emri"),
+            ("Bankadan Gelen Cevap Yazısı", "Bankadan Gelen Cevap Yazısı"),
+            ("İcra Daireleri Banka Haciz Yazısı", "Banka (Haciz İhbarnamesi)"),
+            ("İcra Daireleri Haciz Tebliğ Yazısı", "Haciz İhbarnamesi"),
+            ("Tensip zaptı", "Tensip Zaptı"),
+            ("KARAR TENSİP TUTANAĞI", "Tensip Zaptı"),
+            ("İcra Dairesi Genel Yazı", "İcra Dairesi Genel Yazı"),
+        ] {
+            assert_eq!(k(y), Some(t), "{y}");
+        }
+        assert_eq!(k("İİK 135. MADDESİNE GÖRE TAHLİYE EMRİ"), None, "ihale sonrası tahliye emri kesinleşme başlatmaz");
+        assert_eq!(k("Vekillikten Çekilme Dilekçesi"), None);
+        assert_eq!(k(""), None);
+        assert!(TEMEL_TURLER.iter().all(|t| tebligat_grubu(t) != "Diğer"), "her sabit türün grubu var");
+        assert!(TEMEL_TURLER.iter().all(|t| GRUP_SIRASI.contains(&tebligat_grubu(t))));
+        assert_eq!(tebligat_grubu("Banka (Haciz İhbarnamesi)"), "Banka");
+        assert_eq!(tebligat_grubu("Belirsiz"), "Diğer");
+        assert_eq!(haciz_sirasi_bul("TEBLİĞ MAZBATASI 89/1. Haciz ihbarnamesi vardır."), Some(1));
+        assert_eq!(haciz_sirasi_bul("89 / 3 haciz ihbarnamesi"), Some(3));
+        assert_eq!(haciz_sirasi_bul("Dosya No: 2021/189/2"), None, "başka sayının parçası değil");
+        assert_eq!(haciz_sirasi_bul("haciz ihbarnamesi"), None);
+        assert_eq!(zarf_icerigi_oku("x BU ZARFTA  Satış İlanı Satış İlanı  VARDIR."), Some("Satış İlanı".into()));
     }
 
     #[test]
@@ -996,6 +1280,10 @@ mod tests {
         assert_eq!(tebligat_muhatabi("Normal Tebligat[BORÇLU VE MÜFLİS FATMA BİROLOĞLU] - Tebliğ Edildi"), ("BORÇLU VE MÜFLİS FATMA BİROLOĞLU".into(), Some("FATMA BİROLOĞLU".into())));
         assert_eq!(tebligat_muhatabi("Elektronik Tebligat[Tebligat Yapılacak 3. Taraf DENİZBANK]"), ("3. Taraf DENİZBANK".into(), None));
         assert_eq!(tebligat_muhatabi("PTT MTS Tebligat Belgesi"), (String::new(), None));
+        assert_eq!(muhatap_adi("Elektronik Tebligat[Tebligat Yapılacak 3. Taraf DENİZBANK]"), "DENİZBANK");
+        assert_eq!(muhatap_adi("Elektronik Tebligat[ÜÇÜNCÜ ŞAHIS SALİH GÜNDÜZ]"), "SALİH GÜNDÜZ");
+        assert_eq!(muhatap_adi("Normal Tebligat[Vekil HÜSEYİN KAYA]"), "HÜSEYİN KAYA");
+        assert_eq!(muhatap_adi("Normal Tebligat[BORÇLU VE MÜFLİS FATMA BİROLOĞLU] - Tebliğ Edildi"), "FATMA BİROLOĞLU");
         assert_eq!(bul("Normal Tebligat[BORÇLU AHMET YILMAZ]"), Some(1));
         assert_eq!(bul("Normal Tebligat[BORÇLU YILMAZ AHMET]"), Some(1), "sırasız eşleşme");
         assert_eq!(bul("Normal Tebligat[BORÇLU VE MÜFLİS Fatma Biroloğlu]"), Some(2));
@@ -1032,6 +1320,11 @@ mod tests {
         assert_eq!(muhatap_turu("Elektronik Tebligat[ARACIKISIKURUM İBRAHİM GÜVEN]"), MuhatapTuru::Ucuncu);
         assert_eq!(muhatap_turu("Elektronik Tebligat[Tebligat Yapılacak 3. Taraf QNB BANK ANONİM ŞİRKETİ]"), MuhatapTuru::Ucuncu);
         assert_eq!(muhatap_turu("PTT MTS Tebligat Belgesi"), MuhatapTuru::Yok);
+        assert_eq!(muhatap_turu("Normal Tebligat[VASİ ALİ ŞİMŞEK] - Tebliğ Edildi"), MuhatapTuru::Temsilci);
+        assert_eq!(muhatap_turu("Normal Tebligat[TASFİYE MEMURU AYŞE KAYA]"), MuhatapTuru::Temsilci);
+        assert_eq!(muhatap_turu("Normal Tebligat[VELİBEY TİCARET A.Ş.]"), MuhatapTuru::Ucuncu, "ad 'veli' ile başlıyor");
+        assert_eq!(muhatap_turu("Normal Tebligat[İPOTEK SAHİBİ X BANKASI]"), MuhatapTuru::Ucuncu);
+        assert_eq!(muhatap_adi("Normal Tebligat[VASİ ALİ ŞİMŞEK]"), "ALİ ŞİMŞEK");
     }
 
     #[test]

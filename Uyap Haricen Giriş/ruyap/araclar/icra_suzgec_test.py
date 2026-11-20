@@ -128,8 +128,15 @@ OZET = {"dosya": 5, "icra_dosya": 5, "acik_icra_dosya": 5, "tebligat": 8, "son_g
         "asamalar": [{"kod": "takip_talebi", "etiket": "Takip Talebi", "adet": 1}, {"kod": "teblig", "etiket": "Tebliğ", "adet": 2},
                      {"kod": "iade", "etiket": "İade", "adet": 1}, {"kod": "kesinlesti", "etiket": "Kesinleşti", "adet": 1}]}
 # Kesinleşme süreleri: takip türü ağacı (UYAP listesi + dosyalarda görülenler), kurallar, dağılım
+HAZIR_VARSAYILAN = {"ad": "Varsayılan (tüm takipler)", "gun": 7, "itiraz_gun": 7, "itiraz_durdurur": True, "dayanak": ""}
 KURALLAR = {"kurallar": [{"id": 1, "takibin_turu": "", "takibin_yolu": "", "takibin_sekli": "", "ad": "Varsayılan", "gun": 7, "aktif": True,
-                          "aciklama": "", "turu_ad": "", "yolu_ad": "", "sekli_ad": "", "ornek_no": ""}],
+                          "aciklama": "", "turu_ad": "", "yolu_ad": "", "sekli_ad": "", "ornek_no": "", "itiraz_gun": 7, "itiraz_durdurur": True,
+                          "dayanak": "", "elle_degisti": True, "adet": 40, "varsayilan": HAZIR_VARSAYILAN},
+                         {"id": 2, "takibin_turu": "1", "takibin_yolu": "3", "takibin_sekli": "0", "ad": "İlamsız · Kambiyo, haciz yolu · Örnek 10",
+                          "gun": 10, "aktif": True, "aciklama": "", "turu_ad": "İlamsız Takip", "yolu_ad": "Kambiyo Senetlerine Mahsus Haciz Yoluyla Takip",
+                          "sekli_ad": "", "ornek_no": "", "itiraz_gun": 5, "itiraz_durdurur": False, "dayanak": "İİK 168–170", "elle_degisti": False,
+                          "adet": 0, "varsayilan": {"ad": "İlamsız · Kambiyo, haciz yolu · Örnek 10", "gun": 10, "itiraz_gun": 5,
+                                                     "itiraz_durdurur": False, "dayanak": "İİK 168–170"}}],
             "dagilim": [{"turu": "1", "yolu": "0", "sekli": "0", "adet": 12, "ornek": "İzmir 5. İcra Dairesi 2026/101", "turu_ad": "İlamsız Takip",
                          "yolu_ad": "Genel Haciz Yoluyla Takip", "sekli_ad": "ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49", "ornek_no": "7"}],
             "takip_turu_bilinmeyen": 40, "liste_zamani": None,
@@ -157,18 +164,23 @@ TEB_SATIR = [
     tsat(3, 7, "İzmir 5. İcra Dairesi", "2026/7", "Kıymet Takdiri Raporu", "VELİ KARA", "borclu", "TESLİM EDİLDİ", kes_kod="talimat",
          neden="Talimat dosyasında kesinleşme yok", tdosya="Talimat Dosyası", takip="Talimat"),
 ]
+GRUP = {"Ödeme Emri": "Ödeme / İcra Emri", "Banka (Haciz İhbarnamesi)": "Banka", "Kıymet Takdiri Raporu": "Kıymet Takdiri"}
+for _t in TEB_SATIR:
+    _t.update({"grup": GRUP[_t["tur"]], "haciz_turu": _t["tur"] == "Banka (Haciz İhbarnamesi)", "haciz_sirasi": None,
+               "zarf_icerigi": "4-5 ÖRNEK İCRA EMRİ VE İLAM SURETİ" if _t["id"] == 1 else "", "muhatap_adi": _t["borclu"]})
+HACIZ_POST = []
 TEB_ISTEK = []
 TUR_POST = []
 EXCEL_ISTEK = []
 def teb_liste(q):
     f = {k: v[0] for k, v in q.items()}
     satir = [t for t in TEB_SATIR if (not f.get("muhatap") or t["muhatap"] in f["muhatap"].split("\n"))
-             and (not f.get("tur") or metin_uyar(f["tur"], t["tur"]))]
+             and (not f.get("tur") or metin_uyar(f["tur"], t["tur"])) and (not f.get("grup") or t["grup"] in f["grup"].split("\n"))]
     say = lambda k, et=str: [{"deger": d, "etiket": et(d), "adet": n} for d, n in
                              sorted({x[k]: sum(1 for y in TEB_SATIR if y[k] == x[k]) for x in TEB_SATIR}.items())]
     sec = {k: [] for k in ("birim", "dosya_no", "dosya_tur", "takip", "alacakli", "borclu", "barkod", "teblig", "teslim", "mazbata", "yeniden", "elektronik")}
     sec.update({"muhatap": say("muhatap", lambda d: {"borclu": "Borçlu", "ucuncu": "Üçüncü kişi (banka, işveren …)"}[d]), "tur": say("tur"),
-                "kesinlesme": say("kesinlesme_kod")})
+                "kesinlesme": say("kesinlesme_kod"), "grup": say("grup")})
     return {"toplam": len(satir), "dosya_sayisi": len({t["dosya"] for t in satir}), "sayfa": 1, "boyut": 100, "satirlar": satir,
             "secenekler": sec, "secenek_siniri": 300}
 istekler = []
@@ -189,7 +201,7 @@ DI = {"sira": [], "son": None, "postlar": []}
 DOSYA = {"kunye": {"id": 1, "birim": "İzmir 5. İcra Dairesi", "dosya_no": "2026/101", "durum": "Açık", "acik": True, "tur": "İcra Dosyası",
                    "acilis_tarihi": "2026-01-10", "islem_durumu": "aktif", "islem_durumu_etiket": "Aktif", "islem_durumu_notu": "",
                    "bekleme_bitis": None, "son_guncelleme": "2026-11-19 10:00", "uyap": {}},
-         "takip": {"okundu": False, "itiraz_suresi_gun": 7},
+         "takip": {"okundu": False, "kesinlesme_suresi_gun": 7},
          "taraflar": [],
          "tebligatlar": [dict(teb(1, "Ödeme Emri", "DAĞITIMDA", False), evrak_no=5, muhatap="BORÇLU AHMET YILMAZ", hareket_sayisi=0),
                          dict(teb(2, "103 Davetiyesi", "", False), evrak_no=6, muhatap="BORÇLU AHMET YILMAZ", hareket_sayisi=0)]}
@@ -248,6 +260,9 @@ def karsila(route):
     elif uc == "tebligatlar":
         TEB_ISTEK.append({k: v[0] for k, v in q.items() if v[0] and k not in ("sayfa", "boyut", "durum")})
         veri = teb_liste(q)
+    elif uc == "haciz_sirasi":
+        HACIZ_POST.append(json.loads(route.request.post_data or "{}"))
+        veri = None
     elif uc == "tebligat_dosya_kimlikleri":
         veri = sorted({t["dosya"] for t in teb_liste(q)["satirlar"]})
     elif uc == "tebligatlar_excel":
@@ -270,6 +285,9 @@ def karsila(route):
     elif uc == "kural":
         KURAL_POST.append(json.loads(route.request.post_data or "{}"))
         veri = {"id": 9, "guncellenen": 2}
+    elif uc == "kural_varsayilan":
+        KURAL_POST.append({"varsayilan": json.loads(route.request.post_data or "{}")})
+        veri = {"guncellenen": 1}
     elif uc == "gecmis":
         veri = []
     else:
@@ -297,6 +315,8 @@ with sync_playwright() as p:
     s.goto("http://sahte.test/")
     s.add_script_tag(path=JS)
     s.evaluate("window.__cuIcraTakipAc()")
+    # 20.11.2026: varsayılan sekme Dosya Listesi; bu deneme Süreçler sekmesini sınar.
+    s.click("#cu-icra .i-sekmeler button:has-text('Süreçler')")
     s.wait_for_selector("#cu-icra table.liste tbody.tik")
     say = lambda: s.locator("#cu-icra tbody.tik").count()
     kutu = lambda k: s.locator('#cu-icra .i-kutu-s[data-k="%s"] input' % k)
@@ -315,7 +335,11 @@ with sync_playwright() as p:
     kes_hucre = lambda i: ahmet.locator("tr").nth(i).locator("td.kes")
     assert kes_hucre(0).inner_text() == "Kesinleşti", kes_hucre(0).inner_text()
     assert kes_hucre(1).inner_text() == "Kesinleşme Bekliyor", kes_hucre(1).inner_text()
-    assert kes_hucre(3).inner_text() == "—" and kes_hucre(3).locator("span").get_attribute("title") == "Bu tebligat türünde kesinleşme yok"
+    # Kesinleşme taşıyanlar önce (2026/7574: banka yazıları ödeme emrini gizliyordu); kesinleşmesi olmayanlar sonda
+    kesler = [kes_hucre(i).inner_text() for i in range(5)]
+    ilk_bos = kesler.index("—")
+    assert all(k != "—" for k in kesler[:ilk_bos]) and all(k == "—" for k in kesler[ilk_bos:]), kesler
+    assert kes_hucre(4).locator("span").get_attribute("title") == "Bu tebligat türünde kesinleşme yok"
     assert s.locator("#cu-icra tbody.tik").nth(4).locator("td.kes").first.inner_text() == "İtiraz", "itirazda ödeme emri satırı İtiraz"
     s.screenshot(path=os.path.join(CIKTI, "icra1_liste.png"))
 
@@ -608,7 +632,7 @@ with sync_playwright() as p:
     # Dosya sekmesi: takip türü, yolu, şekli adlarıyla (kod gösterilmez)
     DOSYA["takip"] = {"okundu": True, "turu": "1", "yolu": "0", "sekli": "0", "turu_ad": "İlamsız Takip", "yolu_ad": "Genel Haciz Yoluyla Takip",
                       "sekli_ad": "ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri - Eski No: 49", "ornek_no": "7", "okunma": "2026-11-19 14:05",
-                      "itiraz_suresi_gun": 7, "kural": "Varsayılan", "alacak_toplam": "1500.00"}
+                      "kesinlesme_suresi_gun": 7, "kural": "Varsayılan", "alacak_toplam": "1500.00"}
     s.locator("#cu-icra .i-panel button[aria-label='Paneli kapat']").click(); bekle(s, 200)
     s.locator("#cu-icra tbody.tik").first.locator("td").nth(2).click(); bekle(s, 600)
     s.locator("#cu-icra .i-panel .i-sekmeler button", has_text="Dosya").click(); bekle(s, 400)
@@ -662,10 +686,30 @@ with sync_playwright() as p:
     tur_s.select_option("0"); bekle(s, 100)
     assert yol_s.input_value() == "" and sek_s.is_disabled() and ad.input_value() == "İlamlı Takip"
     tur_s.select_option("1"); yol_s.select_option("0"); sek_s.select_option("1"); bekle(s, 100)
+    ana.locator("input[aria-label='Kesinleşme süresi (gün)']").fill("10")
     ana.locator("input[aria-label='İtiraz süresi (gün)']").fill("5")
+    ana.locator("label", has_text="İtiraz takibi durdurur").locator("input").uncheck()
+    ana.locator("input[aria-label='Dayanak']").fill("İİK 168")
     ana.locator("button", has_text="Ekle").click(); bekle(s, 500)
     assert KURAL_POST[-1] == {"id": None, "takibin_turu": "1", "takibin_yolu": "0", "takibin_sekli": "1",
-                              "ad": "İlamsız Takip · Genel Haciz Yoluyla Takip · Örnek 10", "gun": 5, "aktif": True}, KURAL_POST[-1]
+                              "ad": "İlamsız Takip · Genel Haciz Yoluyla Takip · Örnek 10", "gun": 10, "aktif": True,
+                              "itiraz_gun": 5, "itiraz_durdurur": False, "dayanak": "İİK 168"}, KURAL_POST[-1]
+    # Kural tablosu: hazır kural silinmez; değiştirilmişse "Varsayılana dön"; değişmemişse düğme yok; itiraz etkisi ve dosya sayısı
+    satirlar = s.locator("#cu-icra .i-ana table").first.locator("tbody tr")
+    s1, s2 = satirlar.nth(0).inner_text(), satirlar.nth(1).inner_text()
+    assert "Değiştirildi" in s1 and "40" in s1 and "Durdurur" in s1, s1
+    assert "Varsayılan" in s2 and "10 gün" in s2 and "5 gün" in s2 and "Durdurmaz" in s2 and "İİK 168–170" in s2, s2
+    assert satirlar.locator("button", has_text="Sil").count() == 0, "hazır kural silinemez"
+    assert satirlar.nth(1).locator("button", has_text="Varsayılana dön").count() == 0
+    satirlar.nth(0).locator("button", has_text="Varsayılana dön").click(); bekle(s, 500)
+    assert KURAL_POST[-1] == {"varsayilan": {"id": 1}}, KURAL_POST[-1]
+    # Düzenle: yeni alanlar forma dolar
+    satirlar.nth(1).locator("button", has_text="Düzenle").click(); bekle(s, 200)
+    assert ana.locator("input[aria-label='Kesinleşme süresi (gün)']").input_value() == "10"
+    assert ana.locator("input[aria-label='İtiraz süresi (gün)']").input_value() == "5"
+    assert not ana.locator("label", has_text="İtiraz takibi durdurur").locator("input").is_checked()
+    assert ana.locator("input[aria-label='Dayanak']").input_value() == "İİK 168–170"
+    ana.locator("button", has_text="Vazgeç").click(); bekle(s, 200)
     metin = s.locator("#cu-icra .i-ana").inner_text()
     assert "Bütün takipler (varsayılan)" in metin and "İlamsız Takip › Genel Haciz Yoluyla Takip › ÖRNEK: 7 İlamsız Takiplerde Ödeme Emri" in metin, metin
     assert "40 (bunlara varsayılan süre uygulanır)" in metin and "UYAP listesi henüz alınmadı" in metin, metin
@@ -744,6 +788,25 @@ with sync_playwright() as p:
     pen.locator("button", has_text="Kaydet ve uygula").click(); bekle(s, 600)
     assert TUR_POST[-1] == {"eslesmeler": [{"anahtar": "tensip zapti", "tur": "Tensip Zaptı"}, {"anahtar": "ilani satis", "tur": "Satış İlanı"}]}, TUR_POST[-1]
     assert s.locator("#cu-icra .i-pencere").count() == 0 and len(TEB_ISTEK) > once, "pencere kapanır, liste yenilenir"
+    # 14b) Grup çubuğu (adetli, tıklayınca süzer, yeniden tıklayınca kalkar); tür altında zarf içeriği; 89 sırası sorulur
+    gruplar = s.locator("#cu-icra .i-gruplar")
+    assert gruplar.count() == 1, "grup çubuğu"
+    cipler = [x.strip() for x in gruplar.locator(".i-grup").all_inner_texts()]
+    assert cipler[:3] == ["Tümü 3", "Ödeme / İcra Emri 1", "Banka 1"] and "Kıymet Takdiri 1" in cipler, cipler
+    gruplar.locator(".i-grup", has_text="Banka").click(); bekle(s, 400)
+    assert TEB_ISTEK[-1].get("grup") == "Banka" and s.locator("#cu-icra table.teb tbody.teb-dosya tr").count() == 1, TEB_ISTEK[-1]
+    assert "aktif" in s.locator("#cu-icra .i-gruplar .i-grup", has_text="Banka").get_attribute("class")
+    # 89: belgede yazmıyor → "?" → seçenekler → 89/2 kaydedilir
+    s.locator("#cu-icra table.teb tbody.teb-dosya button", has_text="?").click(); bekle(s, 150)
+    secenek = [x.strip() for x in s.locator("#cu-icra table.teb .h89 button").all_inner_texts()]
+    assert secenek == ["89/1", "89/2", "89/3"], secenek
+    s.locator("#cu-icra table.teb .h89 button", has_text="89/2").click(); bekle(s, 400)
+    assert HACIZ_POST[-1] == {"tebligat": 2, "sira": 2}, HACIZ_POST
+    s.locator("#cu-icra .i-gruplar .i-grup", has_text="Banka").click(); bekle(s, 400)
+    assert not TEB_ISTEK[-1].get("grup") and s.locator("#cu-icra table.teb tbody.teb-dosya tr").count() == 3, "aynı gruba yeniden tıklayınca süzgeç kalkar"
+    odeme = s.locator("#cu-icra table.teb tbody.teb-dosya").first.locator("tr").first.inner_text()
+    assert "Ödeme / İcra Emri" in odeme and "4-5 ÖRNEK İCRA EMRİ VE İLAM SURETİ" in odeme, odeme
+    s.screenshot(path=os.path.join(CIKTI, "icra16_tebligat_gruplari.png"))
     s.locator("#cu-icra .i-sekmeler button", has_text="Süreçler").click(); bekle(s, 500)
 
     # 12) Dar ekran: kutular tablonun üstünde
@@ -759,4 +822,4 @@ with sync_playwright() as p:
     b.close()
 
 assert not hatalar, hatalar
-print("TAMAM — 15 adım geçti (Tebligatlar + Tür eşleştir dahil) — (çoklu seçim, Tümünü seç / hariç, ayrı daire–dosya no, UYAP'tan güncelleme, takip türü, kesinleşme süreleri dahil);", len(istekler), "liste isteği")
+print("TAMAM — 16 adım geçti (Tebligatlar + Tür eşleştir dahil) — (çoklu seçim, Tümünü seç / hariç, ayrı daire–dosya no, UYAP'tan güncelleme, takip türü, kesinleşme süreleri dahil);", len(istekler), "liste isteği")

@@ -560,6 +560,11 @@ pub fn _wire_datachannel(channel: Arc<RTCDataChannel>, cid: String) {
     println!("[+] DataChannel açıldı; istekler UYAP'a iletilecek.");
 }
 
+/// Geçiş dönemi (20.11.2026): cokluuyap.com'daki tarayıcı kodu güncellenene kadar ŞİFRESİZ aktarma (eski istemcinin
+/// `pub`suz relay_hello'su) da kabul edilir, günlüğe uyarı yazılır. Site güncellenince `false` yapılır: o zaman yalnız
+/// uçtan uca şifreli aktarma (`relay_sifre`) çalışır.
+pub const SIFRESIZ_AKTARMA_KABUL: bool = true;
+
 pub struct WSRelaySender {
     pub cid: Option<String>,
     buffered_amount: Arc<AtomicUsize>,
@@ -568,8 +573,10 @@ pub struct WSRelaySender {
 }
 
 impl WSRelaySender {
-    pub fn new(ws_tx: mpsc::UnboundedSender<WsMessage>, cid: Option<String>) -> Arc<Self> {
+    /// `sifre`: uçtan uca şifreli aktarmada ofis→istemci yönü (yoksa eski, şifresiz base64 aktarma).
+    pub fn new(ws_tx: mpsc::UnboundedSender<WsMessage>, cid: Option<String>, sifre: Option<crate::relay_sifre::Yon>) -> Arc<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+        let mut sifre = sifre;
         let buffered_amount = Arc::new(AtomicUsize::new(0));
         let ba_clone = buffered_amount.clone();
         let cid_clone = cid.clone();
@@ -580,10 +587,11 @@ impl WSRelaySender {
                     break;
                 };
                 let len = frame.len();
-                let mut payload = json!({
-                    "type": "relay",
-                    "b64": B64_STD.encode(&frame),
-                });
+                // Kuyruk sırası = sayaç sırası: çerçeveler tek görevde, geldikleri sırayla şifrelenip gönderilir.
+                let mut payload = match sifre.as_mut() {
+                    Some(y) => json!({"type": "relay", "e": B64_STD.encode(y.sifrele(&frame))}),
+                    None => json!({"type": "relay", "b64": B64_STD.encode(&frame)}),
+                };
                 if let Some(ref c) = cid_clone {
                     payload["cid"] = Value::String(c.clone());
                 }
@@ -861,6 +869,9 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                 let mut room_ticket_key: Option<Vec<u8>> = None;
                 let mut relay_senders: HashMap<String, Arc<WSRelaySender>> = HashMap::new();
                 let mut relay_reasms: HashMap<String, Reassembler> = HashMap::new();
+                // Uçtan uca şifreli aktarmada istemci→ofis yönünün çözücüsü (cid başına). Burada olan cid'den şifresiz
+                // çerçeve kabul edilmez (düşürme saldırısı).
+                let mut relay_cozucu: HashMap<String, crate::relay_sifre::Yon> = HashMap::new();
 
                 let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
                 ping_interval.tick().await;
@@ -927,21 +938,67 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                     if let Some(s) = relay_senders.remove(&c) {
                                         s.close();
                                     }
-                                    relay_reasms.insert(c.clone(), Reassembler::new());
-                                    relay_senders.insert(c.clone(), WSRelaySender::new(ws_tx.clone(), Some(c.clone())));
-                                    let _ = ws_tx.send(WsMessage::Text(json!({"type": "relay_ready", "cid": c}).to_string()));
+                                    relay_cozucu.remove(&c);
                                     let short: String = c.chars().take(6).collect();
-                                    println!("[+] WS-relay modu [{short}]: telefon tüneli kuruldu.");
+                                    // İstemcinin tek kullanımlık açık anahtarı varsa uçtan uca şifreli aktarma.
+                                    let el_sikis = msg
+                                        .get("pub")
+                                        .and_then(|v| v.as_str())
+                                        .map(|p| B64_STD.decode(p).map_err(|_| "açık anahtar base64 değil".to_string())
+                                            .and_then(|b| crate::relay_sifre::ofis_el_sikis(&b)));
+                                    match el_sikis {
+                                        Some(Ok((ofis_pub, gonder, al))) => {
+                                            relay_reasms.insert(c.clone(), Reassembler::new());
+                                            relay_cozucu.insert(c.clone(), al);
+                                            relay_senders.insert(c.clone(), WSRelaySender::new(ws_tx.clone(), Some(c.clone()), Some(gonder)));
+                                            let _ = ws_tx.send(WsMessage::Text(
+                                                json!({"type": "relay_ready", "cid": c, "pub": B64_STD.encode(ofis_pub), "v": 1}).to_string(),
+                                            ));
+                                            println!("[+] WS-relay modu [{short}]: tünel kuruldu (uçtan uca şifreli).");
+                                        }
+                                        Some(Err(e)) => println!("[!] WS-relay [{short}] el sıkışması reddedildi: {e}"),
+                                        None if SIFRESIZ_AKTARMA_KABUL => {
+                                            relay_reasms.insert(c.clone(), Reassembler::new());
+                                            relay_senders.insert(c.clone(), WSRelaySender::new(ws_tx.clone(), Some(c.clone()), None));
+                                            let _ = ws_tx.send(WsMessage::Text(json!({"type": "relay_ready", "cid": c}).to_string()));
+                                            println!("[!] WS-relay modu [{short}]: ŞİFRESİZ tünel (eski tarayıcı kodu; geçiş süresince kabul edildi).");
+                                        }
+                                        None => println!("[!] WS-relay [{short}]: şifresiz aktarma isteği reddedildi (tarayıcı kodu eski)."),
+                                    }
                                 }
                             } else if mtype == "relay" {
                                 if let Some(c) = cid {
+                                    // Şifreli tünelde yalnız "e" (şifreli) çerçeve; şifresiz tünelde (geçiş) yalnız "b64".
+                                    let cerceve: Option<Vec<u8>> = match relay_cozucu.get_mut(&c) {
+                                        Some(al) => match msg.get("e").and_then(|v| v.as_str()).map(|e| B64_STD.decode(e)) {
+                                            Some(Ok(sifreli)) => match al.coz(&sifreli) {
+                                                Ok(acik) => Some(acik),
+                                                Err(e) => {
+                                                    // Değiştirilmiş / tekrar / sırası bozuk: tünel kapatılır, istemci yeniden el sıkışır.
+                                                    let short: String = c.chars().take(6).collect();
+                                                    println!("[!] WS-relay [{short}]: {e}; tünel kapatıldı.");
+                                                    relay_cozucu.remove(&c);
+                                                    relay_reasms.remove(&c);
+                                                    if let Some(s) = relay_senders.remove(&c) {
+                                                        s.close();
+                                                    }
+                                                    None
+                                                }
+                                            },
+                                            _ => {
+                                                println!("[!] WS-relay: şifreli tünelde şifresiz çerçeve reddedildi.");
+                                                None
+                                            }
+                                        },
+                                        None if SIFRESIZ_AKTARMA_KABUL && relay_senders.contains_key(&c) => {
+                                            msg.get("b64").and_then(|v| v.as_str()).and_then(|b| B64_STD.decode(b).ok())
+                                        }
+                                        None => None,
+                                    };
+                                    let (Some(bytes), Some(sender)) = (cerceve, relay_senders.get(&c).cloned()) else { continue };
                                     let reasm = relay_reasms.entry(c.clone()).or_insert_with(Reassembler::new);
-                                    let sender = relay_senders
-                                        .entry(c.clone())
-                                        .or_insert_with(|| WSRelaySender::new(ws_tx.clone(), Some(c.clone())))
-                                        .clone();
-                                    if let Some(b64) = msg.get("b64").and_then(|v| v.as_str()) {
-                                        if let Ok(bytes) = B64_STD.decode(b64) {
+                                    {
+                                        {
                                             match reasm.feed(&bytes) {
                                                 Ok(Some(rmsg)) if rmsg.kind == "ping" => {
                                                     let s_clone = sender.clone();
@@ -978,6 +1035,7 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                         s.close();
                                     }
                                     relay_reasms.remove(&c);
+                                    relay_cozucu.remove(&c);
                                 } else {
                                     session.close_all().await;
                                     crate::kimlik::tunel_temizle();
@@ -985,6 +1043,7 @@ pub async fn run_signaling(args: OfficeArgs, ice_servers: Vec<RTCIceServerConfig
                                         s.close();
                                     }
                                     relay_reasms.clear();
+                                    relay_cozucu.clear();
                                 }
                             } else if mtype == "error" {
                                 let err_msg = msg.get("error").and_then(|v| v.as_str()).unwrap_or("");

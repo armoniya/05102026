@@ -29,6 +29,8 @@
 //! giriş, doğrulamayı KULLANICI çözer, kullanıcının tıklamaları önce); sabit hız ve düzenli mola; Tüm Evrakı
 //! İndir ve Gerekçeli Kararlar ile aynı sıra kilidi.
 //!
+//!   POST /__uyap_agent__/icra_guncelle/dosya      {"dosya": id, …} ya da {"uyap_dosya_id", "evraklar": [no]} (dosya
+//!                                                  içinden "Dosyaya tebligat ekle": yalnız seçilen tebligat + PTT)
 //!   POST /__uyap_agent__/icra_guncelle            {"mod": "liste"|"taraf"|"tebligat"|"ptt", "ptt"?: bool (tebligat; varsayılan
 //!                                                  true), "birim_id"?, "birim_adi"?, "acilis_bas"?, "acilis_son"?}
 //!                                                  → 201 {tarama} (süren varsa o döner)
@@ -180,6 +182,9 @@ pub enum Mod {
     Takip,
     /// UYAP takip açılış ekranının tür → yol → şekil listesi (kesinleşme süreleri adlarla seçilsin diye; birkaç on istek).
     TakipListesi,
+    /// Dosya Listesi sekmesi "Tüm verileri güncelle" (20.11.2026): dosya listesi (yeni / kapanan dahil) + eksik taraflar
+    /// + okunmamış takip türleri. Taraf ve takip türü `Kapsam::hedefler` ile sınırlanabilir (yeni dosyalar hep dahil).
+    Hepsi,
 }
 
 impl Mod {
@@ -192,6 +197,7 @@ impl Mod {
             Mod::Dosya => "dosya",
             Mod::Takip => "takip",
             Mod::TakipListesi => "takip_listesi",
+            Mod::Hepsi => "hepsi",
         }
     }
     pub fn coz(s: &str) -> Option<Mod> {
@@ -202,6 +208,7 @@ impl Mod {
             "ptt" => Some(Mod::Ptt),
             "takip" => Some(Mod::Takip),
             "takip_listesi" => Some(Mod::TakipListesi),
+            "hepsi" => Some(Mod::Hepsi),
             _ => None,
         }
     }
@@ -216,6 +223,9 @@ pub struct Kapsam {
     pub acilis_son: Option<NaiveDate>,
     /// Listede seçilen dosyalar (veritabanı kimlikleri). Varsa daire / tarih yerine yalnız bunlara işlem yapılır.
     pub dosyalar: Option<Vec<i64>>,
+    /// Yalnız `Mod::Hepsi`: taraf ve takip türü istekleri bu dosyalarla (ve bu turda yeni gelenlerle) sınırlı.
+    /// Yok = kapsamdaki bütün dosyalar.
+    pub hedefler: Option<Vec<i64>>,
 }
 
 impl Kapsam {
@@ -306,6 +316,8 @@ pub struct TaramaInner {
     pub dosya_tebligat: bool,
     /// Yalnız bu evrak numaralı tebligatlar (boş: dosyadaki bütün tebligatlar).
     pub evrak_secimi: Vec<i32>,
+    /// Tek dosya işinde UYAP kimliği biliniyorsa (dosya içinden tebligat ekleme): arama / künye / takip türü atlanır.
+    pub uyap_id: Option<String>,
     // ── Takip türü ──
     /// Takip türü (ayrıntı) okunan / okunamayan dosya.
     pub takip_okunan: usize,
@@ -465,8 +477,11 @@ struct TarafIsi {
     dosya: i64,
     uyap_id: String,
     etiket: String,
-    /// true: alacaklı / borçlu yok → iki uç da; false: yalnız borçlusu kimliksiz → yalnız borçlu listesi.
-    tum: bool,
+    /// Borçlu listesi (TCKN / vergi no veren uç): borçlusu yok ya da kimliksiz.
+    borclu_listesi: bool,
+    /// Taraf bilgileri (alacaklı, diğer roller ve bütün VEKİLLER): alacaklı / borçlu yok ya da taraf bilgileri hiç
+    /// okunmamış (`dosya.taraf_bilgisi_zamani` boş; "Rolüm" için borçlu vekilleri de gerekir, 20.11.2026).
+    taraf_bilgisi: bool,
 }
 
 // ── Akış ────────────────────────────────────────────────────────────────────────────────────────
@@ -604,26 +619,28 @@ async fn kunyeleri_yaz(t: &Tarama, kayitlar: Vec<Value>) -> Result<KunyeSonucu, 
     // Taraf ihtiyacı: alacaklısı ya da borçlusu olmayan (her icra dosyasında ikisi de vardır; yoksa kayıt eksik) →
     // tam; borçlusu kimliksiz → yalnız borçlu listesi.
     let idler = gorulen.clone();
-    let eksik: HashMap<i64, (bool, bool)> = vt(move |c| {
+    // (tam taraf yok, borçlu kimliksiz, taraf bilgileri hiç okunmamış)
+    let eksik: HashMap<i64, (bool, bool, bool)> = vt(move |c| {
         Ok(c.query(
             "SELECT d.id,
                     NOT EXISTS (SELECT 1 FROM dosya_taraf x WHERE x.dosya_id = d.id AND x.rol = 'alacakli')
                     OR NOT EXISTS (SELECT 1 FROM dosya_taraf x WHERE x.dosya_id = d.id AND x.rol = 'borclu'),
                     EXISTS (SELECT 1 FROM dosya_taraf x JOIN taraf tr ON tr.id = x.taraf_id
                              WHERE x.dosya_id = d.id AND x.rol = 'borclu' AND x.uyapta_gorulmedi IS NULL
-                               AND tr.tckn IS NULL AND tr.mersis_no IS NULL AND tr.vergi_no = '')
+                               AND tr.tckn IS NULL AND tr.mersis_no IS NULL AND tr.vergi_no = ''),
+                    d.taraf_bilgisi_zamani IS NULL
                FROM dosya d WHERE d.id = ANY($1)",
             &[&idler],
         )
         .map_err(|e| format!("veritabanı: {e}"))?
         .iter()
-        .map(|s| (s.get::<_, i64>(0), (s.get::<_, bool>(1), s.get::<_, bool>(2))))
+        .map(|s| (s.get::<_, i64>(0), (s.get::<_, bool>(1), s.get::<_, bool>(2), s.get::<_, bool>(3))))
         .collect())
     })
     .await?;
     let mod_ = t.inner.lock().unwrap().mod_;
     if mod_ == Mod::Liste {
-        t.inner.lock().unwrap().taraf_eksik = eksik.values().filter(|(tum, kimliksiz)| *tum || *kimliksiz).count();
+        t.inner.lock().unwrap().taraf_eksik = eksik.values().filter(|(tum, kimliksiz, _)| *tum || *kimliksiz).count();
         return Ok(KunyeSonucu { gorulen, isler: Vec::new(), dosyalar: eslesme, yeniler });
     }
     // Tebligat güncellemesinde yalnız tarafı HİÇ olmayan dosyalar: borçlu kimliği tebligat eşleşmesi için
@@ -634,8 +651,10 @@ async fn kunyeleri_yaz(t: &Tarama, kayitlar: Vec<Value>) -> Result<KunyeSonucu, 
         .filter_map(|(dosya, uyap_id, etiket)| {
             let (dosya, uyap_id, etiket) = (*dosya, uyap_id.clone(), etiket.clone());
             match (eksik.get(&dosya), mod_) {
-                (Some((true, _)), _) => Some(TarafIsi { dosya, uyap_id, etiket, tum: true }),
-                (Some((false, true)), Mod::Taraf) => Some(TarafIsi { dosya, uyap_id, etiket, tum: false }),
+                (Some((true, _, _)), _) => Some(TarafIsi { dosya, uyap_id, etiket, borclu_listesi: true, taraf_bilgisi: true }),
+                (Some((false, kimliksiz, okunmamis)), Mod::Taraf | Mod::Hepsi) if *kimliksiz || *okunmamis => {
+                    Some(TarafIsi { dosya, uyap_id, etiket, borclu_listesi: *kimliksiz, taraf_bilgisi: *okunmamis })
+                }
                 _ => None,
             }
         })
@@ -681,7 +700,8 @@ async fn taraflari_cek<U: Uyap>(t: &Tarama, u: &U, isler: Vec<TarafIsi>) -> Resu
         let govde = json!({"dosyaId": is_.uyap_id});
         // Borçlular: TCKN / vergi no veren uç.
         let mut borclu_notu: Option<String> = None;
-        match u.post(BORCLU_LISTESI, govde.clone()).await {
+        match if is_.borclu_listesi { u.post(BORCLU_LISTESI, govde.clone()).await } else { Ok(Some(Value::Array(Vec::new()))) } {
+            _ if !is_.borclu_listesi => {}
             Ok(Some(Value::Array(liste))) if liste.iter().any(Value::is_object) => {
                 ardisik = 0;
                 let (dosya, etiket) = (is_.dosya, is_.etiket.clone());
@@ -706,13 +726,19 @@ async fn taraflari_cek<U: Uyap>(t: &Tarama, u: &U, isler: Vec<TarafIsi>) -> Resu
                 borclu_notu = Some("borçlu listesi alınamadı: bağlantı koptu".into());
             }
         }
-        if is_.tum {
-            // Alacaklı ve diğer roller. Borçlu yukarıda yazıldıysa bu uçtaki borçlu satırları atlanır (TCKN vermez);
-            // yazılamadıysa borçlu da buradan alınır.
+        if is_.taraf_bilgisi {
+            // Alacaklı ve diğer roller. Borçlu yukarıda (ya da önceden) yazıldıysa bu uçtaki borçlu satırlarından yalnız
+            // VEKİLLER kayıtlı borçluya yazılır (bu uç TCKN vermez, borçlu çoğalmasın); borçlu yoksa buradan alınır.
             let borclu_de = !borclu_var(is_.dosya).await?;
             match u.post(TARAF_BILGILERI, govde).await {
                 Ok(Some(Value::Array(liste))) => {
                     ardisik = 0;
+                    if !borclu_de {
+                        let (dosya, ham) = (is_.dosya, liste.clone());
+                        vt(move |c| kayit::borclu_vekillerini_yaz(c, dosya, &ham)).await?;
+                    }
+                    let dosya = is_.dosya;
+                    vt(move |c| kayit::taraf_bilgisi_okundu(c, dosya)).await?;
                     let secilen: Vec<Value> = liste
                         .into_iter()
                         .filter(|x| x.is_object() && (borclu_de || teb::tr_kucuk(&teb::metin(x, "rol")) != Rol::Borclu.kod()))
@@ -1214,26 +1240,36 @@ async fn yalniz_ptt<U: Uyap>(t: &Tarama, u: &U) -> Result<(), String> {
     let kapsam = t.inner.lock().unwrap().kapsam.clone();
     let (birim, bas, son, secili) = (kapsam.birim_id.clone(), kapsam.acilis_bas, kapsam.acilis_son, kapsam.dosyalar.clone());
     t.mesaj_yaz("Sonuçlanmamış tebligatlar veritabanından alınıyor…");
-    let satirlar: Vec<(i64, i64, String, String, String, String, Option<i64>)> = vt(move |c| {
+    let satirlar: Vec<(i64, i64, String, String, String, String, Option<i64>, String)> = vt(move |c| {
         Ok(c.query(
-            "SELECT tb.id, tb.dosya_id, tb.barkod, tb.ptt_durumu, b.ad || ' ' || d.dosya_no, tb.evrak_aciklama, tb.borclu_id
+            "SELECT tb.id, tb.dosya_id, tb.barkod, tb.ptt_durumu, b.ad || ' ' || d.dosya_no, tb.evrak_aciklama, tb.borclu_id, tb.tebligat_turu
                FROM tebligat_barkod tb JOIN dosya d ON d.id = tb.dosya_id JOIN birim b ON b.id = d.birim_id
-              WHERE d.yargi_turu = 2 AND d.durum_kod = 0 AND NOT tb.elektronik_tebligat AND NOT tb.tebligat_mazbatasi_var
+              WHERE d.yargi_turu = 2 AND d.durum_kod = 0 AND NOT tb.elektronik_tebligat
+                AND (NOT tb.tebligat_mazbatasi_var OR tb.ptt_durumu = '')
                 AND tb.barkod ~ '^[0-9]{13}$' AND ($1::text IS NULL OR b.birim_id = $1)
                 AND ($2::date IS NULL OR d.acilis_tarihi::date >= $2) AND ($3::date IS NULL OR d.acilis_tarihi::date <= $3)
                 AND ($4::bigint[] IS NULL OR d.id = ANY($4))
-              ORDER BY d.yil DESC, d.sira_no DESC, tb.birim_evrak_no",
+              -- Kesinleşme hesabına giren türler önce (tur yarıda kalsa da en önemlileri düzelsin), sonra yeni dosyalar.
+              ORDER BY (tb.tebligat_turu IN ('Ödeme Emri', 'Tahliye Emri', '103 Davetiyesi', 'Kıymet Takdiri Raporu')) DESC,
+                       d.yil DESC, d.sira_no DESC, tb.birim_evrak_no",
             &[&birim, &bas, &son, &secili],
         )
         .map_err(|e| format!("veritabanı: {e}"))?
         .iter()
-        .map(|s| (s.get(0), s.get(1), s.get(2), s.get(3), s.get(4), s.get(5), s.get(6)))
+        .map(|s| (s.get(0), s.get(1), s.get(2), s.get(3), s.get(4), s.get(5), s.get(6), s.get(7)))
         .collect())
     })
     .await?;
+    // Açıklamada "Tebliğ Edildi" yazan (mazbata dönmüş) tebligat sorulmaz; ama kesinleşme hesabına giren türde PTT'den
+    // tebliğ tarihi hiç alınmamışsa sorulur (tarih yoksa süre sayılamıyor; İzmir 10. İcra 2026/8645).
     let satirlar: Vec<_> = satirlar
         .into_iter()
-        .filter(|(_, _, _, durum, _, aciklama, _)| !teb::ptt_sonuclandi(durum) && !teb::teblig_sonucu_aciklamada_mi(aciklama))
+        .filter(|(_, _, _, durum, _, aciklama, _, tur)| {
+            !teb::ptt_sonuclandi(durum)
+                && (!teb::teblig_sonucu_aciklamada_mi(aciklama)
+                    || (durum.trim().is_empty() && crate::icra_durum::tebligat_kesinlesmesi(tur) != crate::icra_durum::TebligatKesinlesmesi::Yok))
+        })
+        .map(|(id, dosya, barkod, durum, etiket, aciklama, borclu, _)| (id, dosya, barkod, durum, etiket, aciklama, borclu))
         .collect();
     t.asama("ptt", satirlar.len());
     let mut ardisik = 0usize;
@@ -1401,13 +1437,17 @@ async fn secili_kayitlar<U: Uyap>(t: &Tarama, u: &U, idler: Vec<i64>) -> Result<
 /// Tek dosya: UYAP'ta numarasıyla bulunur (önce kayıtlı durumuna göre açık ya da kapalı listede, yoksa ötekinde),
 /// künyesi yazılır (dosya no / durum güncellenir); istenirse tarafları ve tebligatları (tümü ya da seçilenler) alınır.
 async fn tek_dosya<U: Uyap>(t: &Tarama, u: &U) -> Result<(), String> {
-    let (dosya, taraf, tebligat, secim) = {
+    let (dosya, taraf, tebligat, secim, bilinen) = {
         let g = t.inner.lock().unwrap();
-        (g.dosya.ok_or("Dosya seçilmedi.")?, g.dosya_taraf, g.dosya_tebligat, g.evrak_secimi.clone())
+        (g.dosya.ok_or("Dosya seçilmedi.")?, g.dosya_taraf, g.dosya_tebligat, g.evrak_secimi.clone(), g.uyap_id.clone())
     };
     let a = aranan_dosyalar(vec![dosya]).await?.into_iter().next().ok_or("Dosya veritabanında yok ya da icra dosyası değil.")?;
     let etiket = a.etiket();
     t.inner.lock().unwrap().dosya_etiket = etiket.clone();
+    if let Some(uyap_id) = bilinen {
+        // Dosya içinden "Dosyaya tebligat ekle": yalnız seçilen tebligat belgeleri (en az istek).
+        return dosya_tebligat_adimi(t, u, dosya, uyap_id, etiket, &secim).await;
+    }
     t.asama("dosya", 1);
     t.mesaj_yaz(format!("{etiket} UYAP'ta aranıyor…"));
     let rec = match dosya_ara(t, u, &a, if a.durum_kod == 0 { 0 } else { 1 }).await {
@@ -1428,23 +1468,29 @@ async fn tek_dosya<U: Uyap>(t: &Tarama, u: &U) -> Result<(), String> {
     // Takip türü her elle güncellemede yeniden okunur (1 istek).
     takip_ayrintilari(t, u, vec![(dosya, uyap_id.clone(), etiket.clone())]).await?;
     if taraf {
-        taraflari_cek(t, u, vec![TarafIsi { dosya, uyap_id: uyap_id.clone(), etiket: etiket.clone(), tum: true }]).await?;
+        taraflari_cek(t, u, vec![TarafIsi { dosya, uyap_id: uyap_id.clone(), etiket: etiket.clone(), borclu_listesi: true, taraf_bilgisi: true }]).await?;
     }
     if tebligat {
-        t.asama("tebligat", 1);
-        t.mesaj_yaz(format!("{etiket}: tebligatlar alınıyor…"));
-        let (mut ardisik, mut ptt_ardisik) = (0usize, 0usize);
-        match evrak_listesi(u, &uyap_id).await {
-            Ok(Ok(evraklar)) => {
-                t.inner.lock().unwrap().teb_dosya = 1;
-                let d: YazilanDosya = (dosya, uyap_id, etiket.clone());
-                dosya_tebligatlari(t, u, &d, evraklar, &secim, &mut ardisik, &mut ptt_ardisik).await?;
-            }
-            Ok(Err(neden)) => t.uyari(format!("{etiket}: evrak listesi alınamadı ({neden})")),
-            Err(e) => return Err(e.strip_prefix(AG_ONEKI).map(|a| format!("UYAP'a ulaşılamadı ({a})")).unwrap_or(e)),
-        }
-        t.ilerle();
+        dosya_tebligat_adimi(t, u, dosya, uyap_id, etiket, &secim).await?;
     }
+    Ok(())
+}
+
+/// Tek dosyanın tebligat adımı: evrak listesi, tebligat belgeleri (hepsi ya da `secim`), PTT.
+async fn dosya_tebligat_adimi<U: Uyap>(t: &Tarama, u: &U, dosya: i64, uyap_id: String, etiket: String, secim: &[i32]) -> Result<(), String> {
+    t.asama("tebligat", 1);
+    t.mesaj_yaz(format!("{etiket}: tebligatlar alınıyor…"));
+    let (mut ardisik, mut ptt_ardisik) = (0usize, 0usize);
+    match evrak_listesi(u, &uyap_id).await {
+        Ok(Ok(evraklar)) => {
+            t.inner.lock().unwrap().teb_dosya = 1;
+            let d: YazilanDosya = (dosya, uyap_id, etiket.clone());
+            dosya_tebligatlari(t, u, &d, evraklar, secim, &mut ardisik, &mut ptt_ardisik).await?;
+        }
+        Ok(Err(neden)) => t.uyari(format!("{etiket}: evrak listesi alınamadı ({neden})")),
+        Err(e) => return Err(e.strip_prefix(AG_ONEKI).map(|a| format!("UYAP'a ulaşılamadı ({a})")).unwrap_or(e)),
+    }
+    t.ilerle();
     Ok(())
 }
 
@@ -1669,12 +1715,18 @@ pub async fn akis<U: Uyap>(t: &Tarama, u: &U) -> Result<(), String> {
         None => listele(t, u).await?,
     };
     let sonuc: Result<(), String> = async {
-        let KunyeSonucu { gorulen, isler, dosyalar, yeniler } = kunyeleri_yaz(t, kayitlar).await?;
+        let KunyeSonucu { gorulen, mut isler, dosyalar, yeniler } = kunyeleri_yaz(t, kayitlar).await?;
         // Seçimde kapanan dosyalar zaten tek tek kapalı listede bulunup künyeleriyle yazıldı.
-        let (mod_, kapanan) = {
+        let (mod_, kapanan, hedefler) = {
             let g = t.inner.lock().unwrap();
-            (g.mod_, g.mod_ == Mod::Liste && g.tam && !g.kapsam.tarihli() && g.kapsam.dosyalar.is_none())
+            (
+                g.mod_,
+                matches!(g.mod_, Mod::Liste | Mod::Hepsi) && g.tam && !g.kapsam.tarihli() && g.kapsam.dosyalar.is_none(),
+                g.kapsam.hedefler.clone().map(|h| h.into_iter().chain(yeniler.iter().copied()).collect::<HashSet<i64>>()),
+            )
         };
+        let hedefte = |d: i64| mod_ != Mod::Hepsi || hedefler.as_ref().is_none_or(|h| h.contains(&d));
+        isler.retain(|x| hedefte(x.dosya));
         // Takip türü (dosya başına 1 istek, bir kez): dosya listesinde yalnız yeni dosyalar; taraf güncellemesinde
         // tarafı istenen ve yeni dosyalar; tebligat ve takip türü güncellemesinde kapsamdaki bütün dosyalar —
         // hepsinde yalnız takip türü hiç okunmamış olanlar.
@@ -1684,9 +1736,10 @@ pub async fn akis<U: Uyap>(t: &Tarama, u: &U) -> Result<(), String> {
                 let istenen: HashSet<i64> = isler.iter().map(|x| x.dosya).chain(yeniler.iter().copied()).collect();
                 dosyalar.iter().filter(|x| istenen.contains(&x.0)).cloned().collect()
             }
+            Mod::Hepsi => dosyalar.iter().filter(|x| hedefte(x.0)).cloned().collect(),
             _ => dosyalar.clone(),
         };
-        if matches!(mod_, Mod::Taraf | Mod::Tebligat) {
+        if matches!(mod_, Mod::Taraf | Mod::Tebligat | Mod::Hepsi) {
             taraflari_cek(t, u, isler).await?;
         }
         takip_ayrintilari(t, u, takip_okunmamislar(takip_adaylari).await?).await?;
@@ -1752,6 +1805,13 @@ async fn calistir(t: Arc<Tarama>) {
                 Mod::Takip => {
                     let g = t.inner.lock().unwrap();
                     format!("Tamamlandı: {} dosyanın takip türü okundu ({alinan} dosya tarandı).", g.takip_okunan)
+                }
+                Mod::Hepsi => {
+                    let g = t.inner.lock().unwrap();
+                    format!(
+                        "Tamamlandı: {alinan} açık dosya güncellendi ({yeni} yeni, {kapandi} kapandı); {cekilen} dosyanın tarafları, {} dosyanın takip türü alındı.",
+                        g.takip_okunan
+                    )
                 }
                 Mod::TakipListesi => {
                     let (tur, yol, sekil) = t.inner.lock().unwrap().takip_listesi;
@@ -1820,11 +1880,23 @@ pub struct DosyaIstegi {
     pub tebligat: bool,
     pub evraklar: Vec<i32>,
     pub ptt: bool,
+    /// UYAP dosya kimliği (dosya içindeki "Dosyaya tebligat ekle"): verilirse dosya UYAP'ta yeniden aranmaz, künye ve
+    /// takip türü okunmaz; yalnız evrak listesi + seçilen tebligat belgeleri (+ PTT). `dosya` bu kimlikten bulunur.
+    pub uyap_id: Option<String>,
+    /// Dosya içinden gelen istekte kartın UYAP birim kimliği, dosya numarası ve tür kodu: veritabanındaki dosya önce
+    /// bunlarla bulunur (UYAP dosya kimliği oturuma göre değişebilir; kayıtlı kimlik eski kalır).
+    pub kunye: Option<(String, String, i32)>,
 }
 
-/// `{"dosya": id, "taraf"?: true, "tebligat"?: true, "evraklar"?: [evrak no], "ptt"?: true}`
+/// `{"dosya": id, "taraf"?: true, "tebligat"?: true, "evraklar"?: [evrak no], "ptt"?: true}` ya da
+/// `{"uyap_dosya_id": "…", "evraklar": [evrak no], "ptt"?: true}` (dosya içinden tebligat ekleme; `dosya` 0 döner, çağıran
+/// veritabanından bulur; taraf istenmez).
 pub fn dosya_istegi(govde: &Value) -> Result<DosyaIstegi, String> {
-    let dosya = govde.get("dosya").and_then(Value::as_i64).filter(|d| *d > 0).ok_or("Dosya kimliği geçersiz.")?;
+    let uyap_id = Some(teb::metin(govde, "uyap_dosya_id")).filter(|x| !x.is_empty() && x.len() <= 255);
+    let dosya = match &uyap_id {
+        Some(_) => 0,
+        None => govde.get("dosya").and_then(Value::as_i64).filter(|d| *d > 0).ok_or("Dosya kimliği geçersiz.")?,
+    };
     let b = |a: &str| govde.get(a).and_then(Value::as_bool).unwrap_or(true);
     let evraklar: Vec<i32> = match govde.get("evraklar") {
         None | Some(Value::Null) => Vec::new(),
@@ -1833,8 +1905,42 @@ pub fn dosya_istegi(govde: &Value) -> Result<DosyaIstegi, String> {
         }
         _ => return Err("Evrak listesi geçersiz.".into()),
     };
-    let (taraf, tebligat) = (b("taraf"), b("tebligat") || !evraklar.is_empty());
-    Ok(DosyaIstegi { dosya, taraf, tebligat, evraklar, ptt: b("ptt") })
+    if uyap_id.is_some() && evraklar.is_empty() {
+        return Err("Eklenecek tebligat belgesi seçilmedi.".into());
+    }
+    let (taraf, tebligat) = (b("taraf") && uyap_id.is_none(), b("tebligat") || !evraklar.is_empty());
+    let kunye = Some((teb::metin(govde, "birim_id"), teb::metin(govde, "dosya_no"), govde.get("dosya_tur_kod").and_then(Value::as_i64).unwrap_or(-1) as i32))
+        .filter(|(b, n, _)| uyap_id.is_some() && !b.is_empty() && !n.is_empty());
+    Ok(DosyaIstegi { dosya, taraf, tebligat, evraklar, ptt: b("ptt"), uyap_id, kunye })
+}
+
+/// Dosya içinden gelen istekte veritabanındaki icra dosyası: önce birim + dosya numarası (+ tür kodu), bulunamazsa
+/// kayıtlı UYAP dosya kimliği.
+async fn uyap_kimliginden_dosya(uyap_id: String, kunye: Option<(String, String, i32)>) -> Result<i64, String> {
+    vt(move |c| {
+        let hata = |e: postgres::Error| format!("veritabanı: {e}");
+        if let Some((birim, no, tur)) = &kunye {
+            let s = c
+                .query_opt(
+                    "SELECT d.id FROM dosya d JOIN birim b ON b.id = d.birim_id
+                      WHERE b.birim_id = $1 AND d.dosya_no = $2 AND d.yargi_turu = 2
+                      ORDER BY (d.tur_kod = $3) DESC, d.id DESC LIMIT 1",
+                    &[birim, &no.trim(), tur],
+                )
+                .map_err(hata)?;
+            if let Some(s) = s {
+                return Ok(s.get(0));
+            }
+        }
+        c.query_opt("SELECT id FROM dosya WHERE dosya_id = $1 AND yargi_turu = 2 ORDER BY id DESC LIMIT 1", &[&uyap_id])
+            .map_err(hata)?
+            .map(|s| s.get(0))
+            .ok_or_else(|| match &kunye {
+                Some((_, no, _)) => format!("{no} büro veritabanında yok. Önce İcra Süreçleri'nden dosya listesini güncelleyin."),
+                None => "Bu dosya büro veritabanında yok. Önce İcra Süreçleri'nden dosya listesini güncelleyin.".to_string(),
+            })
+    })
+    .await
 }
 
 /// Tek dosya işini başlatır; aynı dosya için süren iş varsa o döner.
@@ -1854,6 +1960,7 @@ pub fn dosya_baslat(i: DosyaIstegi) -> Arc<Tarama> {
         g.dosya_tebligat = i.tebligat;
         g.evrak_secimi = i.evraklar;
         g.ptt_sorgusu = i.ptt;
+        g.uyap_id = i.uyap_id;
     }
     k.insert(t.id(), t.clone());
     tokio::spawn(calistir(t.clone()));
@@ -1887,6 +1994,11 @@ pub fn baslatma_istegi(govde: &Value) -> Result<(Mod, Kapsam, bool), String> {
         return Err("Seçili dosya yok.".into());
     }
     let secili = dosyalar.is_some();
+    let hedefler = if mod_ == Mod::Hepsi {
+        crate::icra_api::dosya_listesi(&json!({"dosyalar": govde.get("hedefler").cloned().unwrap_or(Value::Null)}))?
+    } else {
+        None
+    };
     Ok((
         mod_,
         Kapsam {
@@ -1896,6 +2008,7 @@ pub fn baslatma_istegi(govde: &Value) -> Result<(Mod, Kapsam, bool), String> {
             acilis_bas: bas.filter(|_| !secili),
             acilis_son: son.filter(|_| !secili),
             dosyalar,
+            hedefler,
         },
         ptt,
     ))
@@ -1935,7 +2048,15 @@ pub async fn handle_http(method: &str, path: &str, _qp: &HashMap<String, String>
     if parts.is_empty() {
         return match method {
             "POST" => match dosya_istegi(&govde) {
-                Ok(i) => json_resp(201, json!({"tarama": dosya_baslat(i).sozluk()})),
+                Ok(mut i) => {
+                    if let Some(uid) = i.uyap_id.clone() {
+                        match uyap_kimliginden_dosya(uid, i.kunye.clone()).await {
+                            Ok(d) => i.dosya = d,
+                            Err(e) => return json_resp(404, json!({"error": e})),
+                        }
+                    }
+                    json_resp(201, json!({"tarama": dosya_baslat(i).sozluk()}))
+                }
                 Err(e) => json_resp(400, json!({"error": e})),
             },
             _ => json_resp(405, json!({"error": "Yöntem desteklenmiyor."})),
@@ -2058,8 +2179,8 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
                     {"adi": "VELİ CAN", "rol": "Borçlu", "kisiKurum": "Kişi"}
                 ]),
                 (TARAF_BILGILERI, ..) if g["dosyaId"] == "u-a" => json!([
-                    {"adi": "X BANKASI A.Ş.", "rol": "Alacaklı", "kisiKurum": "Kurum"},
-                    {"adi": "ALİ VELİ", "rol": "Borçlu", "kisiKurum": "Kişi"}
+                    {"adi": "X BANKASI A.Ş.", "rol": "Alacaklı", "kisiKurum": "Kurum", "vekil": "[MEHMET DEMİR]"},
+                    {"adi": "ALİ VELİ", "rol": "Borçlu", "kisiKurum": "Kişi", "vekil": "[UTKU AVUKAT, AYŞE YILMAZ]"}
                 ]),
                 (ARAMA, Some(1), _, _) => json!([[], 0]),
                 (BORCLU_LISTESI, ..) if g["dosyaId"] == "u-d" => {
@@ -2103,7 +2224,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
         })
     };
     let calistir = |mod_: Mod, eszamanli: bool, bas: Option<NaiveDate>| {
-        let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: "İzmir 9. İcra Dairesi".into(), acilis_bas: bas, acilis_son: None, dosyalar: None };
+        let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: "İzmir 9. İcra Dairesi".into(), acilis_bas: bas, acilis_son: None, dosyalar: None, hedefler: None };
         let t = Tarama::new(mod_, kapsam);
         let mut t = Arc::try_unwrap(t).ok().unwrap();
         t.sayfa_boyu = 2;
@@ -2114,7 +2235,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     };
     let (barkod_1, barkod_2) = ("4007663523293", "5002864776768");
     let teb_calistir = |mod_: Mod, ptt: SahtePtt| {
-        let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: "İzmir 9. İcra Dairesi".into(), acilis_bas: None, acilis_son: None, dosyalar: None };
+        let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: "İzmir 9. İcra Dairesi".into(), acilis_bas: None, acilis_son: None, dosyalar: None, hedefler: None };
         let mut t = Arc::try_unwrap(Tarama::new(mod_, kapsam)).ok().unwrap();
         t.sayfa_boyu = 2;
         t.mola_her = 1000;
@@ -2200,7 +2321,8 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     let islem: String = c.query_one("SELECT islem_durumu FROM dosya WHERE id = $1", &[&b]).unwrap().get(0);
     assert_eq!(islem, "pasif");
 
-    // 4) Taraf bilgileri: D (tarafsız) iki uç; A (kimliksiz borçlu) yalnız borçlu listesi; E hata → uyarı; kapanan YOK
+    // 4) Taraf bilgileri: D (tarafsız) iki uç; A (kimliksiz borçlu, taraf bilgileri hiç okunmamış) iki uç — borçlunun
+    //    vekilleri kayıtlı borçluya yazılır, borçlu çoğalmaz; E hata → uyarı; kapanan YOK
     let (t, u, r) = calistir(Mod::Taraf, false, None);
     r.unwrap();
     let g = t.inner.lock().unwrap();
@@ -2210,7 +2332,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert!(!kapanan_istegi(&u));
     let cagri: Vec<(String, String)> = u.cagrilar.lock().unwrap().iter().filter(|(uc, _)| uc != ARAMA)
         .map(|(uc, g)| (uc.clone(), g["dosyaId"].as_str().unwrap_or("").to_string())).collect();
-    assert!(cagri.contains(&(BORCLU_LISTESI.into(), "u-a".into())) && !cagri.contains(&(TARAF_BILGILERI.into(), "u-a".into())), "{cagri:?}");
+    assert!(cagri.contains(&(BORCLU_LISTESI.into(), "u-a".into())) && cagri.contains(&(TARAF_BILGILERI.into(), "u-a".into())), "{cagri:?}");
     assert!(cagri.contains(&(TARAF_BILGILERI.into(), "u-d".into())), "{cagri:?}");
     let d: i64 = c.query_one("SELECT id FROM dosya WHERE dosya_no = '2026/20'", &[]).unwrap().get(0);
     let taraflar = |c: &mut postgres::Client, id: i64| -> Vec<(String, Option<String>, bool)> {
@@ -2226,11 +2348,25 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     };
     assert_eq!(taraflar(c, d), vec![("alacakli".into(), None, false), ("borclu".into(), Some("12345678901".into()), false)]);
     assert_eq!(taraflar(c, a), vec![("alacakli".into(), None, false), ("borclu".into(), Some("10987654321".into()), false)], "kimlik eklendi, borçlu çoğalmadı");
+    let borclu_vekilleri: Vec<String> = c
+        .query("SELECT v.ad || ' ' || v.soyad FROM dosya_taraf dt JOIN dosya_taraf_vekiller dv ON dv.dosyataraf_id = dt.id
+                  JOIN vekil v ON v.id = dv.vekil_id WHERE dt.dosya_id = $1 AND dt.rol = 'borclu' ORDER BY 1", &[&a])
+        .unwrap().iter().map(|r| r.get(0)).collect();
+    assert_eq!(borclu_vekilleri, vec!["AYŞE YILMAZ".to_string(), "UTKU AVUKAT".to_string()], "borçlunun vekilleri yazıldı");
+    let okundu: bool = c.query_one("SELECT taraf_bilgisi_zamani IS NOT NULL FROM dosya WHERE id = $1", &[&a]).unwrap().get(0);
+    assert!(okundu);
 
     // 5) Taraf bilgileri yeniden: tarafı tam dosyalara (A, D) istek atılmaz
     let (_, u, r) = calistir(Mod::Taraf, false, None);
     r.unwrap();
     assert!(!u.cagrilar.lock().unwrap().iter().any(|(uc, g)| uc != ARAMA && (g["dosyaId"] == "u-a" || g["dosyaId"] == "u-d")));
+
+    // 5b) Tüm veriler: dosya listesi alınır, tarafı tam dosyalara (A, D) taraf isteği gitmez, rapor hepsini anlatır
+    let (t, u, r) = calistir(Mod::Hepsi, false, None);
+    r.unwrap();
+    assert_eq!(t.inner.lock().unwrap().asama, "bitti");
+    assert!(!u.cagrilar.lock().unwrap().iter().any(|(uc, g)| (uc == TARAF_BILGILERI || uc == BORCLU_LISTESI)
+        && (g["dosyaId"] == "u-a" || g["dosyaId"] == "u-d")));
 
     // 6) Tebligat (UYAP + PTT): A'da 2 PDF, 1 PTT (e-tebligat PTT'ye gitmez); D evraksız; E'nin listesi alınamaz
     let tebligat = |c: &mut postgres::Client, no: i32| -> (String, String, String, bool, Option<i64>) {
@@ -2305,8 +2441,29 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     drop(g);
     assert_eq!(tebligat(c, 5).2, "DAĞITIMDA");
 
+    // 9b) Mazbata dönmüş ("… - Tebliğ Edildi") ama PTT tarihi yok: ödeme emrinde sorulur, kesinleşmeye girmeyen türde sorulmaz
+    let (eski_tur, eski_ac): (String, String) = c
+        .query_one("SELECT tebligat_turu, evrak_aciklama FROM tebligat_barkod WHERE dosya_id = $1 AND birim_evrak_no = 5", &[&a])
+        .map(|s| (s.get(0), s.get(1)))
+        .unwrap();
+    c.execute(
+        "UPDATE tebligat_barkod SET tebligat_turu = 'Ödeme Emri', ptt_durumu = '', evrak_aciklama = evrak_aciklama || ' - Tebliğ Edildi'
+          WHERE dosya_id = $1 AND birim_evrak_no = 5",
+        &[&a],
+    )
+    .unwrap();
+    let (_, u, r) = teb_calistir(Mod::Ptt, ptt_durumu("TESLİM EDİLDİ", "20261019"));
+    r.unwrap();
+    assert_eq!(u.say("PTT"), 1, "tarihi olmayan ödeme emri sorulur");
+    assert_eq!(tebligat(c, 5).2, "TESLİM EDİLDİ");
+    c.execute("UPDATE tebligat_barkod SET tebligat_turu = 'Satış İlanı', ptt_durumu = '' WHERE dosya_id = $1 AND birim_evrak_no = 5", &[&a]).unwrap();
+    let (_, u, r) = teb_calistir(Mod::Ptt, ptt_durumu("TESLİM EDİLDİ", "20261019"));
+    r.unwrap();
+    assert_eq!(u.say("PTT"), 0, "mazbatası dönmüş satış ilanı sorulmaz");
+    c.execute("UPDATE tebligat_barkod SET tebligat_turu = $2, evrak_aciklama = $3, ptt_durumu = 'DAĞITIMDA' WHERE dosya_id = $1 AND birim_evrak_no = 5", &[&a, &eski_tur, &eski_ac]).unwrap();
+
     // 10) Tebligat, yalnız UYAP: PTT'ye gidilmez, kayıtlı PTT durumu korunur
-    let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: String::new(), acilis_bas: None, acilis_son: None, dosyalar: None };
+    let kapsam = Kapsam { birim_id: Some("9009".into()), birim_adi: String::new(), acilis_bas: None, acilis_son: None, dosyalar: None, hedefler: None };
     let mut t = Arc::try_unwrap(Tarama::new(Mod::Tebligat, kapsam)).ok().unwrap();
     t.sayfa_boyu = 2;
     t.inner.lock().unwrap().ptt_sorgusu = false;
@@ -2328,6 +2485,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
             g.dosya_tebligat = i.tebligat;
             g.evrak_secimi = i.evraklar;
             g.ptt_sorgusu = i.ptt;
+            g.uyap_id = i.uyap_id;
         }
         let mut t = t;
         t.ptt_tekrar_sn = 0;
@@ -2336,7 +2494,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
         let r = rt.block_on(akis(&t, &u));
         (t, u, r)
     };
-    let (t, u, r) = tek(DosyaIstegi { dosya: a, taraf: true, tebligat: true, evraklar: vec![5], ptt: true }, ptt_durumu("TESLİM EDİLDİ", "20261110"));
+    let (t, u, r) = tek(DosyaIstegi { dosya: a, taraf: true, tebligat: true, evraklar: vec![5], ptt: true, uyap_id: None, kunye: None }, ptt_durumu("TESLİM EDİLDİ", "20261110"));
     r.unwrap();
     assert_eq!((u.say(BORCLU_LISTESI), u.say(TARAF_BILGILERI), u.say("PTT")), (1, 1, 1), "{:?}", u.cagrilar.lock().unwrap());
     assert_eq!(u.say(DOSYA_AYRINTI), 1, "tek dosyada takip türü her seferinde yeniden okunur");
@@ -2347,11 +2505,25 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     drop(g);
     assert_eq!(tebligat(c, 5).2, "TESLİM EDİLDİ");
     assert_eq!(tebligat(c, 6).2.starts_with("E-Tebligat"), true, "seçilmeyen tebligata dokunulmadı");
+    // 11a) Dosya içinden gelen istekte dosya birim + numarayla bulunur (UYAP kimliği oturuma göre değişir)
+    assert_eq!(rt.block_on(uyap_kimliginden_dosya("bu-oturumun-kimligi".into(), Some(("9009".into(), "2026/10".into(), 35)))), Ok(a));
+    let kayitli: String = c.query_one("SELECT dosya_id FROM dosya WHERE id = $1", &[&a]).unwrap().get(0);
+    assert_eq!(rt.block_on(uyap_kimliginden_dosya(kayitli, None)), Ok(a), "künye yoksa kayıtlı kimlik");
+    assert!(rt.block_on(uyap_kimliginden_dosya("yok".into(), Some(("9009".into(), "2026/999".into(), 35)))).unwrap_err().contains("2026/999"));
+    // 11b) Dosya içinden "Dosyaya tebligat ekle": UYAP kimliği bilinir; arama, künye ve takip türü atlanır
+    let uid: String = c.query_one("SELECT dosya_id FROM dosya WHERE id = $1", &[&a]).unwrap().get(0);
+    c.execute("UPDATE tebligat_barkod SET ptt_durumu = '' WHERE dosya_id = $1 AND birim_evrak_no = 5", &[&a]).unwrap();
+    let (t, u, r) = tek(DosyaIstegi { dosya: a, taraf: false, tebligat: true, evraklar: vec![5], ptt: true, uyap_id: Some(uid), kunye: None },
+                        ptt_durumu("TESLİM EDİLDİ", "20261110"));
+    r.unwrap();
+    assert_eq!((u.say(ARAMA), u.say(DOSYA_AYRINTI), u.say(BORCLU_LISTESI), u.say("PTT")), (0, 0, 0, 1), "{:?}", u.cagrilar.lock().unwrap());
+    assert_eq!(t.inner.lock().unwrap().teb_yazilan, 1);
+    assert_eq!(tebligat(c, 5).2, "TESLİM EDİLDİ");
 
     // 12) Borçlu listesi boş dönen dosya (G, kapalı listede): borçlu taraf bilgilerinden yazılır
     let (gd, _) = dosya_kunyesi_kaydet(c, &kunye("2026/30", 0, "eski-g"), Some(YargiTuru::Icra.kod())).unwrap();
     kayit::dosya_taraf_kaydet(c, gd, &[json!({"adi": "Z BANKASI A.Ş.", "rol": "Alacaklı", "kisiKurum": "Kurum"})], &sessiz).unwrap();
-    let (t, u, r) = tek(DosyaIstegi { dosya: gd, taraf: true, tebligat: false, evraklar: vec![], ptt: true }, Box::new(|_: &str| Err("yok".into())));
+    let (t, u, r) = tek(DosyaIstegi { dosya: gd, taraf: true, tebligat: false, evraklar: vec![], ptt: true, uyap_id: None, kunye: None }, Box::new(|_: &str| Err("yok".into())));
     r.unwrap();
     assert!(u.cagrilar.lock().unwrap().iter().any(|(uc, g)| uc == ARAMA && g["dosyaDurumKod"] == 1), "açıkta bulunamayınca kapalıda aranır");
     let g = t.inner.lock().unwrap();
@@ -2461,7 +2633,7 @@ mod tests {
     #[test]
     fn liste_govdesi_ve_kapsam() {
         let k = Kapsam { birim_id: Some("9009".into()), birim_adi: "İzmir 9. İcra Dairesi".into(),
-                         acilis_bas: NaiveDate::from_ymd_opt(2026, 11, 1), acilis_son: NaiveDate::from_ymd_opt(2026, 11, 30), dosyalar: None };
+                         acilis_bas: NaiveDate::from_ymd_opt(2026, 11, 1), acilis_son: NaiveDate::from_ymd_opt(2026, 11, 30), dosyalar: None, hedefler: None };
         let g = liste_govdesi(3, 500, &k);
         assert_eq!((g["pageNumber"].clone(), g["birimId"].clone(), g["birimTuru3"].clone()), (json!(3), json!("9009"), json!("2")));
         assert_eq!((g["dosyaAcilisTarihiStart"].clone(), g["dosyaAcilisTarihiEnd"].clone()), (json!("01.11.2026"), json!("30.11.2026")));
@@ -2476,7 +2648,7 @@ mod tests {
     fn dosya_istegi_govdesi() {
         assert_eq!(
             dosya_istegi(&json!({"dosya": 42})),
-            Ok(DosyaIstegi { dosya: 42, taraf: true, tebligat: true, evraklar: vec![], ptt: true })
+            Ok(DosyaIstegi { dosya: 42, taraf: true, tebligat: true, evraklar: vec![], ptt: true, uyap_id: None, kunye: None })
         );
         let i = dosya_istegi(&json!({"dosya": 42, "taraf": false, "tebligat": false, "evraklar": [5, 7], "ptt": false})).unwrap();
         assert_eq!((i.taraf, i.tebligat, i.evraklar, i.ptt), (false, true, vec![5, 7], false), "seçim varsa tebligat istenmiş sayılır");
@@ -2484,6 +2656,12 @@ mod tests {
         assert!(dosya_istegi(&json!({"dosya": -1})).is_err());
         assert!(dosya_istegi(&json!({"dosya": 1, "evraklar": ["a"]})).is_err());
         assert!(dosya_istegi(&json!({"dosya": 1, "evraklar": [0]})).is_err());
+        // Dosya içinden tebligat ekleme: UYAP kimliğiyle, taraf istenmez, evrak seçimi şart
+        let i = dosya_istegi(&json!({"uyap_dosya_id": "abc==", "evraklar": [12]})).unwrap();
+        assert_eq!((i.dosya, i.taraf, i.tebligat, i.evraklar, i.uyap_id.as_deref()), (0, false, true, vec![12], Some("abc==")));
+        assert!(dosya_istegi(&json!({"uyap_dosya_id": "abc=="})).unwrap_err().contains("seçilmedi"));
+        let i = dosya_istegi(&json!({"uyap_dosya_id": "abc==", "evraklar": [3], "birim_id": "1001", "dosya_no": "2026/5", "dosya_tur_kod": 35})).unwrap();
+        assert_eq!(i.kunye, Some(("1001".into(), "2026/5".into(), 35)));
     }
 
     #[test]
@@ -2500,5 +2678,10 @@ mod tests {
         assert!(baslatma_istegi(&json!({"birim_id": "12a"})).is_err());
         assert!(baslatma_istegi(&json!({"acilis_bas": "2026-12-01", "acilis_son": "2026-11-01"})).unwrap_err().contains("ters"));
         assert!(baslatma_istegi(&json!({"acilis_bas": "olmaz"})).is_err());
+        // Tüm veriler: hedefler yalnız bu türde okunur
+        let (m, k, _) = baslatma_istegi(&json!({"mod": "hepsi", "hedefler": [3, 5]})).unwrap();
+        assert_eq!((m, k.hedefler.clone(), k.dosyalar.clone()), (Mod::Hepsi, Some(vec![3, 5]), None));
+        assert_eq!(baslatma_istegi(&json!({"mod": "taraf", "hedefler": [3]})).unwrap().1.hedefler, None);
+        assert!(baslatma_istegi(&json!({"mod": "hepsi", "hedefler": ["x"]})).is_err());
     }
 }

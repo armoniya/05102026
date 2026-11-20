@@ -89,3 +89,66 @@ export async function finalize(rec) {
   if (rec.comp) rec.body = await inflate(rec.body);
   return rec;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// Sunucu üzerinden aktarmada (WS-relay) uçtan uca şifreleme (20.11.2026) — src/relay_sifre.rs'in karşılığı.
+// İstemci tek kullanımlık P-256 anahtarını relay_hello ile gönderir, ofis relay_ready ile kendininkini döner;
+// ECDH sırrından HKDF-SHA256 (tuz = istemci_pub ‖ ofis_pub, bilgi "cokluuyap-relay-v1") ile iki AES-256-GCM
+// anahtarı (istemci→ofis, ofis→istemci). Nonce = 4 sıfır bayt ‖ 8 bayt sayaç; her yönde 0'dan başlar.
+// Sunucu yalnız açık anahtarları görür (WebRTC ile aynı seviye). Test vektörü: araclar/relay_sifre_vektor.mjs.
+// ─────────────────────────────────────────────────────────────────────────────────────────
+const RELAY_BILGI = new TextEncoder().encode("cokluuyap-relay-v1");
+
+function relayNonce(sayac) {
+  const n = new Uint8Array(12);
+  new DataView(n.buffer).setBigUint64(4, BigInt(sayac));
+  return n;
+}
+
+// Paylaşılan sırdan [istemci→ofis, ofis→istemci] ham anahtarları.
+export async function relayAnahtarlari(sir, istemciPub, ofisPub) {
+  const subtle = globalThis.crypto.subtle;
+  const tuz = new Uint8Array(istemciPub.length + ofisPub.length);
+  tuz.set(istemciPub);
+  tuz.set(ofisPub, istemciPub.length);
+  const ham = await subtle.importKey("raw", sir, "HKDF", false, ["deriveBits"]);
+  const bit = new Uint8Array(await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: tuz, info: RELAY_BILGI }, ham, 512));
+  return [bit.slice(0, 32), bit.slice(32)];
+}
+
+// Bir yönün şifreleyicisi. Sayaç çağrı anında (eşzamanlı) ilerler: sifrele() sonuçları ÇAĞRI SIRASIYLA gönderilmeli,
+// coz() çağrıları sırayla (bir öncekini bekleyerek) yapılmalı.
+export class RelayYon {
+  static async yeni(hamAnahtar) {
+    const y = new RelayYon();
+    y.anahtar = await globalThis.crypto.subtle.importKey("raw", hamAnahtar, "AES-GCM", false, ["encrypt", "decrypt"]);
+    y.sayac = 0;
+    return y;
+  }
+  async sifrele(acik) {
+    const iv = relayNonce(this.sayac++);
+    return new Uint8Array(await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv }, this.anahtar, acik));
+  }
+  async coz(sifreli) {
+    const iv = relayNonce(this.sayac);
+    const acik = new Uint8Array(await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv }, this.anahtar, sifreli));
+    this.sayac++;
+    return acik;
+  }
+}
+
+// İstemci el sıkışması: { pub (ham 65 bayt), tamamla(ofisPub) → { gonder, al } }. Gizli anahtar dışa aktarılamaz.
+export async function relayIstemciAnahtari() {
+  const subtle = globalThis.crypto.subtle;
+  const cift = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  const pub = new Uint8Array(await subtle.exportKey("raw", cift.publicKey));
+  return {
+    pub,
+    async tamamla(ofisPub) {
+      const karsi = await subtle.importKey("raw", ofisPub, { name: "ECDH", namedCurve: "P-256" }, false, []);
+      const sir = new Uint8Array(await subtle.deriveBits({ name: "ECDH", public: karsi }, cift.privateKey, 256));
+      const [c2o, o2c] = await relayAnahtarlari(sir, pub, ofisPub);
+      return { gonder: await RelayYon.yeni(c2o), al: await RelayYon.yeni(o2c) };
+    },
+  };
+}
