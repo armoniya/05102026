@@ -93,9 +93,12 @@
             '#cu-isler{--i-zemin:var(--cu-t-zemin,#f3f4f7);--i-yuzey:var(--cu-t-yuzey,#fff);--i-serit:var(--cu-t-serit,#f5f6fa);',
             '--i-kenar:var(--cu-t-kenar,#dee2e6);--i-yazi:var(--cu-t-yazi,#212529);--i-vurgu:var(--cu-vurgu,#2d4596);',
             '--i-vurgu-koyu:var(--cu-vurgu-koyu,#1f3277);--i-vurgu-zemin:var(--cu-vurgu-zemin,#e8ecf8);',
-            '--i-soluk:color-mix(in srgb,var(--i-yazi) 68%,var(--i-yuzey));--i-silik:color-mix(in srgb,var(--i-yazi) 45%,var(--i-yuzey));',
+            '--i-soluk:color-mix(in srgb,var(--i-yazi) 74%,var(--i-yuzey));--i-silik:color-mix(in srgb,var(--i-yazi) 64%,var(--i-yuzey));',
             'position:fixed;z-index:1400;top:var(--cu-nav-yuk,60px);right:0;bottom:var(--cu-cubuk-yuk,44px);left:0;',
             'background:var(--i-zemin);color:var(--i-yazi);font:14px/1.45 "Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}',
+            // Güneş: vurgu sarı; vurgu rengindeki yazılar (seçili sekme, etiketler, bağlantılar) beyaz zeminde okunmuyordu
+            // (2026-11-23 karşıtlık taraması). Yazı olarak temanın koyu vurgu-yazı tonu kullanılır.
+            'html[data-cu-tema="gunes"] #cu-isler{--i-vurgu-koyu:var(--cu-vurgu-yazi,#6b4a00)}',
             'html[data-cu-tema="koyu"] #cu-isler{--i-zemin:#1d2130;--i-yuzey:#2a2f40;--i-serit:#262b3b;--i-kenar:#3a4055;--i-yazi:#dedede;',
             '--i-vurgu:#3a55b5;--i-vurgu-koyu:#8ea2e6;--i-vurgu-zemin:#2c3554}',
             '#cu-isler *{box-sizing:border-box}',
@@ -108,7 +111,7 @@
             '#cu-isler .i-sekmeler button{background:none;border:0;border-bottom:2px solid transparent;padding:8px 12px;color:var(--i-soluk);cursor:pointer;margin-bottom:-1px;white-space:nowrap}',
             '#cu-isler .i-sekmeler button.on{color:var(--i-vurgu-koyu);border-color:var(--i-vurgu);font-weight:600}',
             '#cu-isler .rozet{display:inline-block;min-width:18px;padding:0 6px;margin-left:5px;border-radius:999px;background:var(--i-vurgu);color:var(--cu-vurgu-uzeri,#fff);font-size:11px;font-weight:700;line-height:18px;text-align:center}',
-            '#cu-isler .rozet.kirmizi{background:#b84444}',
+            '#cu-isler .rozet.kirmizi{background:#b84444;color:#fff}',
             '#cu-isler .i-govde{flex:1;display:flex;min-height:0;position:relative}',
             '#cu-isler .i-ana{flex:1;overflow:auto;padding:16px 22px 22px;min-width:0}',
             '#cu-isler .i-arac{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}',
@@ -190,7 +193,7 @@
         if (document.getElementById('cu-is-bildirim-stil')) return;
         const css = [
             '#cu-menu-isler .cu-is-rozet{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:999px;background:var(--cu-vurgu,#2d4596);color:var(--cu-vurgu-uzeri,#fff);font-size:11px;font-weight:700;line-height:18px;text-align:center;vertical-align:middle}',
-            '#cu-menu-isler .cu-is-rozet.kirmizi{background:#b84444}',
+            '#cu-menu-isler .cu-is-rozet.kirmizi{background:#b84444;color:#fff}',
             '#cu-menu-isler .cu-is-nokta{display:inline-block;width:8px;height:8px;border-radius:50%;background:#e0912f;margin-left:5px;vertical-align:middle}',
             '#cu-is-uyarilar{position:fixed;right:14px;bottom:calc(var(--cu-cubuk-yuk,44px) + 12px);z-index:2147483000;display:flex;flex-direction:column;gap:8px;width:350px;max-width:calc(100vw - 28px);pointer-events:none}',
             '.cu-is-uyari{--u-yuzey:var(--cu-t-yuzey,#fff);--u-yazi:var(--cu-t-yazi,#212529);--u-kenar:var(--cu-t-kenar,#dee2e6);pointer-events:auto;background:var(--u-yuzey);color:var(--u-yazi);',
@@ -322,12 +325,21 @@
             ciz();
             basla();
         }
+        digerSayfalariIndir();
         kok.style.display = '';
         if (one && kartAcikMi() && window.__cuGorunurKartiKucult) window.__cuGorunurKartiKucult();
         const m = document.getElementById('cu-menu-isler');
         if (m) m.classList.add('on');
         yerlestir();
         gorevGuncelle(true);
+    }
+    // İş Listesi ile İcra Takip Süreçleri aynı alanı kaplayan iki ayrı pencere: aynı anda yalnız biri önde
+    // durur. Biri açılınca öbürü görev çubuğuna iner (kullanıcı bildirimi 2026-11-23: İcra açıkken İş
+    // Listesi'ne basınca İcra önde kalıyordu).
+    const sayfalar = window.__cuSayfalar = window.__cuSayfalar || {};
+    sayfalar['isler'] = function() { if (gorunum === 'acik') kucult(); };
+    function digerSayfalariIndir() {
+        Object.keys(sayfalar).forEach(function(k) { if (k !== 'isler') try { sayfalar[k](); } catch (x) {} });
     }
     function kucult() {
         if (gorunum === 'kapali') return;

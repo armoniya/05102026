@@ -48,12 +48,18 @@ pub mod yerel_yardimci;
 // @proxy modülleri
 pub mod hata_kodlari;
 pub mod sifreli_gunluk;
+pub mod surum;
+pub mod guncelleme_imza;
+pub mod guncelleme;
 #[cfg(windows)]
 pub mod tepsi;
 pub mod is_listesi;
 pub mod is_otomatik;
 pub mod icra_tebligatlar;
 pub mod icra_dosyalar;
+pub mod icra_kesinlestirme;
+pub mod icra_listeler;
+pub mod icra_mernis;
 pub mod uyap_proxy;
 // Büro veritabanı (ofis bilgisayarında gömülü PostgreSQL) — 2026-11-15
 pub mod veritabani;

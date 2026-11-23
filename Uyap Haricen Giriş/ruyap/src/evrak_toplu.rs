@@ -449,6 +449,59 @@ pub async fn _uyap(
     }
 }
 
+/// Çok parçalı (multipart) POST: `_uyap` ile aynı kapı (hız sınırı, istek izi, yazma kilidi, oturum yenileme) ama
+/// YENİDEN DENENMEZ — bir yazma işlemidir (talep gönderimi), ağ hatasında ikinci kez gönderilmesi talebi çoğaltabilir.
+/// Alanlar: (ad, dosya adı — yoksa düz metin alanı, içerik). Döner: (HTTP durumu, JSON yanıt).
+pub async fn _uyap_multipart(ind: &Indirme, path: &str, alanlar: Vec<(String, Option<String>, Vec<u8>)>) -> Result<(u16, Option<Value>), String> {
+    let gw = uyap_proxy::get_gw().ok_or_else(|| "UYAP oturumu hazır değil.".to_string())?;
+    let url = format!("{}/{}", UYAP_BASE, path.trim_start_matches('/'));
+    let form = || {
+        let mut f = reqwest::multipart::Form::new();
+        for (ad, dosya, icerik) in &alanlar {
+            f = match dosya {
+                Some(d) => f.part(ad.clone(), reqwest::multipart::Part::bytes(icerik.clone()).file_name(d.clone())),
+                None => f.text(ad.clone(), String::from_utf8_lossy(icerik).into_owned()),
+            };
+        }
+        f
+    };
+    ind.iptal_kontrol()?;
+    hiz_siniri(ind).await;
+    let _izi = runtime::uyap_istek_izi().await;
+    let _batch = runtime::batch_write().await;
+    gw.ensure_alive().await?;
+    let gonder = || {
+        gw.client
+            .post(&url)
+            .header("Referer", format!("{}/dosya-sorgulama", UYAP_BASE))
+            .header("Accept", "application/json, text/plain, */*")
+            .multipart(form())
+            .send()
+    };
+    let mut r = gonder().await.map_err(|e| format!("{AG_ONEKI_}{e}"))?;
+    *SON_ISTEK.lock().unwrap() = Some(Instant::now());
+    gw.touch();
+    if _looks_like_login_wall(r.status().as_u16(), r.headers()) {
+        // Giriş sayfası döndü: istek UYAP'a ulaşmadı, yeniden giriş sonrası bir kez gönderilir.
+        gw.logged_in.store(false, std::sync::atomic::Ordering::SeqCst);
+        gw.relogin().await?;
+        r = gonder().await.map_err(|e| format!("{AG_ONEKI_}{e}"))?;
+        *SON_ISTEK.lock().unwrap() = Some(Instant::now());
+    }
+    let st = r.status().as_u16();
+    let mut hdrs = HashMap::new();
+    for (k, v) in r.headers() {
+        if let Ok(vs) = v.to_str() {
+            hdrs.insert(k.as_str().to_ascii_lowercase(), vs.to_string());
+        }
+    }
+    let bytes = r.bytes().await.map_err(|e| format!("UYAP yanıt okunamadı: {e}"))?.to_vec();
+    Ok((st, json_coz(&hdrs, &bytes)))
+}
+
+/// `_uyap`'ın ağ hatası öneki (`icra_guncelle::AG_ONEKI` ile aynı).
+const AG_ONEKI_: &str = "AG_HATASI:";
+
 fn evraklar_dizisi(veri: &Value) -> Vec<Value> {
     if let Some(arr) = veri.as_array() {
         return arr.clone();

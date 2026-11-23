@@ -64,7 +64,7 @@ install -m 0755 target/release/uyap_app "$OUT/uyap_app"
 cp -r "$SRC/uyap_core/enjekte" "$OUT/uyap_core/enjekte"
 cp -r "$SRC/webapp" "$OUT/webapp"
 cat >"$OUT/SURUM" <<EOT
-surum=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+surum=${CU_SURUM:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
 git=$GIT_HEAD (degismis dosya: $GIT_KIRLI)
 kaynak_ozet=$KAYNAK_OZET
 derleme=$(date -u +%Y-%m-%dT%H:%M:%SZ)
