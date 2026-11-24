@@ -88,6 +88,23 @@ dosya seçimi BÜRO VERİTABANI; onay İŞ LİSTESİ ÜZERİNDEN; yetki OLUŞTUR
   (seçici üst belgede açılır: çerçevedeki gizli input'u üstten kod açamaz; dosya `dosyaVer` ile editöre). Playwright ile denendi.
 - Kişi adları: görünen ad hesabı içermiyorsa listede hesap adı eklenir (zeynel@savas görünen adı "savas" geliyordu).
 
+## Büro Belgeleri sayfası + klasör düzeni (24.11.2026 planı, onay bekliyor)
+Kullanıcı isteği: İş Listesi / İcra Takip Süreçleri gibi bir "Büro Belgeleri" sayfası; belgeler yargı türü → birim
+(mahkeme/daire) → dosya klasörlerinde. Klasörler toptan açılmaz, belge kaydedildikçe oluşur. Linux'ta LUKS2 kasası da
+bu düzende. İleride: sunucu UYAP dosyalarındaki belgeleri indirir; dosya penceresinde tıklanan belge büroda varsa
+veritabanından gelir (DİKKAT: "UYAP'tan robotla veri çekme yok" ilkesiyle çelişir → o aşamada açık karar gerekir).
+- K1 disk düzeni: `<kök>/Belgeler/<Yargı türü>/<Birim adı>/<yıl-sıra>/<belge adı>.udf` (son sürüm) +
+  `…/<yıl-sıra>/.surumler/<belge adı>/<N>.udf`; dosyasız: `Belgeler/Dosyasız/<kullanıcı>/`. Ad temizliği (Windows'ta
+  yasak karakterler, uzunluk), çakışmada "(2)". `belge.yol` sütunu (0019). Dosya bağı / ad değişince taşınır, silinince
+  gider. Mevcut içerik adresli (ekler) sürümler bir kez taşınır. Kök: `kok_dizin()` → Linux'ta zaten kasadaki
+  `/var/lib/armonia/CokluUyap` (kasa_bagla.sh'a `Belgeler` 0700 kiosk eklenir).
+- K2 uçlar: `belge_agac` (yargı türü/birim/dosya + sayılar, yalnız görebildikleri), `belge_liste` klasör süzgeci,
+  `belge_tasi` (dosya değiştir), ad değiştir.
+- K3 sayfa `enjekte/belgeler.js`: sol menü + görev çubuğu + sayfa katmanı (İş Listesi kalıbı); solda klasör ağacı,
+  sağda liste (ad, sürüm, tarih, oluşturan, e-imza, işler, gönderim), arama, Belgelerim / Tümü; eylemler Aç, İndir,
+  Taşı, Yeniden adlandır, Sil; telefonda tek sütun. Uzaktan (tünel) aynı.
+- K4 test: uçtan uca postgres + disk (taşıma, çakışma, silme), Playwright, canlı; Linux derlemesi.
+
 ## 3–5. aşamalar (bekliyor)
 Şablonlar (`{{alan}}` yer tutucular, öneri kuralları; metinleri büro verir), icra dosya kartında "Dilekçe hazırla",
 İş Listesi bağlantısı (`gorev_ek` / bağ tablosu), uzaktan kullanım + güvenlik denetimi.
@@ -111,3 +128,11 @@ Açık kararlar: editör kaynağının yeri (ayrı depo / birleşme), belge yetk
 4. Bilgi: ölçek tercihi (`armonia-yazi-olcek`) ve ÇokluUYAP aynı kökende; ÇokluUYAP ilk açılışta `genislik` yazar.
    Tema için `:root` değişkenleri (`--zemin --cubuk --kenar --yazi --vurgu --vurgu-koyu --vurgu-zemin`) satır içi
    ezilir; adları değişirse ÇokluUYAP'a haber verilmeli.
+7. **Düzeltildi (24.11 akşam):** Enter yeni paragrafı varsayılan özelliklerle açıyordu → sekme durakları (TabSet),
+   hiza, girinti gidiyor, Tab 72 pt'ye düşüyor, UDF'e `Alignment="0"` yazılıyordu. `main.ts` `paragrafBol`
+   (splitBlockAs + ensureMarks) editör deposuna uygulandı (commit'lenmedi), ruyap'a `yazi_al.py` ile alındı.
+8. **Ortak sekme hizası (24.11 akşam):** boş belgeye varsayılan durak KONMADI: yerel 754 UDF'te paragraf başı Tab
+   (UYAP'ta 72 pt girinti) 442 belgede var, tek 113,4 pt durak onları kaydırırdı. Bunun yerine araç çubuğunda "⇥:"
+   (`komutlar.ts` `sekmeleriHizala`): imlecin Tab'lı satır bloğu ya da seçim → en uzun etiket + 6 pt, tam sayı;
+   paragrafa UYAP cetvelinin yazdığı biçimde `TabSet="N.0:0:0"`; etiketten sonraki fazla art arda sekmeler silinir;
+   paragraf başı sekmesi olan satırlara dokunulmaz. Playwright: hizalama, kaydet, yeniden aç aynı.
