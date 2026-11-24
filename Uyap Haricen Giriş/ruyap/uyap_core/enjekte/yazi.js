@@ -285,7 +285,14 @@
         const b = e.target && e.target.closest && e.target.closest('#arac-cubugu button');
         if (!b) return;
         const ad = (b.textContent || '').trim();
-        if (ad === 'Yeni' || ad === 'Aç') { belgeBirak(); return; }   // başka belge: imzalı dosya / büro kaydı ona ait değil
+        if (ad === 'Aç') {
+            // Editörün "Aç"ı doğrudan dosya seçici açıyordu: önce büro / bilgisayar seçimi
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            acMenusu(b);
+            return;
+        }
+        if (ad === 'Yeni') { belgeBirak(); return; }   // başka belge: imzalı dosya / büro kaydı ona ait değil
         if (ad === 'Kaydet' && !bizimTik) {
             // Editörün kendi "Kaydet"i de büroya kaydeder (indirme ▾ menüsünde)
             e.preventDefault();
@@ -352,6 +359,35 @@
         m.style.top = (r.bottom - k.top + 2) + 'px';
         m.style.left = Math.max(4, Math.min(r.left - k.left, k.width - m.offsetWidth - 4)) + 'px';
         setTimeout(function() { document.addEventListener('pointerdown', menuDisi, true); }, 0);
+    }
+    // Editör "Aç" menüsü: düğme çerçevenin içinde; menü üst belgede, çerçevenin konumu eklenerek açılır.
+    function acMenusu(b) {
+        const f = cerceve;
+        const rf = f ? f.getBoundingClientRect() : { top: 0, left: 0 }, rb = b.getBoundingClientRect();
+        const konum = { getBoundingClientRect: function() { return { bottom: rf.top + rb.bottom, left: rf.left + rb.left }; } };
+        menuAc(konum, [
+            ['Büro belgelerini aç…', buroAcPenceresi, 'Büro veritabanındaki belgeler (bu dosyanın / sizin)'],
+            ['Bilgisayarımdan aç…', bilgisayardanAc, 'Bu bilgisayardaki bir UDF ya da Word (DOCX) dosyası']
+        ]);
+        // Çerçevenin içine tıklanınca da kapansın (üst belgenin dinleyicisi çerçeveyi duymaz)
+        const d = cd();
+        if (d) d.addEventListener('pointerdown', menuKapat, { once: true, capture: true });
+    }
+    // Dosya seçici üst belgede açılır (tık burada; çerçevedeki seçiciyi kod açamaz), seçilen dosya editöre verilir.
+    function bilgisayardanAc() {
+        const i = document.createElement('input');
+        i.type = 'file';
+        i.accept = '.udf,.docx';
+        i.style.display = 'none';
+        i.addEventListener('change', function() {
+            const f = i.files && i.files[0];
+            i.remove();
+            if (!f) return;
+            belgeBirak();
+            dosyaVer(f);
+        });
+        document.body.appendChild(i);
+        i.click();
     }
     function menuDisi(e) { if (!e.target.closest || !e.target.closest('.cu-yz-menu')) menuKapat(); }
     function menuKapat() {

@@ -84,6 +84,8 @@ dosya seçimi BÜRO VERİTABANI; onay İŞ LİSTESİ ÜZERİNDEN; yetki OLUŞTUR
 - Belge silme (24.11, kullanıcı: "her taslak şişme yapacak"): `belge_veri::sil` artık KALICI — belge + sürümler +
   iş bağları (CASCADE), başka yerde kullanılmayan dosyalar diskten; bağlı işlere olay. Oluşturan ya da yönetici;
   UYAP'a gönderilmişi yalnız yönetici. Arayüz: editör ▾ "Belgeyi sil…" (onay penceresi), icra Belgeler "Sil" (iki tık).
+- Editörün "Aç"ı (24.11): doğrudan dosya seçici yerine menü — "Büro belgelerini aç…" / "Bilgisayarımdan aç…"
+  (seçici üst belgede açılır: çerçevedeki gizli input'u üstten kod açamaz; dosya `dosyaVer` ile editöre). Playwright ile denendi.
 - Kişi adları: görünen ad hesabı içermiyorsa listede hesap adı eklenir (zeynel@savas görünen adı "savas" geliyordu).
 
 ## 3–5. aşamalar (bekliyor)
