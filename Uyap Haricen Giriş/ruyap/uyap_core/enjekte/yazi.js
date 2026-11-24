@@ -366,6 +366,7 @@
         if (kayit) {
             g.push(['Onaya sun…', onayPenceresi, 'İş Listesi üzerinden onaya gönder']);
             g.push(['İşe ekle…', isePenceresi, 'Belgeyi İş Listesi\'ndeki bir işe ekle']);
+            g.push(['Belgeyi sil…', silPenceresi, 'Belgeyi bütün sürümleriyle büro veritabanından kalıcı olarak sil']);
         }
         g.push(['—', null]);
         if (imzali) g.push(['İndir: İmzalı UDF', function() { indir(imzali); }, 'E-imzalı UDF dosyasını indir']);
@@ -624,6 +625,28 @@
         kutu.appendChild(el('h3', null, baslik));
         kok.appendChild(kat);
         return { kutu: kutu, kapa: kapa };
+    }
+    // Kalıcı silme: bütün sürümler, iş bağları ve dosyalar (taslaklar birikmesin). Geri alınamaz.
+    function silPenceresi() {
+        if (!kayit) return;
+        const k = kutuAc('Belgeyi sil');
+        k.kutu.appendChild(el('div', 'cu-yz-satir', '"' + kayit.ad + '" bütün sürümleriyle (' + kayit.surum + ') büro veritabanından KALICI olarak silinecek; bağlı olduğu işlerden de çıkar. Geri alınamaz.'));
+        const durum = el('div', 'cu-yz-satir', '');
+        const alt = el('div', 'cu-yz-alt');
+        const vazgec = el('button', null, 'Vazgeç'), sil = el('button', 'ana', 'Kalıcı olarak sil');
+        vazgec.addEventListener('click', k.kapa);
+        sil.addEventListener('click', async function() {
+            sil.disabled = vazgec.disabled = true;
+            try {
+                await veriIstek('belge_sil', { id: kayit.id });
+                const ad = kayit.ad;
+                kayit = null; sonBaslik = ''; araclariGuncelle();
+                k.kapa();
+                bildir('Silindi: ' + ad + '. Editördeki metin kaydedilmemiş olarak duruyor.');
+            } catch (x) { durum.textContent = x && x.message || String(x); sil.disabled = vazgec.disabled = false; }
+        });
+        alt.append(vazgec, sil);
+        k.kutu.append(durum, alt);
     }
     function cakismaPenceresi(m) {
         const k = kutuAc('Belge başkası tarafından değiştirildi');

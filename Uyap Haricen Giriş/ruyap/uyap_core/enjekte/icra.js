@@ -2164,7 +2164,16 @@
                 liste.appendChild(e('div', { sinif: 'i-olay' }, [
                     e('div', { stil: 'display:flex;justify-content:space-between;gap:8px;align-items:center' }, [
                         e('div', { stil: 'min-width:0' }, [e('div', { stil: 'font-weight:600', metin: b.ad }), e('div', { sinif: 'alt', metin: bilgi })]),
-                        e('button', { sinif: 'i-d kucuk', metin: 'Aç', disabled: !editor, title: 'Armonia Yazı\'da aç', onclick: function() { window.__cuYaziBelgeAc(b.id); } })
+                        e('span', { stil: 'display:flex;gap:4px;flex:none' }, [
+                            e('button', { sinif: 'i-d kucuk', metin: 'Aç', disabled: !editor, title: 'Armonia Yazı\'da aç', onclick: function() { window.__cuYaziBelgeAc(b.id); } }),
+                            e('button', { sinif: 'i-d kucuk tehlike', metin: 'Sil', title: 'Bütün sürümleriyle kalıcı olarak sil (geri alınamaz)', onclick: async function(ev) {
+                                const dg = ev.currentTarget;
+                                if (!dg.dataset.onay) { dg.dataset.onay = '1'; dg.textContent = 'Emin misiniz?'; setTimeout(function() { delete dg.dataset.onay; dg.textContent = 'Sil'; }, 4000); return; }
+                                dg.disabled = true;
+                                try { await istek('is/belge_sil', { id: b.id }); aktifCiz(); }
+                                catch (x) { dg.disabled = false; bildir(x.message); }
+                            } })
+                        ])
                     ])
                 ]));
             });

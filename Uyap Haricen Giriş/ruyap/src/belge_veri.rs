@@ -434,13 +434,53 @@ pub fn gonderildi<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, tur: &str, tur
 }
 
 /// Belgeyi siler (yumuşak): oluşturan ya da yönetici. Sürümler ve dosyaları kalır.
+/// Belgeyi KALICI siler: bütün sürümleri, iş bağları ve (başka yerde kullanılmıyorsa) diskteki dosyaları.
+/// Taslaklar birikip şişirmesin diye işaretleme değil gerçek silme. Yalnız oluşturan ya da yönetici;
+/// UYAP'a gönderilmiş belgeyi yalnız yönetici siler (gönderim kaydı belgeyle gider).
 pub fn sil<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String> {
     belge_ozu(c, k, id)?.ok_or("Belge bulunamadı.")?;
-    let olusturan: Option<i64> = c.query_one("SELECT olusturan_id FROM belge WHERE id = $1", &[&id]).map_err(hata)?.get(0);
+    let r = c.query_one("SELECT olusturan_id, gonderim IS NOT NULL, ad FROM belge WHERE id = $1", &[&id]).map_err(hata)?;
+    let (olusturan, gonderildi, ad): (Option<i64>, bool, String) = (r.get(0), r.get(1), r.get(2));
     if !(k.yonetici || olusturan == Some(k.id)) {
         return Err("Belgeyi yalnız oluşturan ya da yönetici silebilir.".into());
     }
-    c.execute("UPDATE belge SET silindi = now() WHERE id = $1", &[&id]).map_err(hata)?;
+    if gonderildi && !k.yonetici {
+        return Err("UYAP'a gönderilmiş belgeyi yalnız yönetici silebilir.".into());
+    }
+    let mut tx = c.transaction().map_err(hata)?;
+    let shalar: Vec<String> = tx
+        .query("SELECT DISTINCT sha256 FROM belge_surum WHERE belge_id = $1", &[&id])
+        .map_err(hata)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let isler: Vec<i64> = tx
+        .query("SELECT gorev_id FROM gorev_belge WHERE belge_id = $1", &[&id])
+        .map_err(hata)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    tx.execute("DELETE FROM belge WHERE id = $1", &[&id]).map_err(hata)?; // sürümler ve iş bağları CASCADE
+    for g in isler {
+        iv::olay_yaz(&mut tx, Some(g), Some(k.id), iv::olay::EK, json!({"belge_silindi": id, "ad": ad}))?;
+    }
+    let mut silinecek = Vec::new();
+    for sha in shalar {
+        let kullanilan: bool = tx
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM belge_surum WHERE sha256 = $1) OR EXISTS (SELECT 1 FROM gorev_ek WHERE sha256 = $1)",
+                &[&sha],
+            )
+            .map_err(hata)?
+            .get(0);
+        if !kullanilan && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            silinecek.push(sha);
+        }
+    }
+    tx.commit().map_err(hata)?;
+    for sha in silinecek {
+        let _ = std::fs::remove_file(crate::is_aktar::ekler_dizini().join(&sha));
+    }
     Ok(())
 }
 
@@ -595,8 +635,12 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert!(sha_kullaniliyor(c, &sha).unwrap());
     // Silme
     assert!(sil(c, &baska, id).is_err());
-    sil(c, &uye, id).unwrap();
+    assert!(sil(c, &uye, id).is_err(), "UYAP'a gönderilmiş belgeyi yalnız yönetici siler");
+    sil(c, &amir, id).unwrap();
     assert!(getir(c, &uye, id).is_err(), "silinen belge görünmez");
+    let kalan: i64 = c.query_one("SELECT (SELECT count(*) FROM belge WHERE id = $1) + (SELECT count(*) FROM belge_surum WHERE belge_id = $1)", &[&id]).unwrap().get(0);
+    assert_eq!(kalan, 0, "kalıcı silme: belge ve sürümleri gider");
+    assert!(!sha_kullaniliyor(c, &sha).unwrap());
     c.batch_execute(&format!(
         "DELETE FROM belge WHERE id = {id}; DELETE FROM gorev WHERE id IN ({gid}, {og}, {gid2}); DELETE FROM dosya WHERE id = {dosya};
          DELETE FROM kullanici WHERE hesap_adi = 'baska@buro';"

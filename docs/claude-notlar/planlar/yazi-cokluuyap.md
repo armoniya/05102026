@@ -81,6 +81,9 @@ dosya seçimi BÜRO VERİTABANI; onay İŞ LİSTESİ ÜZERİNDEN; yetki OLUŞTUR
   aynı kişiye saatte bir, geçmişe `hatirlatildi` olayı. Uçtan uca test geçti; canlı denenmedi.
   Canlıda bulundu: sunan YÖNETİCİ ise `onaylayabilir` olduğundan düğme çıkmıyordu (utku → iş 327 savas, 328 sevval).
   Düzeltme: başkası onaylayıcıysa ve ben onaylayıcı değilsem, yöneticide de "Hatırlatma gönder" (+ Onayla kalır).
+- Belge silme (24.11, kullanıcı: "her taslak şişme yapacak"): `belge_veri::sil` artık KALICI — belge + sürümler +
+  iş bağları (CASCADE), başka yerde kullanılmayan dosyalar diskten; bağlı işlere olay. Oluşturan ya da yönetici;
+  UYAP'a gönderilmişi yalnız yönetici. Arayüz: editör ▾ "Belgeyi sil…" (onay penceresi), icra Belgeler "Sil" (iki tık).
 - Kişi adları: görünen ad hesabı içermiyorsa listede hesap adı eklenir (zeynel@savas görünen adı "savas" geliyordu).
 
 ## 3–5. aşamalar (bekliyor)
