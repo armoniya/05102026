@@ -1,8 +1,10 @@
 //! Büro belge deposu (2. aşama, 24.11.2026; plan docs/claude-notlar/planlar/yazi-cokluuyap.md).
 //!
-//! Armonia Yazı'da yazılan belge büro veritabanına kaydedilir: her kayıt yeni bir sürüm (`belge_surum`), baytlar
-//! ofis diskinde içerik adresli (iş ekleriyle aynı depo, `is_aktar::ekler_dizini`). Belge bir dosyaya bağlıdır ve
-//! İş Listesi işlerine eklenir (`gorev_belge`); onay iş üzerinden yürür (`onaya_sun`).
+//! Armonia Yazı'da yazılan belge büro veritabanına kaydedilir: her kayıt yeni bir sürüm (`belge_surum`). Dosyalar
+//! ofis diskinde yargı türü / birim / dosya klasörlerinde (`belge_disk.rs`, 24.11 akşam): son sürüm belgenin adıyla,
+//! eskiler `.surumler` altında. Eski içerik adresli depodaki (`ekler/<sha256>`) belgeler açılışta bir kez taşınır
+//! (`eski_belgeleri_yerlestir`). Belge bir dosyaya bağlıdır ve İş Listesi işlerine eklenir (`gorev_belge`); onay iş
+//! üzerinden yürür (`onaya_sun`).
 //!
 //! Yetki (kullanıcı kararı 24.11): belgeyi oluşturan, bağlı işlerin sorumlusu / açanı / kişileri (sorumlu,
 //! onaylayıcı, izleyici) ve yöneticiler görür ve düzenler. Göremeyene belge "bulunamadı" denir (varlığı sızmaz).
@@ -13,6 +15,7 @@ use chrono::NaiveDate;
 use postgres::GenericClient;
 use serde_json::{json, Value};
 
+use crate::belge_disk::{self as bd, GeriAl};
 use crate::is_veri::{self as iv, Kisi};
 
 pub const EN_BUYUK: usize = 25 * 1024 * 1024;
@@ -47,21 +50,12 @@ fn sha_gecerli(sha: &str) -> bool {
     sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Baytları depoya yazar (yoksa); sha256 döner.
-fn depoya_yaz(veri: &[u8]) -> Result<String, String> {
+fn sha256(veri: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let sha = hex::encode(Sha256::digest(veri));
-    let dizin = crate::is_aktar::ekler_dizini();
-    std::fs::create_dir_all(&dizin).map_err(|e| format!("Belge klasörü açılamadı: {e}"))?;
-    let yol = dizin.join(&sha);
-    if !yol.exists() {
-        let gecici = dizin.join(format!("{sha}.yarim"));
-        std::fs::write(&gecici, veri).map_err(|e| format!("Belge yazılamadı: {e}"))?;
-        std::fs::rename(&gecici, &yol).map_err(|e| format!("Belge yazılamadı: {e}"))?;
-    }
-    Ok(sha)
+    hex::encode(Sha256::digest(veri))
 }
 
+/// Eski içerik adresli depodan okur (klasörlere taşınmamış belge).
 fn depodan_oku(sha: &str) -> Result<Vec<u8>, String> {
     if !sha_gecerli(sha) {
         return Err("Belge kaydı bozuk.".into());
@@ -110,6 +104,141 @@ fn dosya_kunyesi<C: GenericClient>(c: &mut C, dosya_id: i64) -> Result<Option<(S
         .map(|r| (r.get(0), r.get(1))))
 }
 
+/// Dosyanın klasör künyesi: yargı türü adı, birim, numara, talimat mı.
+fn dosya_klasor_kunyesi<C: GenericClient>(c: &mut C, dosya_id: i64) -> Result<Option<bd::Kunye>, String> {
+    Ok(c
+        .query_opt(
+            "SELECT d.yargi_turu, bi.ad, d.dosya_no, d.tur_kod FROM dosya d JOIN birim bi ON bi.id = d.birim_id WHERE d.id = $1",
+            &[&dosya_id],
+        )
+        .map_err(hata)?
+        .map(|r| bd::Kunye {
+            yargi: crate::icra_veri::YargiTuru::coz(r.get::<_, i16>(0)).map(|y| y.etiket()).unwrap_or("Diğer").to_string(),
+            birim: r.get(1),
+            dosya_no: r.get(2),
+            talimat: r.get::<_, i32>(3) == 1,
+        }))
+}
+
+/// Büroda kaydı olmayan UYAP dosyası: künye kart verisinden; yargı türü dosya türü kodundan.
+fn kart_kunyesi(kart: &Value) -> bd::Kunye {
+    let tur = kart["dosyaTurKod"].as_i64().or_else(|| kart["dosyaTurKod"].as_str().and_then(|s| s.trim().parse().ok()));
+    let yargi = match tur {
+        Some(35) => "İcra",
+        Some(14) | Some(15) => "Hukuk",
+        Some(3) => "Ceza",
+        Some(16) => "Cbs",
+        _ => "Diğer",
+    };
+    bd::Kunye {
+        yargi: yargi.into(),
+        birim: kart["birimAdi"].as_str().unwrap_or("").to_string(),
+        dosya_no: kart["dosyaNo"].as_str().unwrap_or("").to_string(),
+        talimat: tur == Some(1),
+    }
+}
+
+/// Dosyasız belgelerin klasörü için kullanıcı adı (hesabın @'ten önceki kısmı).
+fn kullanici_klasoru<C: GenericClient>(c: &mut C, kullanici: Option<i64>) -> Result<String, String> {
+    let Some(id) = kullanici else { return Ok(String::new()) };
+    let h: Option<String> = c.query_opt("SELECT hesap_adi FROM kullanici WHERE id = $1", &[&id]).map_err(hata)?.map(|r| r.get(0));
+    Ok(h.map(|h| h.split('@').next().unwrap_or("").to_string()).unwrap_or_default())
+}
+
+/// Belgenin bulunması gereken klasör.
+fn belge_klasoru<C: GenericClient>(c: &mut C, dosya_id: Option<i64>, kart: Option<&Value>, olusturan: Option<i64>) -> Result<Vec<String>, String> {
+    let kunye = match (dosya_id, kart) {
+        (Some(d), _) => dosya_klasor_kunyesi(c, d)?,
+        (None, Some(k)) => Some(kart_kunyesi(k)),
+        (None, None) => None,
+    };
+    let kullanici = kullanici_klasoru(c, olusturan)?;
+    Ok(bd::klasor(kunye.as_ref(), &kullanici))
+}
+
+/// Yol başka bir belgede mi (büyük/küçük harf ayırmadan)?
+fn yol_dolu<C: GenericClient>(c: &mut C, yol: &str, haric: i64) -> Result<bool, String> {
+    Ok(c
+        .query_one("SELECT EXISTS (SELECT 1 FROM belge WHERE lower(yol) = lower($1) AND id <> $2)", &[&yol, &haric])
+        .map_err(hata)?
+        .get(0))
+}
+
+fn parcalar(klasor: &str) -> Vec<String> {
+    klasor.split('/').map(str::to_string).collect()
+}
+
+/// Belgenin disk yolu; eski içerik adresli depodaysa (yol yok) önce klasör düzenine yerleştirilir: sürümler
+/// klasöre kopyalanır, `yol` yazılır. Eski depodaki kopyalar `eski_shalari_temizle` ile silinir.
+fn yerlestir<C: GenericClient>(c: &mut C, id: i64, geri: &mut GeriAl) -> Result<String, String> {
+    let r = c
+        .query_one("SELECT yol, ad, bicim, dosya_id, uyap_karti, olusturan_id, son_surum FROM belge WHERE id = $1", &[&id])
+        .map_err(hata)?;
+    if let Some(y) = r.get::<_, Option<String>>(0) {
+        return Ok(y);
+    }
+    let (ad, bicim, son): (String, String, i32) = (r.get(1), r.get(2), r.get(6));
+    let kart: Option<Value> = r.get(4);
+    let klasor = belge_klasoru(c, r.get(3), kart.as_ref(), r.get(5))?;
+    let yol = bd::bos_yol(&klasor, &ad, &bicim, |y| yol_dolu(c, y, id))?;
+    let surumler = c.query("SELECT surum, sha256 FROM belge_surum WHERE belge_id = $1 ORDER BY surum", &[&id]).map_err(hata)?;
+    for s in &surumler {
+        let n: i32 = s.get(0);
+        let veri = depodan_oku(&s.get::<_, String>(1))?;
+        let hedef = if n == son { bd::coz(&yol)? } else { bd::surum_dosyasi(&yol, id, n, &bicim)? };
+        bd::yaz(&hedef, &veri)?;
+        bd::gizle_surumler(&hedef);
+        geri.yazildi(&hedef);
+    }
+    c.execute("UPDATE belge SET yol = $2 WHERE id = $1", &[&id, &yol]).map_err(hata)?;
+    Ok(yol)
+}
+
+/// Eski depodaki (ekler/<sha256>) dosyalardan artık hiçbir şeyin kullanmadıklarını siler: iş ekleri ya da klasöre
+/// taşınmamış belgeler kullanıyorsa kalır.
+fn eski_shalari_temizle<C: GenericClient>(c: &mut C, shalar: &[String]) -> Result<(), String> {
+    for sha in shalar {
+        if !sha_gecerli(sha) {
+            continue;
+        }
+        let kullanilan: bool = c
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM gorev_ek WHERE sha256 = $1)
+                     OR EXISTS (SELECT 1 FROM belge_surum bs JOIN belge b ON b.id = bs.belge_id WHERE bs.sha256 = $1 AND b.yol IS NULL)",
+                &[sha],
+            )
+            .map_err(hata)?
+            .get(0);
+        if !kullanilan {
+            let _ = std::fs::remove_file(crate::is_aktar::ekler_dizini().join(sha));
+        }
+    }
+    Ok(())
+}
+
+/// Açılışta bir kez: eski içerik adresli depodaki belgeleri klasör düzenine taşır. (taşınan sayısı, hatalar);
+/// taşınamayan belge (dosyası kayıp) eski yerinde kalır, okunurken eski depodan denenir.
+pub fn eski_belgeleri_yerlestir(c: &mut postgres::Client) -> Result<(usize, Vec<String>), String> {
+    let idler: Vec<i64> = c.query("SELECT id FROM belge WHERE yol IS NULL ORDER BY id", &[]).map_err(hata)?.iter().map(|r| r.get(0)).collect();
+    let (mut n, mut hatalar) = (0, Vec::new());
+    for id in idler {
+        let mut tx = c.transaction().map_err(hata)?;
+        let mut geri = GeriAl::default();
+        let shalar: Vec<String> =
+            tx.query("SELECT sha256 FROM belge_surum WHERE belge_id = $1", &[&id]).map_err(hata)?.iter().map(|r| r.get(0)).collect();
+        match yerlestir(&mut tx, id, &mut geri) {
+            Ok(_) => {
+                tx.commit().map_err(hata)?;
+                geri.tamam();
+                n += 1;
+                let _ = eski_shalari_temizle(c, &shalar);
+            }
+            Err(e) => hatalar.push(format!("belge {id}: {e}")),
+        }
+    }
+    Ok((n, hatalar))
+}
+
 /// Kayıt isteği.
 #[derive(Clone, Debug, Default)]
 pub struct Kayit {
@@ -143,8 +272,9 @@ pub fn kaydet<C: GenericClient>(c: &mut C, k: &Kisi, r: &Kayit, veri: &[u8]) -> 
     }
     let notu: String = r.notu.trim().chars().take(300).collect();
     let mut tx = c.transaction().map_err(hata)?;
-    // Belgeye özgü kilit: aynı belgeye iki kayıt aynı anda sürüm numarası almasın
-    let sha = depoya_yaz(veri)?;
+    // Disk işleri veritabanıyla birlikte: commit'ten önce çıkılırsa geri alınır
+    let mut geri = GeriAl::default();
+    let sha = sha256(veri);
     let boyut = veri.len() as i64;
     if let Some(id) = r.id {
         let oz = belge_ozu(&mut tx, k, id)?.ok_or("Belge bulunamadı.")?;
@@ -178,19 +308,38 @@ pub fn kaydet<C: GenericClient>(c: &mut C, k: &Kisi, r: &Kayit, veri: &[u8]) -> 
             return Ok(json!({"id": id, "surum": son.0, "yeni": false}));
         }
         let yeni = son.0 + 1;
+        let ad = if r.ad.trim().is_empty() { oz.ad.clone() } else { ad_temizle(&r.ad) };
+        // Disk: son sürüm .surumler'e iner, yenisi belgenin adıyla yazılır (ad değiştiyse aynı klasörde yeni adla)
+        let yol = yerlestir(&mut tx, id, &mut geri)?;
+        let ana = bd::coz(&yol)?;
+        if son.0 > 0 && ana.exists() {
+            let eski = bd::surum_dosyasi(&yol, id, son.0, &oz.bicim)?;
+            bd::tasi(&ana, &eski)?;
+            geri.tasindi(&ana, &eski);
+        }
+        let yeni_yol = if ad != oz.ad {
+            bd::bos_yol(&parcalar(bd::klasoru(&yol)), &ad, &oz.bicim, |y| yol_dolu(&mut tx, y, id))?
+        } else {
+            yol
+        };
+        let yeni_ana = bd::coz(&yeni_yol)?;
+        bd::yaz(&yeni_ana, veri)?;
+        geri.yazildi(&yeni_ana);
         tx.execute(
             "INSERT INTO belge_surum (belge_id, surum, sha256, boyut, imzali, kaydeden_id, notu) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             &[&id, &yeni, &sha, &boyut, &r.imzali, &k.id, &notu],
         )
         .map_err(hata)?;
-        let ad = if r.ad.trim().is_empty() { oz.ad.clone() } else { ad_temizle(&r.ad) };
+        let (bi, no): (String, String) =
+            tx.query_one("SELECT birim_adi, dosya_no FROM belge WHERE id = $1", &[&id]).map_err(hata).map(|r| (r.get(0), r.get(1)))?;
         tx.execute(
-            "UPDATE belge SET son_surum = $2, imzali = $3, ad = $4, guncelleme = now(),
+            "UPDATE belge SET son_surum = $2, imzali = $3, ad = $4, yol = $6, guncelleme = now(),
                     arama_metni = $5 WHERE id = $1",
-            &[&id, &yeni, &r.imzali, &ad, &iv::arama_katla(&[&ad])],
+            &[&id, &yeni, &r.imzali, &ad, &iv::arama_katla(&[&ad, &bi, &no]), &yeni_yol],
         )
         .map_err(hata)?;
         tx.commit().map_err(hata)?;
+        geri.tamam();
         return Ok(json!({"id": id, "surum": yeni, "yeni": false}));
     }
     // Yeni belge
@@ -211,11 +360,18 @@ pub fn kaydet<C: GenericClient>(c: &mut C, k: &Kisi, r: &Kayit, veri: &[u8]) -> 
     }
     let ad = ad_temizle(&r.ad);
     let arama = iv::arama_katla(&[&ad, &birim_adi, &dosya_no]);
+    // Klasör belge kaydedilince oluşur
+    let kart = if dosya_id.is_none() { r.uyap_karti.as_ref() } else { None };
+    let klasor = belge_klasoru(&mut tx, dosya_id, kart, Some(k.id))?;
+    let yol = bd::bos_yol(&klasor, &ad, bicim, |y| yol_dolu(&mut tx, y, 0))?;
+    let ana = bd::coz(&yol)?;
+    bd::yaz(&ana, veri)?;
+    geri.yazildi(&ana);
     let id: i64 = tx
         .query_one(
-            "INSERT INTO belge (ad, bicim, dosya_id, birim_adi, dosya_no, uyap_karti, olusturan_id, son_surum, imzali, arama_metni)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9) RETURNING id",
-            &[&ad, &bicim, &dosya_id, &birim_adi, &dosya_no, &r.uyap_karti, &k.id, &r.imzali, &arama],
+            "INSERT INTO belge (ad, bicim, dosya_id, birim_adi, dosya_no, uyap_karti, olusturan_id, son_surum, imzali, arama_metni, yol)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10) RETURNING id",
+            &[&ad, &bicim, &dosya_id, &birim_adi, &dosya_no, &r.uyap_karti, &k.id, &r.imzali, &arama, &yol],
         )
         .map_err(hata)?
         .get(0);
@@ -228,6 +384,7 @@ pub fn kaydet<C: GenericClient>(c: &mut C, k: &Kisi, r: &Kayit, veri: &[u8]) -> 
         ise_ekle_ic(&mut tx, k, id, g)?;
     }
     tx.commit().map_err(hata)?;
+    geri.tamam();
     Ok(json!({"id": id, "surum": 1, "yeni": true}))
 }
 
@@ -240,7 +397,19 @@ pub fn oku<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, surum: Option<i32>) -
         .map_err(hata)?
         .ok_or("Bu sürüm bulunamadı.")?;
     let sha: String = r.get(0);
-    Ok((oz.ad, oz.bicim, s, r.get(1), depodan_oku(&sha)?))
+    let yol: Option<String> = c.query_one("SELECT yol FROM belge WHERE id = $1", &[&id]).map_err(hata)?.get(0);
+    let veri = match yol {
+        Some(y) => {
+            let p = if s == oz.son_surum { bd::coz(&y)? } else { bd::surum_dosyasi(&y, id, s, &oz.bicim)? };
+            match std::fs::read(&p) {
+                Ok(v) => v,
+                // Taşınırken eski depoda kalmış olabilir
+                Err(_) => depodan_oku(&sha).map_err(|_| format!("Belgenin dosyası ofis bilgisayarında bulunamadı (Belgeler/{y}, sürüm {s})."))?,
+            }
+        }
+        None => depodan_oku(&sha)?,
+    };
+    Ok((oz.ad, oz.bicim, s, r.get(1), veri))
 }
 
 fn belge_json(r: &postgres::Row) -> Value {
@@ -252,37 +421,101 @@ fn belge_json(r: &postgres::Row) -> Value {
         "uyap_karti": r.get::<_, Option<Value>>("uyap_karti"),
         "olusturan": r.get::<_, String>("olusturan"), "guncelleme": r.get::<_, String>("guncelleme_m"),
         "is_sayisi": r.get::<_, i64>("is_sayisi"),
+        "klasor": r.get::<_, Option<String>>("yol").map(|y| bd::klasoru(&y).to_string()),
     })
 }
 
-const LISTE_SECIM: &str = "SELECT b.id, b.ad, b.bicim, b.dosya_id, b.birim_adi, b.dosya_no, b.son_surum, b.imzali, b.gonderim, b.uyap_karti,
+const LISTE_SECIM: &str = "SELECT b.id, b.ad, b.bicim, b.dosya_id, b.birim_adi, b.dosya_no, b.son_surum, b.imzali, b.gonderim, b.uyap_karti, b.yol,
         coalesce(nullif(ku.ad, ''), ku.hesap_adi, '') AS olusturan,
         to_char(b.guncelleme AT TIME ZONE 'Europe/Istanbul', 'DD.MM.YYYY HH24:MI') AS guncelleme_m,
         (SELECT count(*) FROM gorev_belge x WHERE x.belge_id = b.id) AS is_sayisi
      FROM belge b LEFT JOIN kullanici ku ON ku.id = b.olusturan_id";
 
-/// Kişinin görebildiği belgeler. Süzgeçler: dosya, iş, arama metni; hiçbiri yoksa kişinin belgeleri
-/// (oluşturduğu ya da işleri yoluyla erişebildiği), en yeni önce.
-pub fn liste<C: GenericClient>(c: &mut C, k: &Kisi, dosya_id: Option<i64>, gorev_id: Option<i64>, ara: &str) -> Result<Vec<Value>, String> {
+/// "Belgelerim": kişinin oluşturduğu ya da işleri (sorumlu / kişi) yoluyla bağlı olduğu belgeler. $1 = kişi.
+const BENIM: &str = "(b.olusturan_id = $1::bigint OR EXISTS (
+        SELECT 1 FROM gorev_belge gb JOIN gorev g ON g.id = gb.gorev_id WHERE gb.belge_id = b.id
+        AND (g.sorumlu_id = $1::bigint OR EXISTS (SELECT 1 FROM gorev_kisi gk WHERE gk.gorev_id = g.id AND gk.kullanici_id = $1::bigint))))";
+
+/// LIKE deseninde \, % ve _ kaçırılır (klasör adında geçebilir; PostgreSQL'de varsayılan kaçış \).
+fn like_kacir(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            o.push('\\');
+        }
+        o.push(ch);
+    }
+    o
+}
+
+/// Kişinin görebildiği belgeler, en yeni önce. Süzgeçler: dosya, iş, arama metni, klasör (alt klasörleriyle).
+/// `tumu` değilse yalnız "Belgelerim" (dosya ya da iş süzgeci verilince bu kısıt kalkar).
+pub fn liste<C: GenericClient>(c: &mut C, k: &Kisi, dosya_id: Option<i64>, gorev_id: Option<i64>, ara: &str, klasor: &str, tumu: bool) -> Result<Vec<Value>, String> {
     let ara = iv::arama_katla(&[ara]);
     let desen = format!("%{}%", ara.replace('%', "").replace('_', ""));
+    let klasor = klasor.trim_matches('/').to_string();
+    let klasor_deseni = format!("{}/%", like_kacir(&klasor));
     let sql = format!(
         "{LISTE_SECIM} WHERE b.silindi IS NULL AND {GOREBILIR}
            AND ($3::bigint IS NULL OR b.dosya_id = $3)
            AND ($4::bigint IS NULL OR EXISTS (SELECT 1 FROM gorev_belge y WHERE y.belge_id = b.id AND y.gorev_id = $4))
            AND ($5::varchar = '' OR b.arama_metni LIKE $6)
-           AND ($2::boolean = false OR $3::bigint IS NOT NULL OR $4::bigint IS NOT NULL OR $5::varchar <> ''
-                OR b.olusturan_id = $1::bigint OR EXISTS (
-                    SELECT 1 FROM gorev_belge gb JOIN gorev g ON g.id = gb.gorev_id WHERE gb.belge_id = b.id
-                    AND (g.sorumlu_id = $1::bigint OR EXISTS (SELECT 1 FROM gorev_kisi gk WHERE gk.gorev_id = g.id AND gk.kullanici_id = $1::bigint))))
+           AND ($8::varchar = '' OR b.yol LIKE $9)
+           AND ($7::boolean OR $3::bigint IS NOT NULL OR $4::bigint IS NOT NULL OR {BENIM})
          ORDER BY b.guncelleme DESC LIMIT 200"
     );
     Ok(c
-        .query(&sql, &[&k.id, &k.yonetici, &dosya_id, &gorev_id, &ara, &desen])
+        .query(&sql, &[&k.id, &k.yonetici, &dosya_id, &gorev_id, &ara, &desen, &tumu, &klasor, &klasor_deseni])
         .map_err(hata)?
         .iter()
         .map(belge_json)
         .collect())
+}
+
+/// Klasör ağacı: yargı türü → birim → dosya, her düğümde (alt klasörleriyle) belge sayısı; yalnız kişinin
+/// görebildiği belgeler (`tumu` değilse "Belgelerim"). Ağaç diskteki düzenin aynısı (belge yollarından).
+pub fn agac<C: GenericClient>(c: &mut C, k: &Kisi, tumu: bool) -> Result<Value, String> {
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Dugum {
+        sayi: i64,
+        alt: BTreeMap<String, Dugum>,
+    }
+    // Sıra: dosya numaraları yeniden eskiye (yıl, sıra); öteki adlar Türkçe abece; "Dosyasız" en sonda
+    fn sira_anahtari(ad: &str) -> (u8, i64, i64, String) {
+        let sayisal = ad
+            .split(' ')
+            .next()
+            .and_then(|n| n.split_once('-'))
+            .and_then(|(y, s)| Some((y.parse::<i64>().ok()?, s.parse::<i64>().ok()?)));
+        match sayisal {
+            Some((y, s)) => (0, -y, -s, String::new()),
+            None if ad == bd::DOSYASIZ => (2, 0, 0, String::new()),
+            None => (1, 0, 0, iv::arama_katla(&[ad])),
+        }
+    }
+    fn json_yap(d: &Dugum, ust: &str) -> Vec<Value> {
+        let mut v: Vec<(&String, &Dugum)> = d.alt.iter().collect();
+        v.sort_by_key(|(ad, _)| sira_anahtari(ad));
+        v.into_iter()
+            .map(|(ad, a)| {
+                let klasor = if ust.is_empty() { ad.clone() } else { format!("{ust}/{ad}") };
+                json!({"ad": ad, "klasor": klasor, "sayi": a.sayi, "alt": json_yap(a, &klasor)})
+            })
+            .collect()
+    }
+    let sql = format!("SELECT b.yol FROM belge b WHERE b.silindi IS NULL AND b.yol IS NOT NULL AND {GOREBILIR} AND ($3::boolean OR {BENIM})");
+    let mut kok = Dugum::default();
+    for r in c.query(&sql, &[&k.id, &k.yonetici, &tumu]).map_err(hata)? {
+        let yol: String = r.get(0);
+        kok.sayi += 1;
+        let mut d = &mut kok;
+        for p in bd::klasoru(&yol).split('/').filter(|p| !p.is_empty()) {
+            d = d.alt.entry(p.to_string()).or_default();
+            d.sayi += 1;
+        }
+    }
+    Ok(json!({"sayi": kok.sayi, "alt": json_yap(&kok, "")}))
 }
 
 /// Belgenin ayrıntısı: özet + sürümler + bağlı işler.
@@ -318,21 +551,82 @@ pub fn getir<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<Value, St
     Ok(v)
 }
 
-/// Belgeyi bir dosyaya bağlar (ya da bağı kaldırır).
+/// Belgeyi bir dosyaya bağlar (ya da bağı kaldırır); dosyaları o dosyanın klasörüne taşınır (eski sürümleriyle).
 pub fn dosya_bagla<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, dosya_id: Option<i64>) -> Result<(), String> {
-    belge_ozu(c, k, id)?.ok_or("Belge bulunamadı.")?;
+    let oz = belge_ozu(c, k, id)?.ok_or("Belge bulunamadı.")?;
     let (b, n) = match dosya_id {
         Some(d) => dosya_kunyesi(c, d)?.ok_or("Dosya bulunamadı.")?,
         None => (String::new(), String::new()),
     };
-    let ad: String = c.query_one("SELECT ad FROM belge WHERE id = $1", &[&id]).map_err(hata)?.get(0);
-    c.execute(
+    let mut tx = c.transaction().map_err(hata)?;
+    let mut geri = GeriAl::default();
+    tx.query_one("SELECT 1 FROM belge WHERE id = $1 FOR UPDATE", &[&id]).map_err(hata)?;
+    let yol = yerlestir(&mut tx, id, &mut geri)?;
+    let olusturan: Option<i64> = tx.query_one("SELECT olusturan_id FROM belge WHERE id = $1", &[&id]).map_err(hata)?.get(0);
+    let klasor = belge_klasoru(&mut tx, dosya_id, None, olusturan)?;
+    let yeni_yol = if klasor.join("/") == bd::klasoru(&yol) {
+        yol.clone()
+    } else {
+        let y = bd::bos_yol(&klasor, &oz.ad, &oz.bicim, |y| yol_dolu(&mut tx, y, id))?;
+        let (ana, yeni_ana) = (bd::coz(&yol)?, bd::coz(&y)?);
+        if ana.exists() {
+            bd::tasi(&ana, &yeni_ana)?;
+            geri.tasindi(&ana, &yeni_ana);
+        }
+        let (sk, yeni_sk) = (bd::surum_klasoru(&yol, id)?, bd::surum_klasoru(&y, id)?);
+        if sk.exists() {
+            bd::tasi(&sk, &yeni_sk)?;
+            geri.tasindi(&sk, &yeni_sk);
+        }
+        y
+    };
+    tx.execute(
         "UPDATE belge SET dosya_id = $2, birim_adi = $3, dosya_no = $4, uyap_karti = CASE WHEN $2::bigint IS NULL THEN NULL ELSE uyap_karti END,
-                guncelleme = now(), arama_metni = $5 WHERE id = $1",
-        &[&id, &dosya_id, &b, &n, &iv::arama_katla(&[&ad, &b, &n])],
+                guncelleme = now(), arama_metni = $5, yol = $6 WHERE id = $1",
+        &[&id, &dosya_id, &b, &n, &iv::arama_katla(&[&oz.ad, &b, &n]), &yeni_yol],
     )
     .map_err(hata)?;
+    tx.commit().map_err(hata)?;
+    geri.tamam();
+    if yeni_yol != yol {
+        if let Ok(k) = bd::coz(bd::klasoru(&yol)) {
+            bd::bos_klasorleri_sil(&k);
+        }
+    }
     Ok(())
+}
+
+/// Belgenin adını değiştirir (diskte de, aynı klasörde; ad doluysa "(2)" eklenir). Belgeyi düzenleyebilen herkes.
+/// Yeni adı döner.
+pub fn yeniden_adlandir<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, ad: &str) -> Result<String, String> {
+    let oz = belge_ozu(c, k, id)?.ok_or("Belge bulunamadı.")?;
+    if ad.trim().is_empty() {
+        return Err("Belgenin adı boş olamaz.".into());
+    }
+    let ad = ad_temizle(ad);
+    if ad == oz.ad {
+        return Ok(ad);
+    }
+    let mut tx = c.transaction().map_err(hata)?;
+    let mut geri = GeriAl::default();
+    tx.query_one("SELECT 1 FROM belge WHERE id = $1 FOR UPDATE", &[&id]).map_err(hata)?;
+    let yol = yerlestir(&mut tx, id, &mut geri)?;
+    let yeni_yol = bd::bos_yol(&parcalar(bd::klasoru(&yol)), &ad, &oz.bicim, |y| yol_dolu(&mut tx, y, id))?;
+    let (ana, yeni_ana) = (bd::coz(&yol)?, bd::coz(&yeni_yol)?);
+    if ana.exists() {
+        bd::tasi(&ana, &yeni_ana)?;
+        geri.tasindi(&ana, &yeni_ana);
+    }
+    let (bi, no): (String, String) =
+        tx.query_one("SELECT birim_adi, dosya_no FROM belge WHERE id = $1", &[&id]).map_err(hata).map(|r| (r.get(0), r.get(1)))?;
+    tx.execute(
+        "UPDATE belge SET ad = $2, yol = $3, arama_metni = $4, guncelleme = now() WHERE id = $1",
+        &[&id, &ad, &yeni_yol, &iv::arama_katla(&[&ad, &bi, &no])],
+    )
+    .map_err(hata)?;
+    tx.commit().map_err(hata)?;
+    geri.tamam();
+    Ok(ad)
 }
 
 fn ise_ekle_ic<C: GenericClient>(c: &mut C, k: &Kisi, belge: i64, gorev: i64) -> Result<(), String> {
@@ -433,14 +727,13 @@ pub fn gonderildi<C: GenericClient>(c: &mut C, k: &Kisi, id: i64, tur: &str, tur
     Ok(())
 }
 
-/// Belgeyi siler (yumuşak): oluşturan ya da yönetici. Sürümler ve dosyaları kalır.
 /// Belgeyi KALICI siler: bütün sürümleri, iş bağları ve (başka yerde kullanılmıyorsa) diskteki dosyaları.
 /// Taslaklar birikip şişirmesin diye işaretleme değil gerçek silme. Yalnız oluşturan ya da yönetici;
 /// UYAP'a gönderilmiş belgeyi yalnız yönetici siler (gönderim kaydı belgeyle gider).
 pub fn sil<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String> {
     belge_ozu(c, k, id)?.ok_or("Belge bulunamadı.")?;
-    let r = c.query_one("SELECT olusturan_id, gonderim IS NOT NULL, ad FROM belge WHERE id = $1", &[&id]).map_err(hata)?;
-    let (olusturan, gonderildi, ad): (Option<i64>, bool, String) = (r.get(0), r.get(1), r.get(2));
+    let r = c.query_one("SELECT olusturan_id, gonderim IS NOT NULL, ad, yol FROM belge WHERE id = $1", &[&id]).map_err(hata)?;
+    let (olusturan, gonderildi, ad, yol): (Option<i64>, bool, String, Option<String>) = (r.get(0), r.get(1), r.get(2), r.get(3));
     if !(k.yonetici || olusturan == Some(k.id)) {
         return Err("Belgeyi yalnız oluşturan ya da yönetici silebilir.".into());
     }
@@ -464,23 +757,12 @@ pub fn sil<C: GenericClient>(c: &mut C, k: &Kisi, id: i64) -> Result<(), String>
     for g in isler {
         iv::olay_yaz(&mut tx, Some(g), Some(k.id), iv::olay::EK, json!({"belge_silindi": id, "ad": ad}))?;
     }
-    let mut silinecek = Vec::new();
-    for sha in shalar {
-        let kullanilan: bool = tx
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM belge_surum WHERE sha256 = $1) OR EXISTS (SELECT 1 FROM gorev_ek WHERE sha256 = $1)",
-                &[&sha],
-            )
-            .map_err(hata)?
-            .get(0);
-        if !kullanilan && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-            silinecek.push(sha);
-        }
-    }
     tx.commit().map_err(hata)?;
-    for sha in silinecek {
-        let _ = std::fs::remove_file(crate::is_aktar::ekler_dizini().join(&sha));
+    // Disk: klasördeki dosyalar ve boşalan klasörler; eski depoda kalmış kopyalar
+    if let Some(y) = yol {
+        bd::belgeyi_sil(&y, id);
     }
+    eski_shalari_temizle(c, &shalar)?;
     Ok(())
 }
 
@@ -528,7 +810,10 @@ pub fn gorev_belgeleri<C: GenericClient>(c: &mut C, gorev: i64) -> Result<Vec<Va
 /// Bir sha256'yı başka kayıt (iş eki ya da belge sürümü) kullanıyor mu? (is_veri::ek_sil diskten silmeden önce)
 pub fn sha_kullaniliyor<C: GenericClient>(c: &mut C, sha: &str) -> Result<bool, String> {
     Ok(c
-        .query_one("SELECT EXISTS (SELECT 1 FROM belge_surum WHERE sha256 = $1)", &[&sha])
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM belge_surum bs JOIN belge b ON b.id = bs.belge_id WHERE bs.sha256 = $1 AND b.yol IS NULL)",
+            &[&sha],
+        )
         .map_err(hata)?
         .get(0))
 }
@@ -560,15 +845,20 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert_eq!(g["ad"], "İtiraz İptal", "ad temizlenir, uzantı atılır");
     assert_eq!(g["dosya_id"].as_i64(), Some(dosya), "karttan büro dosyası bulunur");
     assert_eq!(g["dosya_no"], "2026/99901");
+    // Disk: yargı türü / birim / dosya klasörü, belge kaydedilince oluşur
+    let klasor = "Hukuk/Deneme 8. İcra Dairesi/2026-99901";
+    assert_eq!(g["klasor"], klasor);
+    let dk = bd::kok().join("Hukuk").join("Deneme 8. İcra Dairesi").join("2026-99901");
+    assert_eq!(std::fs::read(dk.join("İtiraz İptal.udf")).unwrap(), b"surum-1");
     // Yetki: başka üye göremez (yalnız oluşturan + yönetici); yönetici görür
     let baska = iv::kullanici_esitle(c, "baska@buro", "Başka", false, true).unwrap();
     let baska = Kisi { id: baska, yonetici: false };
     assert!(getir(c, &baska, id).is_err(), "ilgisiz kişi göremez");
     assert!(oku(c, &baska, id, None).is_err());
-    assert!(liste(c, &baska, Some(dosya), None, "").unwrap().is_empty(), "listede de görünmez");
-    assert_eq!(liste(c, &amir, Some(dosya), None, "").unwrap().len(), 1, "yönetici görür");
-    assert_eq!(liste(c, &uye, None, None, "").unwrap().iter().filter(|b| b["id"].as_i64() == Some(id)).count(), 1, "benim belgelerim");
-    assert_eq!(liste(c, &uye, None, None, "itiraz").unwrap().len(), 1, "arama");
+    assert!(liste(c, &baska, Some(dosya), None, "", "", true).unwrap().is_empty(), "listede de görünmez");
+    assert_eq!(liste(c, &amir, Some(dosya), None, "", "", false).unwrap().len(), 1, "yönetici görür");
+    assert_eq!(liste(c, &uye, None, None, "", "", false).unwrap().iter().filter(|b| b["id"].as_i64() == Some(id)).count(), 1, "benim belgelerim");
+    assert_eq!(liste(c, &uye, None, None, "itiraz", "", true).unwrap().len(), 1, "arama");
     // Sürüm ve çakışma
     let r2 = kaydet(c, &uye, &Kayit { id: Some(id), surum: Some(1), ..Default::default() }, b"surum-2").unwrap();
     assert_eq!(r2["surum"].as_i64(), Some(2));
@@ -580,6 +870,23 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     let (_, _, s, imz, v) = oku(c, &uye, id, None).unwrap();
     assert_eq!((s, imz, v.as_slice()), (2, false, &b"surum-2"[..]));
     assert_eq!(oku(c, &uye, id, Some(1)).unwrap().4, b"surum-1", "eski sürüm okunur");
+    assert_eq!(std::fs::read(dk.join("İtiraz İptal.udf")).unwrap(), b"surum-2", "son sürüm belgenin adıyla");
+    assert_eq!(std::fs::read(dk.join(".surumler").join(id.to_string()).join("1.udf")).unwrap(), b"surum-1", "eski sürüm .surumler'de");
+    // Aynı klasörde aynı ad: "(2)"; ağaç ve klasör süzgeci; yeniden adlandırma; silinince klasör kalır (içinde belge var)
+    let id2 = kaydet(c, &uye, &Kayit { ad: "İtiraz İPTAL".into(), dosya_id: Some(dosya), ..Default::default() }, b"ikinci").unwrap()["id"].as_i64().unwrap();
+    assert_eq!(std::fs::read(dk.join("İtiraz İPTAL (2).udf")).unwrap(), b"ikinci", "büyük/küçük harf farkı aynı ad sayılır");
+    let a = agac(c, &uye, false).unwrap();
+    assert_eq!((a["sayi"].as_i64(), a["alt"][0]["ad"].as_str()), (Some(2), Some("Hukuk")));
+    assert_eq!(a["alt"][0]["alt"][0]["alt"][0]["klasor"], klasor);
+    assert_eq!(a["alt"][0]["alt"][0]["alt"][0]["sayi"].as_i64(), Some(2));
+    assert!(agac(c, &baska, true).unwrap()["alt"].as_array().unwrap().is_empty(), "göremediği belge ağaçta da yok");
+    assert_eq!(liste(c, &uye, None, None, "", "Hukuk", false).unwrap().len(), 2, "klasör süzgeci alt klasörleri de kapsar");
+    assert!(liste(c, &uye, None, None, "", "Hukuk/Deneme 8", false).unwrap().is_empty(), "klasör adı tam eşleşir");
+    assert_eq!(yeniden_adlandir(c, &uye, id2, "Cevap: Dilekçe").unwrap(), "Cevap Dilekçe");
+    assert!(dk.join("Cevap Dilekçe.udf").exists() && !dk.join("İtiraz İPTAL (2).udf").exists());
+    assert!(yeniden_adlandir(c, &baska, id2, "x").is_err(), "göremeyen adlandıramaz");
+    sil(c, &uye, id2).unwrap();
+    assert!(!dk.join("Cevap Dilekçe.udf").exists() && dk.join("İtiraz İptal.udf").exists());
     // İmzalı sürüm
     let r3 = kaydet(c, &uye, &Kayit { id: Some(id), surum: Some(2), imzali: true, notu: "e-imza".into(), ..Default::default() }, b"imzali").unwrap();
     assert_eq!(r3["surum"].as_i64(), Some(3));
@@ -591,7 +898,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     ise_ekle(c, &amir, id, gid).unwrap();
     assert!(getir(c, &baska, id).is_ok(), "bağlı işin sorumlusu görür");
     assert_eq!(gorev_belgeleri(c, gid).unwrap().len(), 1);
-    assert_eq!(liste(c, &baska, None, Some(gid), "").unwrap().len(), 1);
+    assert_eq!(liste(c, &baska, None, Some(gid), "", "", false).unwrap().len(), 1);
     isten_cikar(c, &baska, id, gid).unwrap();
     assert!(getir(c, &baska, id).is_err(), "işten çıkınca göremez");
     // Onaya sun: yeni "Belge onayı" işi, onaylayıcı amir
@@ -628,11 +935,37 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert_eq!(getir(c, &uye, id).unwrap()["gonderim"]["tur_adi"], "Adres Araştırması Talebi");
     assert!(dosya_ara(c, "99901").unwrap().iter().any(|d| d["id"].as_i64() == Some(dosya)));
     dosya_bagla(c, &uye, id, None).unwrap();
-    assert!(getir(c, &uye, id).unwrap()["dosya_id"].is_null());
-    // Sürüm dosyası iş eki silinince diskten silinmez
+    let g = getir(c, &uye, id).unwrap();
+    assert!(g["dosya_id"].is_null());
+    // Dosyadan ayrılınca Dosyasız/<kullanıcı> klasörüne taşınır, eski sürümleriyle; boşalan klasörler silinir
+    assert_eq!(g["klasor"], "Dosyasız/uye");
+    let dz = bd::kok().join("Dosyasız").join("uye");
+    assert_eq!(std::fs::read(dz.join("İtiraz İptal.udf")).unwrap(), b"imzali");
+    assert!(dz.join(".surumler").join(id.to_string()).join("2.udf").exists());
+    assert!(!bd::kok().join("Hukuk").exists(), "boşalan yargı türü klasörü silinir");
+    assert_eq!(oku(c, &uye, id, Some(1)).unwrap().4, b"surum-1", "taşınan eski sürüm okunur");
+    // Klasördeki belge eski içerik adresli depoyu kullanmaz (iş eki silinirken engel olmaz)
     use sha2::{Digest, Sha256};
     let sha = hex::encode(Sha256::digest(b"surum-1"));
-    assert!(sha_kullaniliyor(c, &sha).unwrap());
+    assert!(!sha_kullaniliyor(c, &sha).unwrap());
+    // Eski depodaki belge (yol yok) açılışta klasöre taşınır, eski kopya silinir
+    let eski_sha = hex::encode(Sha256::digest(b"eski-belge"));
+    let ekler = crate::is_aktar::ekler_dizini();
+    std::fs::create_dir_all(&ekler).unwrap();
+    std::fs::write(ekler.join(&eski_sha), b"eski-belge").unwrap();
+    let eid: i64 = c
+        .query_one("INSERT INTO belge (ad, dosya_id, olusturan_id, son_surum) VALUES ('Eski Dilekçe', $1, $2, 1) RETURNING id", &[&dosya, &uye.id])
+        .unwrap()
+        .get(0);
+    c.execute("INSERT INTO belge_surum (belge_id, surum, sha256, boyut) VALUES ($1, 1, $2, 10)", &[&eid, &eski_sha]).unwrap();
+    assert!(sha_kullaniliyor(c, &eski_sha).unwrap(), "taşınmamış belge eski depoyu kullanır");
+    let (n, h) = eski_belgeleri_yerlestir(c).unwrap();
+    assert_eq!((n, h.len()), (1, 0));
+    assert_eq!(std::fs::read(dk.join("Eski Dilekçe.udf")).unwrap(), b"eski-belge");
+    assert!(!ekler.join(&eski_sha).exists(), "eski depodaki kopya silinir");
+    assert_eq!(oku(c, &uye, eid, None).unwrap().4, b"eski-belge");
+    sil(c, &uye, eid).unwrap();
+    assert!(!bd::kok().join("Hukuk").exists());
     // Silme
     assert!(sil(c, &baska, id).is_err());
     assert!(sil(c, &uye, id).is_err(), "UYAP'a gönderilmiş belgeyi yalnız yönetici siler");
@@ -640,7 +973,7 @@ pub(crate) fn veritabani_senaryosu(c: &mut postgres::Client) {
     assert!(getir(c, &uye, id).is_err(), "silinen belge görünmez");
     let kalan: i64 = c.query_one("SELECT (SELECT count(*) FROM belge WHERE id = $1) + (SELECT count(*) FROM belge_surum WHERE belge_id = $1)", &[&id]).unwrap().get(0);
     assert_eq!(kalan, 0, "kalıcı silme: belge ve sürümleri gider");
-    assert!(!sha_kullaniliyor(c, &sha).unwrap());
+    assert!(!dz.exists(), "silinen belgenin dosyaları ve boşalan klasörü gider");
     c.batch_execute(&format!(
         "DELETE FROM belge WHERE id = {id}; DELETE FROM gorev WHERE id IN ({gid}, {og}, {gid2}); DELETE FROM dosya WHERE id = {dosya};
          DELETE FROM kullanici WHERE hesap_adi = 'baska@buro';"

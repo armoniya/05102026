@@ -29,7 +29,9 @@
 //!
 //!
 //! Belgeler (belge_veri.rs, 24.11.2026 — Armonia Yazı'nın büro deposu):
-//!   GET  belge_liste          ?dosya=&gorev=&ara=   GET belge ?id=   GET dosya_ara ?ara=
+//!   GET  belge_liste          ?dosya=&gorev=&ara=&klasor=&tumu=0|1   GET belge ?id=   GET dosya_ara ?ara=
+//!   GET  belge_agac           ?tumu=0|1  (yargı türü → birim → dosya klasörleri + sayılar)
+//!   POST belge_adlandir {id, ad} → {ad}
 //!   GET  belge_indir          ?id=&surum=  (ham bayt)
 //!   POST belge_kaydet         ?id=&surum=&ad64=&bicim=&dosya=&gorev=&imzali=1&not64=&kart64=  (gövde = belge)
 //!   POST belge_dosya {id, dosya_id} · belge_ise_ekle / belge_isten_cikar {belge, gorev}
@@ -264,8 +266,16 @@ fn dagit<C: GenericClient>(
                 },
                 (None, None) => None,
             };
-            json!(bv::liste(c, &k, dosya, qi("gorev"), &qs("ara"))?)
+            // tumu=1 bütün görebildikleri, 0 "Belgelerim"; verilmezse eski davranış (yönetici aramıyorsa kendi belgeleri)
+            let tumu = match qs("tumu").as_str() {
+                "1" => true,
+                "0" => false,
+                _ => !k.yonetici || !qs("ara").trim().is_empty(),
+            };
+            json!(bv::liste(c, &k, dosya, qi("gorev"), &qs("ara"), &qs("klasor"), tumu)?)
         }
+        ("GET", "belge_agac") => bv::agac(c, &k, qs("tumu") == "1")?,
+        ("POST", "belge_adlandir") => json!({"ad": bv::yeniden_adlandir(c, &k, tam(g, "id")?, &metin(g, "ad"))?}),
         ("GET", "kart_dosya") => {
             let kart = serde_json::from_str::<Value>(&b64_metin(q, "kart64")).ok().filter(|v| v.is_object());
             json!({"dosya_id": match kart { Some(kv) => bv::karttan_dosya(c, &kv)?, None => None }})

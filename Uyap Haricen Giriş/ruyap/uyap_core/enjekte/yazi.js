@@ -628,6 +628,8 @@
         } catch (x) {}
         sonBaslik = '';
         baslikGuncelle();
+        // Büro Belgeleri sayfası (belgeler.js) listeyi tazelesin
+        try { window.dispatchEvent(new CustomEvent('cu-belge-degisti', { detail: { id: v.id } })); } catch (x) {}
         return v;
     }
     // Editördeki belgenin kaydedilecek baytları: imzalı ve değişmemişse imzalı dosya, değilse editörün son hâli.
@@ -677,6 +679,7 @@
                 await veriIstek('belge_sil', { id: kayit.id });
                 const ad = kayit.ad;
                 kayit = null; sonBaslik = ''; araclariGuncelle();
+                try { window.dispatchEvent(new CustomEvent('cu-belge-degisti')); } catch (x) {}
                 k.kapa();
                 bildir('Silindi: ' + ad + '. Editördeki metin kaydedilmemiş olarak duruyor.');
             } catch (x) { durum.textContent = x && x.message || String(x); sil.disabled = vazgec.disabled = false; }

@@ -34,6 +34,7 @@ pub use runtime as _runtime;
 pub mod akis_pkcs11;
 pub mod cades;
 pub mod udf_converter;
+pub mod belge_disk;
 pub mod belge_veri;
 pub mod udf_alan;
 pub mod udf_pdf;

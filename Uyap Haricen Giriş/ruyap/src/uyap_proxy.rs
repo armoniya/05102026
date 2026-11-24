@@ -5933,6 +5933,7 @@ const _EK_BETIK_DOSYALARI: &[&str] = &[
     "anasayfa.js",
     "icra.js",
     "isler.js",
+    "belgeler.js",
     "paylas.js",
     "guncelleme.js",
     "yazi.js",

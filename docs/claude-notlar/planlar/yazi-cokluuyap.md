@@ -88,7 +88,18 @@ dosya seçimi BÜRO VERİTABANI; onay İŞ LİSTESİ ÜZERİNDEN; yetki OLUŞTUR
   (seçici üst belgede açılır: çerçevedeki gizli input'u üstten kod açamaz; dosya `dosyaVer` ile editöre). Playwright ile denendi.
 - Kişi adları: görünen ad hesabı içermiyorsa listede hesap adı eklenir (zeynel@savas görünen adı "savas" geliyordu).
 
-## Büro Belgeleri sayfası + klasör düzeni (24.11.2026 planı, onay bekliyor)
+## Büro Belgeleri sayfası + klasör düzeni (24.11.2026; K1–K3 yapıldı, canlı deneme bekliyor)
+Durum (24.11 gece): `src/belge_disk.rs` (yol üretimi/denetimi, ad temizliği + aygıt adları, "(2)", atomik yazma,
+`GeriAl` = veritabanı commit'lenmezse disk işlerini geri sarar, boş klasör toplama, Windows'ta `.surumler` gizli),
+şema 0019 `belge.yol` (+ lower(yol) tekil indeks), `belge_veri.rs`: kaydet/oku/dosya_bagla (taşır)/yeniden_adlandir/
+sil diskle birlikte, `agac`, liste `klasor` + `tumu`; açılışta `eski_belgeleri_yerlestir` (ekler'den kopyalar, sonra
+eski kopyayı siler). Uçlar: `belge_agac`, `belge_adlandir`, `belge_liste ?klasor=&tumu=`. Sayfa `enjekte/belgeler.js`
+(sol menü İş Listesi'nin altında, görev çubuğu 📁, `cu-belge-degisti` olayıyla tazelenir; yazi.js kayıt/silmede
+yayar). Testler: uçtan uca postgres+disk (klasör, sürüm, "(2)", ağaç, süzgeç, adlandırma, taşıma, boş klasör silme,
+eski depo taşıma) geçti; Playwright (geniş + telefon, sahte sunucu) geçti. Linux: kök zaten kasada, değişiklik
+gerekmedi (Linux tarafına bu oturumdan dokunulmaz). Dosya klasörü adı "2026-38696" (diskte "/" olmaz), arayüz
+"2026/38696" gösterir. Büyük/küçük harf: PostgreSQL C yerelinde lower() yalnız ASCII → "İ"/"i" farkı ayrı ad sayılır
+(NTFS de öyle); çakışma denetimi ikisinde tutarlı.
 Kullanıcı isteği: İş Listesi / İcra Takip Süreçleri gibi bir "Büro Belgeleri" sayfası; belgeler yargı türü → birim
 (mahkeme/daire) → dosya klasörlerinde. Klasörler toptan açılmaz, belge kaydedildikçe oluşur. Linux'ta LUKS2 kasası da
 bu düzende. İleride: sunucu UYAP dosyalarındaki belgeleri indirir; dosya penceresinde tıklanan belge büroda varsa

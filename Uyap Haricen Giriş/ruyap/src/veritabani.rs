@@ -52,6 +52,7 @@ pub static SEMALAR: &[(i32, &str, &str)] = &[
     (16, "mazbata_teblig_tarihi", include_str!("sema/0016_mazbata_teblig_tarihi.sql")),
     (17, "dosya_listesi", include_str!("sema/0017_dosya_listesi.sql")),
     (18, "belge", include_str!("sema/0018_belge.sql")),
+    (19, "belge_yol", include_str!("sema/0019_belge_yol.sql")),
 ];
 
 pub type Gunluk = Arc<dyn Fn(&str) + Send + Sync>;
@@ -388,6 +389,17 @@ pub fn baslat(log: Gunluk) -> Result<(), String> {
     let uygulanan = sema_uygula(&mut istemci)?;
     if uygulanan > 0 {
         log(&format!("[VERİTABANI] Şema güncellendi ({uygulanan} adım)."));
+    }
+    // Büro belgeleri: eski içerik adresli depodakiler yargı türü / birim / dosya klasörlerine (bir kez)
+    match crate::belge_veri::eski_belgeleri_yerlestir(&mut istemci) {
+        Ok((0, h)) if h.is_empty() => {}
+        Ok((n, h)) => {
+            log(&format!("[VERİTABANI] {n} belge klasörlere taşındı."));
+            for e in h {
+                log(&format!("[VERİTABANI] Belge taşınamadı: {e}"));
+            }
+        }
+        Err(e) => log(&format!("[VERİTABANI] Belgeler klasörlere taşınamadı: {e}")),
     }
     HAVUZ.lock().push(istemci);
     *CALISAN.lock() = Some(calisan);
