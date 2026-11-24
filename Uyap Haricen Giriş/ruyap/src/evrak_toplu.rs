@@ -1067,6 +1067,8 @@ async fn calistir_ic(ind: &Indirme) -> Result<(), String> {
                 ardisik_hata = 0;
                 let ct = hdrs.get("content-type").map(|s| s.as_str()).unwrap_or("");
                 let tur = _tur_bul(&bytes, ct);
+                // UDF: alan adları yerine değerler (udf_alan.rs); PDF'e bu kopya çevrilir
+                let bytes = if tur == "udf" { crate::udf_alan::doldur_ya_da_asil(&bytes).into_owned() } else { bytes.to_vec() };
                 // Çeviri (UDF/TIFF) ağır olabilir: ayrı iş parçacığında; bu sırada ilerleme sorguları yanıtlanır.
                 let baslik2 = baslik.clone();
                 let pdf_bytes = tokio::task::spawn_blocking(move || _pdfe_cevir(&bytes, tur, &baslik2))

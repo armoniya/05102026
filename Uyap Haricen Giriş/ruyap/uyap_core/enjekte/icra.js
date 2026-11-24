@@ -1783,7 +1783,7 @@
             e('div', { sinif: 'i-rozet' }, rozetler.map(function(r) { return e('span', { metin: r }); })),
             dosyaIsKutusu(k.id)
         ]));
-        panel.appendChild(e('div', { sinif: 'i-sekmeler p-sekmeler' }, [['borclular', 'Borçlular'], ['tebligat', 'Tebligatlar (' + v.tebligatlar.length + ')' + ((v.alinamayan || []).length ? ' · ' + v.alinamayan.length + ' alınamadı' : '')], ['gecmis', 'Geçmiş'], ['kunye', 'Dosya']].map(function(x) {
+        panel.appendChild(e('div', { sinif: 'i-sekmeler p-sekmeler' }, [['borclular', 'Borçlular'], ['tebligat', 'Tebligatlar (' + v.tebligatlar.length + ')' + ((v.alinamayan || []).length ? ' · ' + v.alinamayan.length + ' alınamadı' : '')], ['gecmis', 'Geçmiş'], ['belgeler', 'Belgeler'], ['kunye', 'Dosya']].map(function(x) {
                 return e('button', { sinif: d.panelSekme === x[0] ? 'on' : '', metin: x[1], onclick: function() { d.panelSekme = x[0]; aktifCiz(); } });
         })));
         const ic = e('div', { sinif: 'p-ic' });
@@ -1791,6 +1791,7 @@
         if (d.panelSekme === 'borclular') borclularCiz(ic, v);
         else if (d.panelSekme === 'tebligat') tebligatlarCiz(ic, v);
         else if (d.panelSekme === 'gecmis') gecmisCiz(ic, s.gecmis);
+        else if (d.panelSekme === 'belgeler') belgelerCiz(ic, v);
         else kunyeCiz(ic, v);
         govde.appendChild(panel);
     }
@@ -2139,6 +2140,35 @@
             gruplar.push(g);
         }
         sagMenu(ev, gruplar);
+    }
+
+    // Belgeler (24.11.2026): bu dosyaya bağlı büro belgeleri (Armonia Yazı, belge_veri.rs). Liste kişinin
+    // görebildikleri (oluşturan + bağlı işlerin kişileri + yöneticiler).
+    function belgelerCiz(ic, v) {
+        const k = v.kunye;
+        const editor = !!window.__cuYaziBelgeAc;
+        const ust = e('div', { sinif: 'i-eylem', stil: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px' }, [
+            e('button', { sinif: 'i-d kucuk ana', metin: '+ Yeni belge yaz', disabled: !editor, title: 'Armonia Yazı bu dosyaya bağlı açılır; Kaydet büro veritabanına yazar',
+                onclick: function() { window.__cuYaziYeni({ buroDosyaId: k.id, birimAdi: k.birim, dosyaNo: k.dosya_no }); } })
+        ]);
+        const liste = e('div', {}, [e('div', { sinif: 'i-bilgi', metin: 'Yükleniyor…' })]);
+        ic.appendChild(ust);
+        ic.appendChild(liste);
+        ic.appendChild(e('div', { sinif: 'alt', stil: 'margin-top:8px', metin: 'UYAP\'a göndermek için belgeyi UYAP dosya kartından açın ("UYAP\'ta aç" → "Editörde yaz" ya da belge çubuğunda "Yazı\'da aç").' }));
+        istek('is/belge_liste?dosya=' + encodeURIComponent(k.id)).then(function(s) {
+            bos(liste);
+            if (!s.length) { liste.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Bu dosyada büroya kaydedilmiş (görebildiğiniz) belge yok.' })); return; }
+            s.forEach(function(b) {
+                const bilgi = ['sürüm ' + b.son_surum, b.guncelleme, b.olusturan, b.imzali ? 'e-imzalı' : '', b.is_sayisi ? b.is_sayisi + ' işte' : '',
+                               b.gonderim ? 'UYAP\'a gönderildi ' + b.gonderim.zaman + ' (' + b.gonderim.tur_adi + ')' : ''].filter(Boolean).join(' · ');
+                liste.appendChild(e('div', { sinif: 'i-olay' }, [
+                    e('div', { stil: 'display:flex;justify-content:space-between;gap:8px;align-items:center' }, [
+                        e('div', { stil: 'min-width:0' }, [e('div', { stil: 'font-weight:600', metin: b.ad }), e('div', { sinif: 'alt', metin: bilgi })]),
+                        e('button', { sinif: 'i-d kucuk', metin: 'Aç', disabled: !editor, title: 'Armonia Yazı\'da aç', onclick: function() { window.__cuYaziBelgeAc(b.id); } })
+                    ])
+                ]));
+            });
+        }).catch(function(x) { bos(liste); liste.appendChild(e('div', { sinif: 'i-bilgi', metin: 'Belgeler alınamadı: ' + x.message })); });
     }
 
     function gecmisCiz(ic, g) {

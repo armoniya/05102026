@@ -270,6 +270,14 @@
             else sessionStorage.setItem(ACIK_ANAHTAR, gorunum === 'acik' ? '1' : 'k');
         } catch (x) {}
     }
+    // Görünen ad hesabı ele vermiyorsa (ör. zeynel@savas → "savas") hesap adını ekle: listede kim olduğu anlaşılsın.
+    function kisiEtiketle(l) {
+        return (l || []).map(function(k) {
+            const h = String(k.hesap || '').split('@')[0];
+            if (!h || String(k.ad || '').toLocaleLowerCase('tr').indexOf(h.toLocaleLowerCase('tr')) >= 0) return k;
+            return Object.assign({}, k, { ad: (k.ad || '') + ' (' + h + ')' });
+        });
+    }
     function kisiAdi(id) { const k = d.kisiler.find(function(x) { return x.id === id; }); return k ? k.ad : ''; }
     function adlar(liste, kod) { const x = (liste || []).find(function(y) { return y.kod === kod; }); return x ? x.ad : kod; }
 
@@ -439,7 +447,7 @@
     async function basla() {
         try {
             const b = await istek('ben');
-            d.ben = b.ben; d.bugun = b.bugun; d.kisiler = b.kisiler; d.sablonlar = b.sablonlar; d.sabitler = b.sabitler; d.ozet = b.ozet;
+            d.ben = b.ben; d.bugun = b.bugun; d.kisiler = kisiEtiketle(b.kisiler); d.sablonlar = b.sablonlar; d.sabitler = b.sabitler; d.ozet = b.ozet;
             d.etiketler = b.etiketler || [];
             d.filtre.sorumlu = '';
             yoklamaDur = false;
@@ -1045,6 +1053,68 @@
         return kutu;
     }
 
+    // ── Belgeler (24.11.2026): Armonia Yazı'da yazılıp büro veritabanına kaydedilen belgeler (belge_veri.rs).
+    // Aç → editör (enjekte/yazi.js); "Yeni belge yaz" → editör bu işin dosyasına bağlı açılır, ilk kayıtta işe eklenir.
+    function belgeKutusu(g, y) {
+        const l = g.belgeler || [];
+        const kutu = e('div', { sinif: 'kutu' }, [e('div', { sinif: 'bolum', stil: 'margin-top:0', metin: 'Belgeler' + (l.length ? ' (' + l.length + ')' : '') })]);
+        const editor = !!window.__cuYaziBelgeAc;
+        l.forEach(function(b) {
+            const ust = ['sürüm ' + b.son_surum, b.guncelleme, b.imzali ? 'e-imzalı' : '', b.gonderim ? 'UYAP\'a gönderildi ' + b.gonderim.zaman : ''].filter(Boolean).join(' · ');
+            kutu.appendChild(e('div', { sinif: 'sat' }, [
+                e('span', { stil: 'min-width:0;flex:1' }, [e('button', { sinif: 'i-d kucuk', metin: '✎ ' + b.ad, title: editor ? 'Armonia Yazı\'da aç' : 'Editör bu sayfada yok',
+                    disabled: !editor, stil: 'max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+                    onclick: function() { window.__cuYaziBelgeAc(b.id); } })]),
+                e('b', {}, [e('span', { sinif: 'alt', metin: ust }),
+                    y.calisabilir ? e('button', { sinif: 'i-d kucuk', metin: '✕', title: 'Belgeyi bu işten çıkar (belge silinmez)', stil: 'margin-left:6px', onclick: async function() {
+                        try { await istek('belge_isten_cikar', { belge: b.id, gorev: g.id }); isAc(g.id); } catch (x) { bildir(x.message); }
+                    } }) : null])
+            ]));
+        });
+        if (y.calisabilir && editor) {
+            const eylem = e('div', { sinif: 'eylem' }, [
+                e('button', { sinif: 'i-d kucuk', metin: '+ Yeni belge yaz', title: 'Armonia Yazı\'da bu iş için belge yaz; ilk kayıtta işe eklenir', onclick: function() {
+                    window.__cuYaziYeni({ buroDosyaId: g.dosya_id, birimAdi: g.birim_adi, dosyaNo: g.dosya_no, gorevId: g.id, kart: g.uyap_karti });
+                } }),
+                e('button', { sinif: 'i-d kucuk', metin: '+ Kayıtlı belge ekle', onclick: function() { belgeSecici(g, kutu); } })
+            ]);
+            kutu.appendChild(eylem);
+        }
+        if (g.durum === 'onayda' && y.onaylayabilir && l.length) kutu.appendChild(e('div', { sinif: 'alt', metin: 'Onaylamadan önce belgeleri açıp inceleyin; düzeltme gerekiyorsa "Geri çevir" ile not yazın.' }));
+        return kutu;
+    }
+    // Kayıtlı belge seç: işin dosyasının belgeleri ya da kişinin belgeleri, aramayla.
+    function belgeSecici(g, kutu) {
+        if (kutu.querySelector('.i-belge-sec')) return;
+        const ara = e('input', { type: 'text', placeholder: 'Belge adı, dosya no ya da birimle arayın', stil: 'width:100%;margin-top:6px' });
+        const liste = e('div', { sinif: 'i-belge-sec' });
+        let zaman = 0, sira = 0;
+        async function yukle() {
+            const n = ++sira;
+            const q = new URLSearchParams();
+            if (ara.value.trim()) q.set('ara', ara.value.trim()); else if (g.dosya_id) q.set('dosya', g.dosya_id);
+            try {
+                const s = await istek('belge_liste?' + q.toString());
+                if (n !== sira) return;
+                bos(liste);
+                const ekli = new Set((g.belgeler || []).map(function(b) { return b.id; }));
+                const uygun = s.filter(function(b) { return !ekli.has(b.id); });
+                if (!uygun.length) liste.appendChild(e('div', { sinif: 'alt', metin: 'Eklenecek belge bulunamadı.' }));
+                uygun.forEach(function(b) {
+                    liste.appendChild(e('div', { sinif: 'sat' }, [e('span', { metin: b.ad }), e('b', {}, [e('span', { sinif: 'alt', metin: [b.birim_adi, b.dosya_no].filter(Boolean).join(' ') + ' · sürüm ' + b.son_surum }),
+                        e('button', { sinif: 'i-d kucuk ana', metin: 'Ekle', stil: 'margin-left:6px', onclick: async function() {
+                            try { await istek('belge_ise_ekle', { belge: b.id, gorev: g.id }); bildir('Belge eklendi.'); isAc(g.id); } catch (x) { bildir(x.message); }
+                        } })])]));
+                });
+            } catch (x) { bos(liste); liste.appendChild(e('div', { sinif: 'alt', metin: x.message })); }
+        }
+        ara.addEventListener('input', function() { clearTimeout(zaman); zaman = setTimeout(yukle, 250); });
+        kutu.appendChild(ara);
+        kutu.appendChild(liste);
+        yukle();
+        ara.focus();
+    }
+
     async function isAc(id) {
         try {
             const g = await istek('gorev?id=' + id);
@@ -1108,9 +1178,28 @@
             } else eylem.push(e('button', { sinif: 'i-d ana kucuk', metin: kapatAdi, onclick: function() { durumYap(g, 'tamamla'); } }));
         }
         if (g.durum === 'onayda') {
+            // Hatırlatma: işi sunan / sorumlu, başkası onaylayacaksa (yönetici olsa da: kendisi onaylamayı beklemiyor)
+            const onaylayicilar = (g.kisiler || []).filter(function(k) { return k.rol === 'onaylayici'; });
+            const benOnaylarim = onaylayicilar.some(function(k) { return d.ben && k.id === d.ben.id; });
+            const hatirlatabilir = y.calisabilir && !benOnaylarim && (!y.onaylayabilir || onaylayicilar.length > 0);
+            if (hatirlatabilir) {
+                eylem.push(e('button', { sinif: 'i-d ana kucuk', metin: 'Hatırlatma gönder', title: "Onaylayana Çoklu UYAP'ta hemen uyarı çıkar (aynı kişiye saatte bir)",
+                    onclick: async function(ev) {
+                        const b = ev.currentTarget;
+                        const n = prompt2('Hatırlatmaya not ekleyin (isteğe bağlı)');
+                        b.disabled = true;
+                        try {
+                            const v = await istek('onay_hatirlat', { gorev: g.id, notu: n });
+                            bildir('Hatırlatma gönderildi: ' + v.kime.join(', ') + '.');
+                            isAc(g.id);
+                        } catch (x) { b.disabled = false; bildir(x.message); }
+                    } }));
+            }
             if (y.onaylayabilir) {
-                eylem.push(e('button', { sinif: 'i-d ana kucuk', metin: 'Onayla', onclick: function() { durumYap(g, 'tamamla', g.sonuc); } }));
-                eylem.push(e('button', { sinif: 'i-d kucuk', metin: 'Geri çevir', onclick: function() { const n = prompt2('Geri çevirme nedeni (isteğe bağlı)'); durumYap(g, 'acik', '', n); } }));
+                eylem.push(e('button', { sinif: 'i-d' + (hatirlatabilir ? '' : ' ana') + ' kucuk', metin: 'Onayla', onclick: function() { durumYap(g, 'tamamla', g.sonuc); } }));
+                eylem.push(e('button', { sinif: 'i-d kucuk', metin: hatirlatabilir ? 'Onaydan geri çek' : 'Geri çevir', onclick: function() {
+                    if (hatirlatabilir) { durumYap(g, 'acik'); return; }
+                    const n = prompt2('Geri çevirme nedeni (isteğe bağlı)'); durumYap(g, 'acik', '', n); } }));
             } else if (y.calisabilir) eylem.push(e('button', { sinif: 'i-d kucuk', metin: 'Onaydan geri çek', onclick: function() { durumYap(g, 'acik'); } }));
         }
         if (!acik && (y.onaylayabilir || y.yonetebilir)) eylem.push(e('button', { sinif: 'i-d kucuk', metin: 'Yeniden aç', onclick: function() { durumYap(g, 'acik'); } }));
@@ -1209,13 +1298,14 @@
             } })]));
         }
         ic.push(notKutu);
+        ic.push(belgeKutusu(g, y));
         ic.push(ekKutusu(g, y));
         // Kişiler (ek sorumlu / onaylayıcı / izleyici)
         if (!g.ust_gorev_id && (y.yonetebilir || (g.kisiler || []).length)) {
             const kk = e('div', { sinif: 'kutu' }, [e('div', { sinif: 'bolum', stil: 'margin-top:0', metin: 'Kişiler' })]);
             const rolAdi = { sorumlu: 'Ek sorumlu', onaylayici: 'Onaylayıcı', izleyici: 'İzleyici' };
             (g.kisiler || []).forEach(function(k) {
-                kk.appendChild(e('div', { sinif: 'sat' }, [e('span', { metin: rolAdi[k.rol] || k.rol }), e('b', {}, [k.ad, y.yonetebilir ? e('button', { sinif: 'i-d kucuk', metin: '✕', stil: 'margin-left:6px', onclick: async function() {
+                kk.appendChild(e('div', { sinif: 'sat' }, [e('span', { metin: rolAdi[k.rol] || k.rol }), e('b', {}, [kisiAdi(k.id) || k.ad, y.yonetebilir ? e('button', { sinif: 'i-d kucuk', metin: '✕', stil: 'margin-left:6px', onclick: async function() {
                     try { await istek('kisi_cikar', { id: g.id, kullanici: k.id, rol: k.rol }); isAc(g.id); } catch (x) { bildir(x.message); }
                 } }) : null])]));
             });
@@ -1278,10 +1368,11 @@
         const a = o.ayrinti || {};
         const tur = { acildi: 'İş açıldı', guncellendi: 'Düzenlendi', durum: 'Durum değişti', sorumlu: 'Sorumlu değişti', kisi_eklendi: 'Kişi eklendi',
             kisi_cikti: 'Kişi çıkarıldı', not: 'Not eklendi', ek: 'Belge eklendi', erteleme_istendi: 'Erteleme istendi', ertelendi: 'Ertelendi',
-            erteleme_reddedildi: 'Erteleme reddedildi', sonraki_acildi: 'Sonraki iş açıldı', tasindi: 'Buluttan taşındı' }[o.tur] || o.tur;
+            erteleme_reddedildi: 'Erteleme reddedildi', sonraki_acildi: 'Sonraki iş açıldı', tasindi: 'Buluttan taşındı', hatirlatildi: 'Onay hatırlatıldı' }[o.tur] || o.tur;
         let ek = '';
         if (o.tur === 'durum' && a.yeni) ek = ': ' + adlar(d.sabitler && d.sabitler.durumlar, a.yeni) + (a.sonuc ? ' (' + adlar(d.sabitler && d.sabitler.sonuclar, a.sonuc) + ')' : '');
         else if ((o.tur === 'ertelendi' || o.tur === 'erteleme_istendi') && a.yeni_tarih) ek = ': ' + gunMetni(a.yeni_tarih);
+        else if (o.tur === 'hatirlatildi' && a.kime) ek = ': ' + a.kime.join(', ') + (a.notu ? ' — ' + a.notu : '');
         else if (a.eski_tur) ek = ' (eski kayıt)';
         return tur + ek;
     }

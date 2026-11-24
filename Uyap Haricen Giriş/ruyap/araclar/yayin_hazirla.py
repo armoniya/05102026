@@ -94,6 +94,11 @@ def main():
     shutil.copytree(RUYAP / "uyap_core" / "enjekte", paket / "uyap_core" / "enjekte",
                     ignore=shutil.ignore_patterns("__pycache__", "*.bak"))
     shutil.copytree(RUYAP / "webapp", paket / "webapp", ignore=shutil.ignore_patterns("__pycache__"))
+    # Armonia Yazı editörü (derlenmiş; araclar/yazi_al.py ile alınır)
+    if (RUYAP / "uyap_core" / "yazi" / "index.html").is_file():
+        shutil.copytree(RUYAP / "uyap_core" / "yazi", paket / "uyap_core" / "yazi")
+    else:
+        print("UYARI: uyap_core/yazi yok; Armonia Yazı pakete girmiyor (araclar/yazi_al.py).")
     pg_hazir = dist / "pgsql-hazir"
     if not (pg_hazir / "bin").is_dir():
         if not os.path.isdir(os.path.join(g.pgsql, "bin")):

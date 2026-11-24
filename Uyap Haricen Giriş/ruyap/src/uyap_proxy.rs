@@ -5745,6 +5745,9 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     // ── Çoklu pano (16.11.2026): 10 göz (1–9, 0), arayüzün her yerinde ──
     // Ctrl+Shift+N: seçili metni (seçim yoksa son kopyalananı) N. göze kaydeder. Yazı alanında Ctrl+N: N. gözü
     // yapıştırır (Ctrl+V olağan panodur, dokunulmaz). Sağ tıkta "kaydet" ve "yapıştır" düğme sıraları.
+    // 23.11.2026: Chrome / Edge / Firefox Ctrl+1…9'u sekme geçişine ayırır, sayfa engelleyemez → Alt+N de yapıştırır
+    // (Alt+Shift+N kaydeder). Alt ile yalnız üst sıradaki rakamlar: sayısal tuş takımı Alt kodlarına (Alt+0199 = Ç)
+    // kalır. AltGr (Ctrl+Alt) hiç yakalanmaz: Türkçe klavyede # $ { [ ] } yazar.
     // Gözler yalnız bu tarayıcıda kalır (localStorage); hiçbir yere gönderilmez.
     const PANO_ANAHTAR = 'cuCokluPano', PANO_SIRA = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
     function panoOku() {
@@ -5762,7 +5765,7 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         const l = panoOku();
         l[i] = metin;
         panoYaz(l);
-        kisaBildirim('Pano ' + PANO_SIRA[i] + ': ' + panoOnizleme(metin) + ' — yapıştırmak için Ctrl+' + PANO_SIRA[i]);
+        kisaBildirim('Pano ' + PANO_SIRA[i] + ': ' + panoOnizleme(metin) + ' — yapıştırmak için Alt+' + PANO_SIRA[i]);
     }
     // Yazılabilir alan: metin kutusu, textarea, contenteditable (select / onay kutusu / sayı kutusu değil).
     function yaziAlani(e) {
@@ -5790,19 +5793,21 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
     }
     function panoYapistir(i, a) {
         const m = panoOku()[i];
-        if (!m) { kisaBildirim('Pano ' + PANO_SIRA[i] + ' boş (kaydetmek için metni seçip Ctrl+Shift+' + PANO_SIRA[i] + ').'); return; }
+        if (!m) { kisaBildirim('Pano ' + PANO_SIRA[i] + ' boş (kaydetmek için metni seçip Alt+Shift+' + PANO_SIRA[i] + ').'); return; }
         alanaYaz(a, m);
     }
+    // Armonia Yazı penceresi (enjekte/yazi.js) aynı gözleri editör çerçevesinde kullanır.
+    window.__uyapCokluPano = { oku: function() { return panoOku(); }, kaydet: function(i, m) { panoKaydet(i, m); } };
     function panoGruplari(alan, kaydedilecek, kaydetBasligi) {
         const l = panoOku(), g = [];
         if (kaydedilecek) {
-            g.push([kaydetBasligi || 'Çoklu panoya kaydet · Ctrl+Shift+1…0', null]);
+            g.push([kaydetBasligi || 'Çoklu panoya kaydet · Alt+Shift+1…0', null]);
             g.push({ sira: PANO_SIRA.map(function(n, i) {
                 return [n, function() { panoKaydet(i, kaydedilecek); }, n + ': ' + (l[i] ? panoOnizleme(l[i]) + ' (üzerine yazılır)' : 'boş'), !!l[i]];
             }) });
         }
         if (alan && l.some(Boolean)) {
-            g.push(['Çoklu panodan yapıştır · Ctrl+1…0', null]);
+            g.push(['Çoklu panodan yapıştır · Alt+1…0', null]);
             g.push({ sira: PANO_SIRA.map(function(n, i) {
                 return [n, l[i] ? function() { panoYapistir(i, alan); } : null, n + ': ' + (l[i] ? panoOnizleme(l[i]) : 'boş'), !!l[i]];
             }) });
@@ -5810,11 +5815,19 @@ const INLINE_INJECT_SCRIPT: &str = r#####"<script>
         if (g.length && l.some(Boolean)) g.push(['Çoklu panoyu temizle', function() { panoYaz([]); kisaBildirim('Çoklu pano temizlendi.'); }]);
         return g.length ? [g] : [];
     }
+    // Ctrl+N / Alt+N (bkz. yukarı). Armonia Yazı penceresi aynı kuralı çerçevede uygular (panoTusu).
+    function panoKisayolu(ev) {
+        const ctrl = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
+        const alt = ev.altKey && !ev.ctrlKey && !ev.metaKey;
+        if (!ctrl && !alt) return null;
+        const m = (alt ? /^Digit([0-9])$/ : /^(?:Digit|Numpad)([0-9])$/).exec(ev.code || '');
+        return m ? m[1] : null;
+    }
+    window.__uyapPanoKisayolu = panoKisayolu;
     window.addEventListener('keydown', function(ev) {
-        if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
-        const m = /^(?:Digit|Numpad)([0-9])$/.exec(ev.code || '');
-        if (!m) return;
-        const i = PANO_SIRA.indexOf(m[1]);
+        const n = panoKisayolu(ev);
+        if (!n) return;
+        const i = PANO_SIRA.indexOf(n);
         const ae = document.activeElement;
         if (ev.shiftKey) {
             const belge = sonBelgeHedefi && sonBelgeHedefi.isConnected ? belgeSecimi(sonBelgeHedefi) : '';
@@ -5922,6 +5935,7 @@ const _EK_BETIK_DOSYALARI: &[&str] = &[
     "isler.js",
     "paylas.js",
     "guncelleme.js",
+    "yazi.js",
 ];
 // armonia-renk.css: UYAP stilindeki lacivert/gri renkleri tema değişkenlerimize bağlayan, araclar/renk_uret.py ile
 // üretilen katman (2026-11-14). tema.css'ten önce gelir: elle ince ayarlar eşit özgüllükte kazanır.
@@ -6852,9 +6866,28 @@ async fn yerel_giris_kodu(
 /// Sayfadaki "Paylaş" düğmesi için: gövdedeki UDF baytlarını bu bilgisayarda PDF'e çevirip döner.
 /// Hiçbir yere gönderilmez, saklanmaz; yalnız oturumu açık sayfa çağırabilir.
 async fn udf_pdf_cevir(
+    st: axum::extract::State<AppRuntimeState>,
+    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    req: AxumRequest,
+) -> Response {
+    udf_isle(st, connect_info, req, false).await
+}
+
+/// "UDF İndir" için: portal belgesindeki alan adlarının yerine değerleri yerleştirilmiş kopya (udf_alan.rs).
+/// Doldurulacak alan yoksa 204 (sayfa asıl dosyayı kullanır).
+async fn udf_doldur_cevir(
+    st: axum::extract::State<AppRuntimeState>,
+    connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    req: AxumRequest,
+) -> Response {
+    udf_isle(st, connect_info, req, true).await
+}
+
+async fn udf_isle(
     axum::extract::State(state): axum::extract::State<AppRuntimeState>,
     connect_info: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     req: AxumRequest,
+    doldur: bool,
 ) -> Response {
     let client_host = resolve_client_host(&state, connect_info.as_ref());
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
@@ -6875,6 +6908,19 @@ async fn udf_pdf_cevir(
     };
     if !crate::udf_pdf::udf_zip_mi(&govde) {
         return hata(StatusCode::UNSUPPORTED_MEDIA_TYPE, "UDF değil.");
+    }
+    if doldur {
+        return match tokio::task::spawn_blocking(move || crate::udf_alan::doldur(&govde)).await {
+            Ok(Ok(Some(udf))) => Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/octet-stream")
+                .header("Cache-Control", "no-store")
+                .body(Body::from(udf))
+                .unwrap(),
+            Ok(Ok(None)) => Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap(),
+            Ok(Err(e)) => hata(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            Err(_) => hata(StatusCode::INTERNAL_SERVER_ERROR, "İşlem yarıda kaldı."),
+        };
     }
     match tokio::task::spawn_blocking(move || crate::udf_pdf::udf_pdf_uret(&govde)).await {
         Ok(Ok(pdf)) => Response::builder()
@@ -7261,6 +7307,12 @@ async fn proxy_handler(
         return json(StatusCode::OK, crate::guncelleme::durum_json());
     }
 
+    // Armonia Yazı editörü (2026-11-23, src/yazi_sunucu.rs): açılır penceredeki çerçeve buradan yüklenir.
+    if crate::yazi_sunucu::is_path(&full_path) {
+        let (status, out_headers, out_body) = crate::yazi_sunucu::yanit(method.as_str(), &full_path);
+        return tuple_to_axum_response(status, out_headers, out_body);
+    }
+
     // İş Listesi (büro veritabanı, kişiye göre): icra_api'den ÖNCE (aynı ön ek).
     if crate::is_api::is_path(&full_path) {
         let capraz = req_headers_axum
@@ -7499,6 +7551,7 @@ pub fn build_app(state: AppRuntimeState) -> Router {
         .route("/__uyap_yerel__/kod", post(yerel_giris_kodu))
         .route("/__uyap_yerel__/giris", get(yerel_giris))
         .route("/__uyap_yerel__/udf_pdf", post(udf_pdf_cevir))
+        .route("/__uyap_yerel__/udf_doldur", post(udf_doldur_cevir))
         .route("/__uyap_yerel__/paylas", post(yerel_paylas))
         .route("/__uyap_lan__/giris", get(lan_giris_formu).post(lan_giris))
         .route("/", any(proxy_handler))

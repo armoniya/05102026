@@ -350,7 +350,7 @@
 
     // Birden çok kaynak girdi verir (kartlar.js: dosya kartları, icra.js: İcra Takip Süreçleri sayfası); her kaynak
     // kendi listesini bütünüyle yeniler. Çubukta sıra: önce sayfalar ('icra'), sonra dosya kartları.
-    const kaynaklar = {}, KAYNAK_SIRA = ['guncelleme', 'isler', 'icra', 'kart'];
+    const kaynaklar = {}, KAYNAK_SIRA = ['guncelleme', 'isler', 'icra', 'yazi', 'kart'];
     window.CU = {
         gorev: { ayarla: function(liste, kaynak) {
             kaynaklar[kaynak || 'kart'] = liste || [];
