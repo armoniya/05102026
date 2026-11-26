@@ -74,6 +74,7 @@ pub mod icra_tarama;
 pub mod icra_durum;
 pub mod icra_api;
 pub mod iban;
+pub mod oturum_al;
 pub mod is_veri;
 pub mod icra_aktar;
 pub mod is_aktar;
